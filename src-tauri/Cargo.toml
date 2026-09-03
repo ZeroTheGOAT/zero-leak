@@ -1,0 +1,95 @@
+[package]
+name = "servergen-ai"
+version = "0.1.0"
+description = "Servergen AI - a local-only agentic workflow workstation for confidential document, code and drawing work"
+authors = ["Hari Prasad"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4.45"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "fs"] }
+futures-util = "0.3"
+
+# Bundled SQLite so the plant workstation needs nothing preinstalled.
+# libsqlite3-sys's bundled build enables FTS5, JSON1 and RTREE.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# native-tls on Windows is SChannel, already in the OS. Deliberately NOT
+# rustls: its default provider (aws-lc-rs) wants cmake and nasm at build time,
+# and a build dependency that can fail is a reliability problem.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "native-tls"] }
+
+uuid = { version = "1", features = ["v4"] }
+sysinfo = "0.33"
+walkdir = "2"
+sha2 = "0.10"
+base64 = "0.22"
+notify = "8"
+winreg = "0.52"
+zip = "8.6.0"
+quick-xml = "0.42.0"
+calamine = "0.36.1"
+rust_xlsxwriter = "0.99.0"
+docx-rs = "0.4.22"
+printpdf = "0.12.7"
+pdf-extract = "0.12.0"
+lopdf = "0.44.0"
+image = "0.25.10"
+similar = "3.2.0"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+] }
+
+# Embedding the frontend is gated on a feature, not on the release profile.
+#
+# `generate_context!` expands differently depending on `custom-protocol`: with it,
+# the built `dist/` is compiled into the executable; without it, the binary
+# expects a Vite dev server at `devUrl`. `tauri build` passes the feature, a bare
+# `cargo build --release` does not — so a "release" binary without this
+# declaration embeds nothing at all, and says nothing about it until something
+# asks for an asset. The desktop window fails visibly (a blank page pointing at a
+# dev server that is not running); the HTTP transport in `web.rs` falls through to
+# its disk fallback and then to a 503. Both were reachable before this existed.
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+# Release builds are what a plant workstation actually runs, so optimise for
+# that rather than for compile time.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+# Unwinding, deliberately, despite the size cost.
+#
+# `pdf-extract` reaches `panic!()` in 31 places and `unwrap()` in 42 more, on
+# paths that a real document set hits: an unexpected font encoding, a glyph with
+# no declared width, a cmap it does not recognise. `calamine`, `zip`, `lopdf` and
+# `image` have narrower but similar exposure. Those crates parse whatever a plant
+# archive happens to contain, and none of it was written to be well-formed for us.
+#
+# With `panic = "abort"` any one of those ends the process — losing the model that
+# was resident, the run in progress and the browser sessions attached to it,
+# because of one bad file. Unwinding lets `documents::guard` turn the same event
+# into a refusal naming the file. The cost is unwind tables in a binary optimised
+# for size; the alternative is a document workbench that a document can kill.
+panic = "unwind"
+strip = true

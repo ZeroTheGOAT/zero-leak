@@ -1,0 +1,189 @@
+/*
+ * UI theme adapted from Nerve (Apache-2.0), commit
+ * 265be58524a4c065941ffba949196b45c9ac4714. See THIRD_PARTY_NOTICES.md.
+ */
+@import '@fontsource/outfit/400.css';
+@import '@fontsource/outfit/500.css';
+@import '@fontsource/outfit/600.css';
+@import '@fontsource/outfit/700.css';
+@import '@fontsource/iosevka/400.css';
+@import '@fontsource/iosevka/500.css';
+@import './nerve-theme.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --font-sans: "Outfit", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Iosevka", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  letter-spacing: var(--tracking-normal);
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  overflow: hidden;
+  user-select: none;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ring) 70%, transparent);
+  outline-offset: 1px;
+}
+
+/* Custom Sleek Dark Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--border);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  background-clip: padding-box;
+}
+
+/* Textarea styling */
+textarea {
+  user-select: text;
+}
+
+code, pre {
+  user-select: text;
+  font-family: var(--font-mono);
+}
+
+.font-mono {
+  font-family: var(--font-mono) !important;
+}
+
+.servergen-shell {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.nerve-card {
+  background: var(--card);
+  color: var(--card-foreground);
+}
+
+.nerve-muted {
+  color: var(--muted-foreground);
+}
+
+.nerve-border {
+  border-color: var(--border);
+}
+
+.composer-tab {
+  display: inline-flex;
+  height: 1.55rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  padding: 0 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.composer-tab:hover:not(:disabled),
+.composer-tab[data-state='open'] {
+  border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.servergen-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.servergen-primary:hover {
+  filter: brightness(1.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* Popover & Floating animations */
+@keyframes fadeInScale {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-popover {
+  animation: fadeInScale 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 10px rgba(16, 163, 127, 0.4));
+  }
+}
+
+.animate-glow {
+  animation: pulseGlow 2.5s infinite ease-in-out;
+}
