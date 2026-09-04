@@ -974,6 +974,15 @@ export const SettingsView: React.FC = () => {
               </>
             )}
           </Section>
+          <Section
+            id="attribution"
+            title="Audit attribution"
+            description="The operator account every tool call is stamped with from now on. Rows written before attribution are left unclaimed rather than backfilled with a guess — the audit table must never contain invented data."
+          >
+            <Row label="Operator identity">
+              <span className="font-mono text-xs text-[var(--foreground)]">{sovereign.operator}</span>
+            </Row>
+          </Section>
           <Section id="egress" title="Egress" description="Bytes counted by the guard itself, not by what the application believes it sent.">
             <Row label="Public internet" description="Must remain zero on an air-gapped workstation.">
               <span className={sovereign.publicInternetBytes === 0 ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--destructive)]'}>

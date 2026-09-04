@@ -368,6 +368,18 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX previews_workspace ON previews(workspace_id);
     "#,
+    // ---- 9: which operator account made each tool call ----------------
+    //
+    // §13 records one row per tool call, allowed or denied. The store is
+    // single-operator by design, but an audit trail has to say *which* account,
+    // and a row with no operator is a hole an auditor cannot defend — the
+    // question "who approved this write" has no answer. Nullable because rows
+    // written before this migration genuinely do not know, and backfilling
+    // them with a guess would put invented data in the one table that has to
+    // be defensible.
+    r#"
+    ALTER TABLE audit ADD COLUMN operator TEXT;
+    "#,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1593,8 +1605,8 @@ pub fn record_tool_call(
     session_id: Option<&str>,
 ) -> CoreResult<()> {
     conn.execute(
-        "INSERT INTO audit (id, tool, args_summary, status, started_at, duration_ms, workspace_id, run_id, session_id, error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO audit (id, tool, args_summary, status, started_at, duration_ms, workspace_id, run_id, session_id, operator, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             rec.id,
             serde_json::to_value(rec.tool)?.as_str().unwrap_or_default(),
@@ -1605,6 +1617,7 @@ pub fn record_tool_call(
             rec.workspace_id,
             run_id,
             session_id,
+            rec.operator.as_deref(),
             rec.error,
         ],
     )?;
@@ -1613,7 +1626,7 @@ pub fn record_tool_call(
 
 pub fn audit_page(conn: &Connection, limit: u32, offset: u32) -> CoreResult<Vec<ToolCallRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, tool, args_summary, status, started_at, duration_ms, workspace_id, error
+        "SELECT id, tool, args_summary, status, started_at, duration_ms, workspace_id, operator, error
          FROM audit ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt
@@ -1628,7 +1641,8 @@ pub fn audit_page(conn: &Connection, limit: u32, offset: u32) -> CoreResult<Vec<
                 started_at: r.get(4)?,
                 duration_ms: r.get::<_, i64>(5)?.max(0) as u64,
                 workspace_id: r.get(6)?,
-                error: r.get(7)?,
+                operator: r.get(7)?,
+                error: r.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2610,6 +2624,66 @@ mod conversation {
             add_message(&c, "ghost", "user", "hello", &MessageExtra::default(), 1).is_err(),
             "the foreign key is what keeps orphan turns out of the store"
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_trail {
+    use super::*;
+
+    fn store() -> Connection {
+        let conn = Connection::open_in_memory().expect("an in-memory store opens");
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate(&conn).expect("the migrations apply to an empty store");
+        conn
+    }
+
+    #[test]
+    fn the_operator_is_attributed_to_the_audit_row() {
+        let c = store();
+        let rec = ToolCallRecord {
+            id: "tc_1".into(),
+            tool: ToolName::ReadFile,
+            args_summary: "read secret-1.pdf".into(),
+            status: "ok".into(),
+            started_at: 1000,
+            duration_ms: 5,
+            workspace_id: "ws1".into(),
+            operator: Some("MRPL\\operator".into()),
+            error: None,
+        };
+        record_tool_call(&c, &rec, Some("run_1"), Some("sess_1")).expect("the call is recorded");
+
+        let page = audit_page(&c, 50, 0).expect("the page reads back");
+        assert_eq!(page.len(), 1);
+        let row = &page[0];
+        assert_eq!(row.id, "tc_1");
+        assert_eq!(row.operator.as_deref(), Some("MRPL\\operator"));
+        assert_eq!(row.tool, ToolName::ReadFile);
+    }
+
+    #[test]
+    fn a_row_written_before_attribution_has_a_null_operator() {
+        let c = store();
+        // Rows that predate the operator migration genuinely do not know who
+        // ran them; backfilling a guess would invent data in the one table
+        // that has to be defensible. They must round-trip as `None`, not as a
+        // fabricated account.
+        let rec = ToolCallRecord {
+            id: "tc_old".into(),
+            tool: ToolName::ReadFile,
+            args_summary: "read legacy.pdf".into(),
+            status: "ok".into(),
+            started_at: 1,
+            duration_ms: 5,
+            workspace_id: "ws1".into(),
+            operator: None,
+            error: None,
+        };
+        record_tool_call(&c, &rec, None, None).expect("the call is recorded");
+
+        let page = audit_page(&c, 50, 0).expect("the page reads back");
+        assert_eq!(page[0].operator, None);
     }
 }
 

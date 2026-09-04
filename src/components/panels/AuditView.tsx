@@ -90,6 +90,10 @@ export const AuditView: React.FC = () => {
             ? `${formatBytes(sovereign.publicInternetBytes)} received by enabled web search`
             : '0 to any public service'}
         </p>
+        <p className="text-[10px] text-[var(--muted-foreground)] mt-0.5 tabular-nums">
+          Every call attributed to{' '}
+          <span className="text-[var(--foreground)]">{sovereign.operator}</span>
+        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -132,9 +136,15 @@ export const AuditView: React.FC = () => {
                       {r.error}
                     </p>
                   )}
-                  {ws && (
+                  {(r.operator || ws) && (
                     <p className="text-[10px] text-[var(--input)] mt-0.5 ml-[52px] truncate">
-                      {ws.path}
+                      {r.operator && (
+                        <>
+                          by <span className="text-[var(--muted-foreground)]">{r.operator}</span>
+                        </>
+                      )}
+                      {r.operator && ws && <span> · </span>}
+                      {ws && <span>{ws.path}</span>}
                     </p>
                   )}
                 </div>

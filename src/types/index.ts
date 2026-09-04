@@ -14,6 +14,8 @@
 export type TrafficZone = 'this_device' | 'private_server' | 'public_internet';
 
 export interface SovereignStatus {
+  /** The operator account the core is attributing audit rows to (`DOMAIN\user`). */
+  operator: string;
   /** Bytes sent to any host outside the organisation. Must remain 0. */
   publicInternetBytes: number;
   /** Bytes exchanged with an approved on-prem inference server. */
@@ -412,6 +414,8 @@ export interface ToolCallRecord {
   startedAt: number;
   durationMs: number;
   workspaceId: string;
+  /** The operator account that made the call. Absent on pre-attribution rows. */
+  operator?: string;
   error?: string;
 }
 

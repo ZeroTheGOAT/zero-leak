@@ -251,6 +251,7 @@ const EMPTY_HARDWARE: HardwareStatus = {
 };
 
 const EMPTY_SOVEREIGN: SovereignStatus = {
+  operator: 'unknown-operator',
   publicInternetBytes: 0,
   privateServerBytes: 0,
   deviceRequests: 0,

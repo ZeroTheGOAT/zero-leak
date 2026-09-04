@@ -31,6 +31,26 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// The operator account this instance runs as, `DOMAIN\user` on Windows.
+///
+/// Read from the environment so it is the account the process actually runs
+/// under (the interactive user, or the service account in a managed
+/// deployment), and so it costs nothing at construction. It is captured once
+/// into `AppState` and stamped onto every audit row: an audit trail that says
+/// a write happened but not who was operating when it did cannot answer the
+/// one question an auditor asks first.
+pub fn operator_id() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+    if user.is_empty() {
+        "unknown-operator".to_string()
+    } else if domain.is_empty() {
+        user
+    } else {
+        format!("{domain}\\{user}")
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Network classification                                              */
 /* ------------------------------------------------------------------ */
@@ -220,6 +240,13 @@ pub struct PendingRun {
 pub struct AppState {
     pub app: AppHandle,
 
+    /// The operator account this process runs under, `DOMAIN\user` — or
+    /// `unknown-operator` if the environment does not say. Captured once at
+    /// startup and stamped onto every audit row so the trail answers *who* was
+    /// operating when a tool call happened (§13). Held on state rather than
+    /// recomputed per call because it cannot change within a process lifetime.
+    pub operator: String,
+
     /// Held behind a std mutex, never across an await. `with_db` enforces that:
     /// the guard cannot escape the closure.
     db: Mutex<Connection>,
@@ -340,6 +367,7 @@ impl AppState {
 
         Ok(Self {
             app,
+            operator: operator_id(),
             db: Mutex::new(conn),
             settings: RwLock::new(settings),
             registry: RwLock::new(registry),
@@ -508,6 +536,7 @@ impl AppState {
         let s = self.settings();
         let (public, private, device, private_req) = self.with_db(crate::db::egress)?;
         Ok(SovereignStatus {
+            operator: self.operator.clone(),
             public_internet_bytes: public,
             private_server_bytes: private,
             device_requests: device,
@@ -548,6 +577,7 @@ impl AppState {
             started_at,
             duration_ms: (now_ms() - started_at).max(0) as u64,
             workspace_id: workspace_id.to_string(),
+            operator: Some(self.operator.clone()),
             error,
         };
         let _ = self.with_db(|conn| crate::db::record_tool_call(conn, &rec, run_id, session_id));
@@ -753,6 +783,28 @@ say plainly in your answer which part you were unable to confirm."
         let mut g = self.session_grants.write().expect("grants lock");
         if !g.contains(&tool) {
             g.push(tool);
+        }
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use std::env;
+
+    #[test]
+    fn operator_id_names_the_windows_account() {
+        let id = super::operator_id();
+        let user = env::var("USERNAME").unwrap_or_default();
+        if user.is_empty() {
+            // No account in the environment: the fallback must say so plainly,
+            // never a blank or a raw uuid that an auditor could not chase.
+            assert_eq!(id, "unknown-operator");
+        } else {
+            // Either `DOMAIN\user` or a bare `user` — but it must name the
+            // account we actually run as.
+            assert!(!id.is_empty());
+            assert!(id.ends_with(&user), "operator id must end in the user name: {id}");
+            assert!(id.contains('\\') || id == user, "operator id must be DOMAIN\\user or bare user: {id}");
         }
     }
 }

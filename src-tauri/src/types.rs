@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SovereignStatus {
+    /// The operator account this instance runs as (`DOMAIN\user`). Shown on
+    /// the Sovereignty panel so the operator sees, up front, whose account the
+    /// audit trail will attribute work to.
+    pub operator: String,
     pub public_internet_bytes: u64,
     pub private_server_bytes: u64,
     pub device_requests: u64,
@@ -302,6 +306,11 @@ pub struct ToolCallRecord {
     pub started_at: i64,
     pub duration_ms: u64,
     pub workspace_id: String,
+    /// The operator account whose action this row records — the Windows
+    /// `DOMAIN\user` the instance runs as. `None` only for rows written before
+    /// the column existed; everything since is attributable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
