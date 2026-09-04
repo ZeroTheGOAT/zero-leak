@@ -16,9 +16,54 @@ export interface TranscriptionStatus {
   detail: string;
 }
 
+/**
+ * The dictation languages offered, and the exact `--language` value each one
+ * sends to whisper.cpp.
+ *
+ * The menu and the wire value are one list on purpose. The Settings menu used to
+ * offer "Auto detect", "English", "Hindi" and "Multilingual" as display strings
+ * that the core then had to recognise by name; it mapped two of them and let the
+ * other two fall through to omitting the flag — which whisper.cpp reads as
+ * English, not as detect-it (`-l LANG [en] spoken language ('auto' for
+ * auto-detect)`). Hindi dictation came back as English-sounding nonsense.
+ *
+ * "Multilingual" is gone rather than fixed: whisper.cpp decodes one language per
+ * run, so there was never a behaviour distinct from auto-detect for it to name.
+ * Codes and names were read out of the installed `whisper.dll` language table,
+ * which carries all 98 of them; these are the ones this deployment dictates in.
+ */
+export const TRANSCRIPTION_LANGUAGES: ReadonlyArray<{ code: string; label: string }> = [
+  { code: 'auto', label: 'Auto detect' },
+  { code: 'en', label: 'English' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'kn', label: 'Kannada' },
+  { code: 'ta', label: 'Tamil' },
+  { code: 'te', label: 'Telugu' },
+  { code: 'ml', label: 'Malayalam' },
+  { code: 'mr', label: 'Marathi' },
+  { code: 'bn', label: 'Bengali' },
+  { code: 'gu', label: 'Gujarati' },
+  { code: 'pa', label: 'Punjabi' },
+  { code: 'ur', label: 'Urdu' },
+  { code: 'as', label: 'Assamese' },
+  { code: 'ne', label: 'Nepali' },
+  { code: 'sa', label: 'Sanskrit' },
+];
+
+/**
+ * Resolve any stored selection to a code in the list above, so a preference
+ * written by an older build ("Auto detect", "Multilingual") still selects
+ * something the menu can show and the core can pass through.
+ */
+export function languageCode(value: string): string {
+  const wanted = value.trim().toLowerCase();
+  const match = TRANSCRIPTION_LANGUAGES.find((entry) => entry.code === wanted || entry.label.toLowerCase() === wanted);
+  return match?.code ?? 'auto';
+}
+
 const DEFAULTS: TranscriptionPreferences = {
   modelId: 'whisper.cpp-base',
-  language: 'Auto detect',
+  language: 'auto',
   vocabulary: '',
 };
 
@@ -28,7 +73,7 @@ export function transcriptionPreferences(): TranscriptionPreferences {
     const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY) ?? '{}') as Record<string, unknown>;
     return {
       modelId: typeof stored.transcriptionModel === 'string' ? stored.transcriptionModel : DEFAULTS.modelId,
-      language: typeof stored.transcriptionLanguage === 'string' ? stored.transcriptionLanguage : DEFAULTS.language,
+      language: languageCode(typeof stored.transcriptionLanguage === 'string' ? stored.transcriptionLanguage : DEFAULTS.language),
       vocabulary: typeof stored.transcriptionVocabulary === 'string' ? stored.transcriptionVocabulary : DEFAULTS.vocabulary,
     };
   } catch {

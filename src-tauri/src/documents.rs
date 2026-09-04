@@ -131,7 +131,40 @@ fn ext_of(path: &str) -> String {
 /// The letter group is checked against the ISA function letters rather than
 /// accepted blindly, because otherwise every hyphenated word in the document —
 /// `pre-2019`, `ANSI-150` — arrives as equipment.
-fn extract_tags(text: &str) -> Vec<String> {
+///
+/// Shared with `agent.rs`, which asks the same question of text going the other
+/// way: whether a file the model is about to write names plant equipment. One
+/// definition of "this is a tag", tested in one place, answers both.
+/// Standards whose number names a computing format rather than a plant code.
+///
+/// `ISO 8601` is a date format, `ISO 8859` a character encoding, `IEEE 754` the
+/// float everything on this machine uses. None of them is equipment and none is
+/// a statement a plant document is the source for, so a script that formats a
+/// timestamp must not come back as an entity called `ISO-8601` or hold a write
+/// with a refusal about plant readings.
+///
+/// Only formats. The plant standards this must never touch — `API 570`,
+/// `ISO 4287` surface roughness, `IS 2062` steel, `IEC 61511` safety systems —
+/// are deliberately absent, and the numbers listed are exact so a neighbouring
+/// standard is not swept up with them.
+pub(crate) fn is_format_standard(body: &str, number: &str) -> bool {
+    matches!(
+        (body, number),
+        ("ISO", "8601")
+            | ("ISO", "8859")
+            | ("ISO", "10646")
+            | ("ISO", "639")
+            | ("ISO", "3166")
+            | ("ISO", "4217")
+            | ("ISO", "216")
+            | ("IEEE", "754")
+            | ("IEEE", "802")
+            | ("IEC", "60559")
+            | ("ANSI", "378")
+    )
+}
+
+pub(crate) fn extract_tags(text: &str) -> Vec<String> {
     // ISA 5.1 first letters (measured variable) and common equipment prefixes
     // used on Indian refinery drawings.
     const KNOWN: &[&str] = &[
@@ -224,6 +257,13 @@ fn extract_tags(text: &str) -> Vec<String> {
         {
             suffix.push(bytes[k]);
             k += 1;
+        }
+
+        // `ISO 8601` is a date format, not an isometric drawing. The prefix is
+        // shared and only the number tells them apart.
+        if is_format_standard(&letters, &digits) {
+            i = k;
+            continue;
         }
 
         let tag = format!("{unit}{letters}-{digits}{suffix}");
@@ -626,7 +666,10 @@ fn xlsx_extract(path: &Path, only_sheet: Option<&str>) -> CoreResult<(Vec<DocBlo
 }
 
 /// Spreadsheet column index to its letters — 0 becomes A, 26 becomes AA.
-fn column_letter(mut i: usize) -> String {
+///
+/// Shared with `artifacts::write_workbook`, so a cell the operator is told about
+/// is addressed the same way whether the workbook was being read or written.
+pub(crate) fn column_letter(mut i: usize) -> String {
     let mut out = Vec::new();
     loop {
         out.push(b'A' + (i % 26) as u8);
@@ -639,24 +682,133 @@ fn column_letter(mut i: usize) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// Takes the field built so far, and resets the state for the next one.
+///
+/// A quoted field keeps its spaces exactly as written; an unquoted one is
+/// trimmed, because exports written by hand space their delimiters
+/// (`Elbow , 4.8`) and nobody means that space to be part of the value.
+fn csv_field(field: &mut String, quoted: &mut bool) -> String {
+    let v = std::mem::take(field);
+    let v = if *quoted { v } else { v.trim().to_string() };
+    *quoted = false;
+    v
+}
+
+/// One record, and the index the next one starts at.
+///
+/// RFC 4180 rather than `split(delim)`: a quoted field may hold the delimiter, a
+/// line break, or a doubled quote standing for one quote. Splitting instead moved
+/// every value after a field like `"Elbow, downstream"` one column left —
+/// silently, so an inspection table was read as valid with the readings sitting
+/// under the wrong headings, which is worse than failing to read the file at all.
+///
+/// A quote only opens a quoted field at the start of one. Anywhere else it is the
+/// character it looks like: `6" CS line` is a diameter in inches, and treating
+/// that mark as an opening quote swallowed the rest of the row into one cell.
+fn csv_record(c: &[char], from: usize, delim: char) -> (Vec<String>, usize) {
+    let n = c.len();
+    let mut fields: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut i = from;
+    while i < n {
+        let ch = c[i];
+        if ch == '"' && field.trim().is_empty() {
+            // Whitespace ahead of the opening quote is not data.
+            field.clear();
+            quoted = true;
+            i += 1;
+            while i < n {
+                if c[i] == '"' {
+                    // A doubled quote is one quote; a single one closes the field.
+                    if i + 1 < n && c[i + 1] == '"' {
+                        field.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                field.push(c[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if ch == delim {
+            fields.push(csv_field(&mut field, &mut quoted));
+            i += 1;
+            continue;
+        }
+        if ch == '\n' || ch == '\r' {
+            // CRLF, LF or a lone CR — one record ends on any of them.
+            i += 1;
+            if ch == '\r' && i < n && c[i] == '\n' {
+                i += 1;
+            }
+            break;
+        }
+        field.push(ch);
+        i += 1;
+    }
+    fields.push(csv_field(&mut field, &mut quoted));
+    (fields, i)
+}
+
+/// Every record in the text, blank lines dropped.
+fn csv_rows(text: &str, delim: char) -> Vec<Vec<String>> {
+    let c: Vec<char> = text.chars().collect();
+    // Excel writes a byte-order mark ahead of the first heading, and U+FEFF is
+    // not whitespace, so `trim` never removed it: the first column came out named
+    // with an invisible character in front of it and every lookup by heading —
+    // `header_col(t, "tag")`, the sheet-name match — missed it.
+    let mut i = usize::from(c.first() == Some(&'\u{feff}'));
+    let mut rows = Vec::new();
+    while i < c.len() {
+        let (row, next) = csv_record(&c, i, delim);
+        i = next;
+        // A blank line is not a row. A row whose later columns are empty is.
+        if row.iter().any(|f| !f.is_empty()) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// Which character separates the fields.
+///
+/// Indian plant exports are as often semicolon- or tab-separated as
+/// comma-separated, and guessing comma unconditionally turns a whole row into one
+/// cell. Counting raw occurrences guessed wrong the other way: one comma inside a
+/// quoted heading of a semicolon-separated file outvoted the semicolons. So each
+/// candidate is actually parsed, and the one that gives every record the same
+/// number of fields wins — a delimiter that only appears inside some text cannot
+/// do that.
+fn csv_delimiter(text: &str) -> char {
+    // A sample, so a large export is not parsed three times end to end, cut at a
+    // record boundary so a half-read last line does not look ragged.
+    let head: String = text.chars().take(64 * 1024).collect();
+    let head = match head.rfind('\n') {
+        Some(k) if head.len() < text.len() => head[..k].to_string(),
+        _ => head,
+    };
+
+    let mut best = (',', 0usize);
+    for delim in [',', ';', '\t'] {
+        let rows: Vec<Vec<String>> = csv_rows(&head, delim).into_iter().take(8).collect();
+        let Some(width) = rows.first().map(|r| r.len()).filter(|w| *w > 1) else {
+            continue;
+        };
+        let consistent = rows.iter().all(|r| r.len() == width);
+        let score = if consistent { width * 100 } else { width };
+        if score > best.1 {
+            best = (delim, score);
+        }
+    }
+    best.0
+}
+
 fn csv_extract(text: &str) -> (Vec<DocBlock>, Vec<DocTable>) {
-    // Delimiter by frequency on the first line. Indian plant exports are as
-    // often semicolon- or tab-separated as comma-separated, and guessing comma
-    // unconditionally turns a whole row into one cell.
-    let first = text.lines().next().unwrap_or("");
-    let delim = [(',', first.matches(',').count()), (';', first.matches(';').count()), ('\t', first.matches('\t').count())]
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .filter(|(_, n)| *n > 0)
-        .map(|(d, _)| d)
-        .unwrap_or(',');
-
-    let mut rows: Vec<Vec<String>> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split(delim).map(|c| c.trim().trim_matches('"').to_string()).collect())
-        .collect();
-
+    let mut rows = csv_rows(text, csv_delimiter(text));
     let header = if rows.is_empty() { Vec::new() } else { rows.remove(0) };
     let table = DocTable { id: new_id("tbl"), page: 1, bbox: full_page_box(1), header, rows };
     (vec![], vec![table])
@@ -1565,6 +1717,44 @@ fn kind_label(kind: DocumentKind) -> &'static str {
     }
 }
 
+/// Why a page transcription cannot be trusted, or `None` if it can.
+///
+/// There is no confidence number to threshold against: `router::vision` returns
+/// text, and llama.cpp's OCR path exposes no per-token probability. What there is
+/// is the shape of a failed read — a handful of characters for a whole page, or a
+/// page that came back mostly as punctuation and replacement characters because
+/// the model could not resolve the glyphs. PaddleOCR-VL fails that way on
+/// handwriting: it is a printed-text reader, and asked to read a hand-filled log
+/// sheet it returns a few fragments rather than an error.
+///
+/// So the §3 escalation is written against the shape and says so. Calling this
+/// "confidence below threshold" would imply a number the pipeline does not have.
+fn unreadable(text: &str) -> Option<String> {
+    /// Below this, a full page has not been read. A near-empty page of a scanned
+    /// document does exist — a divider, a stamp — and costs one extra pass.
+    const MIN_CHARS: usize = 24;
+    /// Below this proportion of letters and digits, what came back is noise.
+    const MIN_ALNUM: f32 = 0.55;
+
+    let solid: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if solid.len() < MIN_CHARS {
+        return Some(format!(
+            "only {} characters came back for the whole page",
+            solid.len()
+        ));
+    }
+    if solid.contains(&char::REPLACEMENT_CHARACTER) {
+        return Some("the transcription contains characters the model could not resolve".into());
+    }
+    let alnum = solid.iter().filter(|c| c.is_alphanumeric()).count() as f32 / solid.len() as f32;
+    (alnum < MIN_ALNUM).then(|| {
+        format!(
+            "only {}% of what came back is letters or digits, so the page was not read",
+            (alnum * 100.0).round() as u32
+        )
+    })
+}
+
 /// Transcribes pages with a vision model, one call per page.
 ///
 /// One page per call rather than a batch: the models here take a single image
@@ -1572,6 +1762,12 @@ fn kind_label(kind: DocumentKind) -> &'static str {
 /// guesswork once two pages are in one reply, and a failure on page nine should
 /// not lose pages one to eight. The cost is more round trips to a server on
 /// loopback, which is not a cost.
+///
+/// A page the primary could not read is tried once more with the rule's fallback
+/// — see `Registry::escalation` and `unreadable`. Both passes are in the step
+/// stream under their own model names, because "this page was read by olmOCR
+/// after PaddleOCR could not" is exactly the provenance an inspection record
+/// needs to carry.
 async fn ocr_pages(
     st: &AppState,
     model_id: &str,
@@ -1583,8 +1779,12 @@ async fn ocr_pages(
     let mut blocks = Vec::new();
     let mut tables = Vec::new();
     let mut failures = Vec::new();
+    // Pages the primary read too thinly to keep, with the reason, held for one
+    // escalation pass.
+    let mut thin: Vec<(u32, String)> = Vec::new();
 
-    for (page_no, png) in pages {
+    for (page_no, png) in &pages {
+        let page_no = *page_no;
         let step = Step::start(
             st,
             if matches!(kind, DocumentKind::Photograph | DocumentKind::Drawing) {
@@ -1596,10 +1796,18 @@ async fn ocr_pages(
         )
         .model(Some(model_id.to_string()));
 
-        match crate::router::vision(st, model_id, vec![png], &prompt).await {
+        match crate::router::vision(st, model_id, vec![png.clone()], &prompt).await {
             Ok(text) if text.trim().is_empty() => {
                 step.detail("The model returned nothing for this page.").skip(st);
-                failures.push(format!("page {page_no} came back empty"));
+                thin.push((page_no, "the model returned nothing".to_string()));
+            }
+            // Too thin to keep: held for the escalation pass rather than counted
+            // as read, because a page of fragments in an inspection record is
+            // worse than a page the operator is told was not transcribed.
+            Ok(text) if unreadable(&text).is_some() => {
+                let why = unreadable(&text).unwrap_or_default();
+                step.detail(format!("Not usable: {why}.")).skip(st);
+                thin.push((page_no, why));
             }
             Ok(text) => {
                 let (b, t) = split_ocr(page_no, &text, kind);
@@ -1619,7 +1827,74 @@ async fn ocr_pages(
                 // One bad page does not fail the document. The pages that were
                 // read are worth having, and the ones that were not are named.
                 step.fail(st, &e.to_string());
-                failures.push(format!("page {page_no}: {e}"));
+                // And it goes to the escalation pass, not straight to the
+                // failure list. A call that errors is the *primary* failing, not
+                // the page being unreadable: when the primary cannot load at all
+                // — olmOCR asking for more VRAM than the budget allows, the
+                // router not up yet — every page failed here and the fallback
+                // that would have read the whole document was never asked, so
+                // the document came back as "None of the N pages could be
+                // transcribed" with a model sitting there able to read it.
+                thin.push((page_no, format!("{model_id} failed on it: {e}")));
+            }
+        }
+    }
+
+    /* ---- §3 escalation: one more pass, with a model that reads what this one could not ---- */
+    if !thin.is_empty() {
+        let escalate = {
+            let reg = st.registry.read().expect("registry lock");
+            reg.escalation(task_of(kind), model_id)
+        };
+        match escalate {
+            None => failures.extend(thin.iter().map(|(page_no, why)| {
+                format!("page {page_no}: {why}, and no other model is available to try it")
+            })),
+            Some(second) => {
+                let prompt = ocr_prompt(if matches!(kind, DocumentKind::Image | DocumentKind::PdfScanned) {
+                    // A page the printed-text reader could not resolve is being
+                    // treated as handwriting from here, which is what the prompt
+                    // has to say for the second model to do anything different.
+                    DocumentKind::Handwriting
+                } else {
+                    kind
+                });
+                for (page_no, why) in &thin {
+                    let png = pages.iter().find(|(n, _)| n == page_no).map(|(_, p)| p.clone());
+                    let Some(png) = png else { continue };
+                    let step = Step::start(
+                        st,
+                        StepKind::Ocr,
+                        format!("Reading page {page_no} again"),
+                    )
+                    .model(Some(second.clone()))
+                    .detail(format!("{model_id} could not read it: {why}."));
+                    match crate::router::vision(st, &second, vec![png], &prompt).await {
+                        Ok(text) if unreadable(&text).is_none() => {
+                            let (b, t) = split_ocr(*page_no, &text, kind);
+                            step.detail(format!(
+                                "{second} read it: {} characters, {} block{}.",
+                                text.len(),
+                                b.len(),
+                                if b.len() == 1 { "" } else { "s" }
+                            ))
+                            .ok(st);
+                            blocks.extend(b);
+                            tables.extend(t);
+                        }
+                        Ok(_) => {
+                            step.detail(format!("{second} could not read it either.")).skip(st);
+                            failures.push(format!(
+                                "page {page_no}: {why}, and {second} could not read it either"
+                            ));
+                        }
+                        Err(e) => {
+                            step.fail(st, &e.to_string());
+                            failures
+                                .push(format!("page {page_no}: {why}; retry with {second} failed: {e}"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1759,25 +2034,24 @@ pub async fn ingest(st: &Arc<AppState>, path: &str) -> CoreResult<IngestedDocume
         /* ---- Office: always native ---- */
         "docx" => {
             let step = Step::start(st, StepKind::ReadingFile, format!("Reading {file_name}"));
-            let (b, t) = guard(&what, || docx_extract(&bytes)).inspect_err(|e| {
-                // The step has to close either way or the UI shows a spinner
-                // that never resolves.
-                let _ = e;
-            })?;
+            // `keep` closes the step on the error path; a bare `?` here left a
+            // "Reading <file>" row spinning for the rest of the session whenever
+            // a .docx was corrupt or password-protected.
+            let (step, (b, t)) = step.keep(st, guard(&what, || docx_extract(&bytes)))?;
             step.detail(format!("{} paragraphs and {} tables, natively — no model was loaded.", b.len(), t.len()))
                 .ok(st);
             (DocumentKind::Docx, ExtractionMethod::Native, 1, b, t)
         }
         "pptx" => {
             let step = Step::start(st, StepKind::ReadingFile, format!("Reading {file_name}"));
-            let (b, t) = guard(&what, || pptx_extract(&bytes))?;
+            let (step, (b, t)) = step.keep(st, guard(&what, || pptx_extract(&bytes)))?;
             let pages = b.iter().map(|x| x.bbox.page).max().unwrap_or(1);
             step.detail(format!("{pages} slides, natively — no model was loaded.")).ok(st);
             (DocumentKind::Pptx, ExtractionMethod::Native, pages, b, t)
         }
         "xlsx" | "xls" | "xlsm" | "ods" => {
             let step = Step::start(st, StepKind::ReadingFile, format!("Reading {file_name}"));
-            let (b, t) = guard(&what, || xlsx_extract(p, None))?;
+            let (step, (b, t)) = step.keep(st, guard(&what, || xlsx_extract(p, None)))?;
             let pages = t.iter().map(|x| x.page).max().unwrap_or(1);
             step.detail(format!(
                 "{} sheet{}, cells and formulas, natively — no model was loaded.",
@@ -2577,5 +2851,157 @@ mod drawing_registers {
         let (kind, why) = classify_image(&image::DynamicImage::ImageRgb8(img), "8-P-2103-A2A PID.jpg");
         assert_eq!(kind, DocumentKind::Drawing);
         assert!(why.contains("file name"), "why: {why}");
+    }
+}
+
+/// §3 — a page the printed-text reader could not resolve is escalated, not
+/// returned as the best that could be managed.
+///
+/// The Handwriting rule has always claimed this ("chosen when OCR confidence
+/// falls below threshold"). What it did not have was a mechanism: `ocr_pages`
+/// took one model, and a page PaddleOCR-VL returned as a few fragments — which
+/// is how it fails on a hand-filled log sheet, rather than with an error — was
+/// stored as the transcription of that page. There is no confidence number to
+/// read, so `unreadable` judges the shape of the text instead, and these are the
+/// shapes.
+#[cfg(test)]
+mod ocr_escalation {
+    use super::unreadable;
+
+    /// What a page of handwriting looks like coming back from a printed-text
+    /// reader: almost nothing, or nothing that is letters.
+    #[test]
+    fn a_page_that_came_back_as_fragments_is_not_a_transcription() {
+        for text in [
+            "",
+            "   \n  ",
+            "1 2 -- .",
+            "| | | --- | |",
+            "T\u{fffd}-04 7.\u{fffd} mm",
+            "•••• ···· ---- ~~~~ ++++ ==== |||| ____ ",
+        ] {
+            assert!(unreadable(text).is_some(), "kept as a transcription: {text:?}");
+        }
+    }
+
+    /// A page that was actually read, including one that is mostly a table —
+    /// pipes and dashes are structure, and a table must not be mistaken for
+    /// noise.
+    #[test]
+    fn a_page_that_was_read_is_kept() {
+        for text in [
+            "Thickness survey sheet for 4-P-1102, test point TP-04, reading 7.1 mm.",
+            "| Point | Reading | Limit |\n| TP-04 | 7.1 mm | 9.8 mm |\n| TP-05 | 8.4 mm | 9.8 mm |",
+            "PUMP DATA SHEET\nService: crude charge\nRated flow 420 m3/h at 2980 rpm\n",
+        ] {
+            assert!(unreadable(text).is_none(), "rejected a real page: {text:?} -> {:?}", unreadable(text));
+        }
+    }
+
+    /// The reason travels with the decision, because the operator is told which
+    /// pages were escalated and why, and "low confidence" would be a number the
+    /// pipeline does not have.
+    #[test]
+    fn the_reason_says_what_was_actually_measured() {
+        let why = unreadable("1 2 -- .").unwrap_or_default();
+        assert!(why.contains("characters"), "{why}");
+        assert!(!why.to_lowercase().contains("confidence"), "{why}");
+    }
+}
+
+#[cfg(test)]
+mod delimited_files {
+    use super::{csv_delimiter, csv_extract, csv_rows};
+
+    /// The defect: `split(',')` moved every value after a quoted comma one
+    /// column left, so the reading landed under the wrong heading and the table
+    /// still looked valid.
+    #[test]
+    fn a_comma_inside_a_quoted_field_is_not_a_column_break() {
+        let csv = "Component,Measured (mm),Date\n\
+                   \"Elbow, downstream\",4.8,2024-06-01\n\
+                   \"Header, north end\",6.2,2024-06-02\n";
+        let (_, tables) = csv_extract(csv);
+        let t = &tables[0];
+        assert_eq!(t.header, ["Component", "Measured (mm)", "Date"]);
+        assert_eq!(t.rows[0], ["Elbow, downstream", "4.8", "2024-06-01"]);
+        assert_eq!(t.rows[1], ["Header, north end", "6.2", "2024-06-02"]);
+    }
+
+    /// A doubled quote is one quote, and a quote that is not opening a field is
+    /// just a character — `6"` is a diameter in inches, and reading it as an
+    /// opening quote swallowed the rest of the row.
+    #[test]
+    fn quotes_inside_a_value_stay_inside_the_value() {
+        let csv = "Line,Size,Note\n\
+                   4-P-1102,6\" CS,downstream of V-301\n\
+                   4-P-1103,8\" CS,\"marked \"\"replace\"\" in the register\"\n";
+        let (_, tables) = csv_extract(csv);
+        let t = &tables[0];
+        assert_eq!(t.rows[0], ["4-P-1102", "6\" CS", "downstream of V-301"]);
+        assert_eq!(t.rows[1][1], "8\" CS");
+        assert_eq!(t.rows[1][2], "marked \"replace\" in the register");
+    }
+
+    /// A field may span lines. Splitting on newlines first turned one row into
+    /// two, the second of them ragged.
+    #[test]
+    fn a_line_break_inside_a_quoted_field_does_not_end_the_row() {
+        let csv = "Tag,Finding\nV-301,\"Pitting on the shell.\nRe-measure next outage.\"\nV-302,None\n";
+        let (_, tables) = csv_extract(csv);
+        let t = &tables[0];
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[0][1], "Pitting on the shell.\nRe-measure next outage.");
+        assert_eq!(t.rows[1], ["V-302", "None"]);
+    }
+
+    /// The delimiter is decided by what parses consistently, not by which
+    /// character appears most: one comma in a quoted heading used to outvote
+    /// every semicolon in the file.
+    #[test]
+    fn the_delimiter_is_the_one_that_gives_a_consistent_table() {
+        let semi = "Component;\"Measured, mm\";Date\nElbow;4.8;2024-06-01\nHeader;6.2;2024-06-02\n";
+        assert_eq!(csv_delimiter(semi), ';');
+        let (_, tables) = csv_extract(semi);
+        assert_eq!(tables[0].header, ["Component", "Measured, mm", "Date"]);
+        assert_eq!(tables[0].rows[0], ["Elbow", "4.8", "2024-06-01"]);
+
+        let tabs = "Component\tMeasured\tDate\nElbow\t4.8\t2024-06-01\nHeader\t6.2\t2024-06-02\n";
+        assert_eq!(csv_delimiter(tabs), '\t');
+
+        let commas = "Component,Measured,Date\nElbow,4.8,2024-06-01\n";
+        assert_eq!(csv_delimiter(commas), ',');
+        // Nothing to separate: one column, and the file is still readable.
+        let single = "Component\nElbow\nHeader\n";
+        assert_eq!(csv_delimiter(single), ',');
+        assert_eq!(csv_extract(single).1[0].rows.len(), 2);
+    }
+
+    /// Excel's byte-order mark is not part of the first heading. U+FEFF is not
+    /// whitespace, so `trim` left it there and every lookup by heading missed.
+    #[test]
+    fn a_byte_order_mark_is_not_part_of_the_first_heading() {
+        let csv = "\u{feff}Tag,Reading\nPI-01,4.2\n";
+        let (_, tables) = csv_extract(csv);
+        assert_eq!(tables[0].header, ["Tag", "Reading"]);
+    }
+
+    #[test]
+    fn windows_line_endings_and_blank_lines_are_handled() {
+        let csv = "Tag,Reading\r\nPI-01,4.2\r\n\r\nPI-02,4.9\r\n";
+        let rows = csv_rows(csv, ',');
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1], ["PI-01", "4.2"]);
+        assert_eq!(rows[2], ["PI-02", "4.9"]);
+        // A row that is genuinely mostly empty is still a row.
+        let sparse = csv_rows("PI-03,,\n", ',');
+        assert_eq!(sparse, [["PI-03", "", ""]]);
+    }
+
+    /// Spacing around a delimiter is not data; spacing inside quotes is.
+    #[test]
+    fn unquoted_fields_are_trimmed_and_quoted_fields_are_not() {
+        let rows = csv_rows("Elbow , 4.8 ,  \" kept  \"\n", ',');
+        assert_eq!(rows[0], ["Elbow", "4.8", " kept  "]);
     }
 }

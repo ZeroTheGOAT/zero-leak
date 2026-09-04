@@ -705,6 +705,14 @@ fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     // restart.
     if let Ok(reg) = registry::Registry::load_or_seed(&registry::config_dir(), &merged.models_directory) {
         *st.registry.write().expect("registry lock") = reg;
+        // Moving the folder has to re-render `models.ini` too: it records
+        // absolute weight paths, and the offline/air-gapped setup reads it back
+        // to rehydrate the catalogue. Reloading the catalogue repoints the
+        // in-memory entries but leaves the file pointing at the old folder until
+        // the next router start.
+        if before.models_directory != merged.models_directory {
+            router::write_preset_ini(st)?;
+        }
     }
 
     // §11 — a folder setting is the one change that can move confidential work

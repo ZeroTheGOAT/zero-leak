@@ -33,6 +33,13 @@ export const PRESET_PATH = 'C:/sovereign/config/models.ini';
 export const VRAM_BUDGET_MB = 7106;
 export const VRAM_TOTAL_MB = 8187;
 
+/**
+ * The address the router and the application API are bound to, mirroring
+ * `registry::ROUTER_BIND_HOST` in the core. Not a setting: §1 requires the
+ * models be unreachable from off the machine, so there is no other value.
+ */
+export const ROUTER_BIND_HOST = '127.0.0.1';
+
 /* ------------------------------------------------------------------ */
 /* §1  Model registry                                                 */
 /* ------------------------------------------------------------------ */
@@ -336,9 +343,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   llamaServerPath: `${RUNTIME_ROOT}/llama-server.exe`,
   modelPresetPath: PRESET_PATH,
   modelsDirectory: MODELS_ROOT,
-  routerHost: '127.0.0.1',
   routerPort: 18080,
-  maxResidentModels: 1,
+  maxResidentModels: 2,
   modelIdleEvictSec: 180,
   extendedThinking: false,
 

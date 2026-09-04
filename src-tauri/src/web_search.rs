@@ -118,6 +118,16 @@ fn normalise_public_url(raw: &str) -> CoreResult<Url> {
             "That URL names no host to fetch from.".into(),
         ));
     };
+    // Loopback is named separately only so the refusal can point at the right
+    // tool. A model that has just started a preview and wants to look at it
+    // reaches for web_fetch, gets refused, and — observed — spends the rest of
+    // the run retrying the same URL through the same tool. The policy does not
+    // bend; the sentence says where to go instead.
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
     let refused = if host == "localhost" {
         true
     } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -142,9 +152,15 @@ fn normalise_public_url(raw: &str) -> CoreResult<Url> {
         false
     };
     if refused {
+        let instead = if loopback {
+            " A page on this machine is checked with check_page, which fetches it, renders it in \
+a real browser and reports what is actually on it — use that instead of this tool."
+        } else {
+            ""
+        };
         return Err(CoreError::ExecutionFailed(format!(
             "Refused to fetch '{host}'. The web tools read public pages only, never anything \
-             on this machine or its local network."
+             on this machine or its local network.{instead}"
         )));
     }
     Ok(url)
@@ -759,6 +775,18 @@ fn format_json_results(results: Option<&Value>, limit: usize) -> CoreResult<Stri
 mod tests {
     use super::*;
 
+    /// A refusal that leaves the model with nowhere to go is how one run spent
+    /// three tool calls re-fetching the same dead preview URL. The loopback
+    /// refusal names check_page; the private-network one has nothing to offer
+    /// and says nothing.
+    #[test]
+    fn the_loopback_refusal_names_the_tool_that_does_the_job() {
+        let why = normalise_public_url("http://127.0.0.1:49386/").unwrap_err().to_string();
+        assert!(why.contains("check_page"), "{why}");
+        let lan = normalise_public_url("http://192.168.1.14/").unwrap_err().to_string();
+        assert!(!lan.contains("check_page"), "{lan}");
+    }
+
     #[test]
     fn direct_results_are_reduced_to_titles_and_links() {
         let html = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">One &amp; Two</a><a class="result__snippet">Useful <b>current</b> information</a>"#;
@@ -878,6 +906,10 @@ mod tests {
         assert!(normalise_public_url("http://10.0.0.5/internal").is_err());
         assert!(normalise_public_url("http://[::1]/").is_err());
         assert!(normalise_public_url("http://[fe80::1]/").is_err());
+        // The cloud metadata endpoint and the unspecified address are both
+        // "this machine" by another spelling.
+        assert!(normalise_public_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(normalise_public_url("http://0.0.0.0/").is_err());
         // Not web schemes, and not URLs at all.
         assert!(normalise_public_url("file:///C:/sovereign/secret.txt").is_err());
         assert!(normalise_public_url("ftp://example.com/doc").is_err());

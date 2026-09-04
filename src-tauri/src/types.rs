@@ -826,7 +826,8 @@ pub struct AppSettings {
     pub llama_server_path: String,
     pub model_preset_path: String,
     pub models_directory: String,
-    pub router_host: String,
+    /// The port the router listens on. There is no host setting: see
+    /// `registry::ROUTER_BIND_HOST`.
     pub router_port: u16,
     pub max_resident_models: u32,
     pub model_idle_evict_sec: u32,
@@ -1319,6 +1320,15 @@ pub struct SyncExposure {
     pub reparse_points: u32,
     /// Files checked, so the ratio above is interpretable.
     pub files_checked: u32,
+    /// The folder's contents were actually inspected.
+    ///
+    /// False means the folder could not be opened, so every count above is zero
+    /// for want of looking rather than for want of finding. Distinct from
+    /// `files_checked == 0`, which an existing but empty folder also produces —
+    /// and the distinction is the whole point: "no evidence of replication" and
+    /// "nothing was examined" are different findings, and a report that lets the
+    /// second read as the first is not evidence of anything.
+    pub examined: bool,
     /// Shown verbatim in Settings.
     pub detail: String,
 }

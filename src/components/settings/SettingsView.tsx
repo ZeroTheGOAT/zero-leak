@@ -37,7 +37,8 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import * as core from '../../services/core';
-import { transcription, type TranscriptionStatus } from '../../services/transcription';
+import { ROUTER_BIND_HOST } from '../../services/registry';
+import { languageCode, transcription, TRANSCRIPTION_LANGUAGES, type TranscriptionStatus } from '../../services/transcription';
 import { AuditView } from '../panels/AuditView';
 import { KnowledgeView } from '../panels/KnowledgeView';
 import { MemoryView } from '../panels/MemoryView';
@@ -52,6 +53,7 @@ import type {
   ModelEntry,
   McpServerConfig,
   SettingsPage,
+  SyncExposure,
 } from '../../types';
 import {
   readAppearance,
@@ -92,6 +94,10 @@ const PAGES: NavPage[] = [
     { id: 'default-permission', label: 'Default permission' },
     { id: 'project-exceptions', label: 'Project exceptions' },
     { id: 'network-boundary', label: 'Network boundary' },
+  ] },
+  { id: 'sovereignty', label: 'Sovereignty', icon: Globe2, description: 'Evidence that this workstation keeps its data on itself.', sections: [
+    { id: 'replication', label: 'Replication' },
+    { id: 'egress', label: 'Egress' },
   ] },
   { id: 'tools', label: 'Tools', icon: Wrench, sections: [
     { id: 'core', label: 'Core' },
@@ -161,6 +167,43 @@ const Row: React.FC<{
     {children && <div className={stacked ? 'min-w-0' : 'flex-none'}>{children}</div>}
   </div>
 );
+
+/**
+ * §11 — one folder's replication verdict.
+ *
+ * The three states are deliberately distinct, because the whole point of this
+ * check is that they are different findings: replicated off the machine, read and
+ * found local, and *not examined*. The last one used to be invisible — the core
+ * reported it, and nothing in the interface rendered the report at all.
+ */
+const ExposureRow: React.FC<{ row: SyncExposure }> = ({ row }) => {
+  const verdict = row.replicated
+    ? { text: 'Replicates off this machine', tone: 'text-[var(--destructive)]', Icon: ShieldAlert }
+    : row.examined
+      ? { text: 'Local', tone: 'text-[var(--success)]', Icon: ShieldCheck }
+      : { text: 'Not examined', tone: 'text-[var(--warning)]', Icon: ShieldAlert };
+  return (
+    <div className="border-b nerve-border p-3.5 last:border-b-0 grid gap-2">
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-[var(--card-foreground)]">{row.label}</p>
+          <p className="mt-0.5 break-all font-mono text-xs text-[var(--muted-foreground)]">{row.path}</p>
+        </div>
+        <span className={`flex flex-none items-center gap-1.5 text-xs ${verdict.tone}`}>
+          <verdict.Icon size={14} />
+          {verdict.text}
+        </span>
+      </div>
+      <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{row.detail}</p>
+      {row.examined && (
+        <p className="text-xs text-[var(--muted-foreground)]">
+          {row.filesChecked.toLocaleString()} entries examined · {row.placeholderFiles} cloud placeholders ·{' '}
+          {row.pinMarkedFiles} pin-marked · {row.reparsePoints} reparse points
+        </p>
+      )}
+    </div>
+  );
+};
 
 // Geometry and thumb colours ported from Nerve's `settings`-size switch: a
 // padded track rather than an absolutely-placed thumb, so the travel can never
@@ -335,7 +378,7 @@ const DEFAULT_PREFS: WorkbenchPreferences = {
   exploreModel: 'qwen3.5-9b',
   toolEnabled: {},
   transcriptionModel: 'whisper.cpp-base',
-  transcriptionLanguage: 'Auto detect',
+  transcriptionLanguage: 'auto',
   transcriptionVocabulary: 'Servergen, GGUF, llama.cpp, Zero, P&ID',
   notifications: true,
   sounds: false,
@@ -478,6 +521,8 @@ export const SettingsView: React.FC = () => {
     hardware,
     coreStatus,
     sovereign,
+    exposure,
+    refreshExposure,
     knowledgeStats,
     memories,
     artifacts,
@@ -656,7 +701,7 @@ export const SettingsView: React.FC = () => {
             <div className="flex justify-end border-t nerve-border p-3"><button onClick={() => setAddModelOpen(true)} className="servergen-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add local model</button></div>
           </Section>
           <Section id="runtime" title="Runtime">
-            <Row label="Loopback address"><div className="flex gap-2"><Input className="w-36 font-mono" value={settings.routerHost} onChange={(e) => setApp('routerHost', e.target.value)} /><Input className="w-24 font-mono" type="number" value={settings.routerPort} onChange={(e) => setApp('routerPort', Number(e.target.value))} /></div></Row>
+            <Row label="Router port" description={`Bound to ${ROUTER_BIND_HOST} and not configurable — the models stay unreachable from off this machine.`}><Input className="w-24 font-mono" type="number" min="1024" max="65535" value={settings.routerPort} onChange={(e) => setApp('routerPort', Number(e.target.value))} /></Row>
             <Row label="Resident models" description="Maximum models kept in memory simultaneously."><Input className="w-20" type="number" min="1" max="3" value={settings.maxResidentModels} onChange={(e) => setApp('maxResidentModels', Number(e.target.value))} /></Row>
             <Row label="Idle eviction" description="Release an unused model after this many seconds."><Input className="w-24" type="number" min="0" value={settings.modelIdleEvictSec} onChange={(e) => setApp('modelIdleEvictSec', Number(e.target.value))} /></Row>
           </Section>
@@ -857,7 +902,7 @@ export const SettingsView: React.FC = () => {
             <Row label="Local readiness" description={localTranscriptionStatus?.detail ?? 'Checking the local runtime and model…'}><span className={`rounded-full px-2 py-1 text-xs ${localTranscriptionStatus?.ready ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-[var(--warning-soft)] text-[var(--warning)]'}`}>{localTranscriptionStatus?.ready ? 'Ready' : localTranscriptionStatus ? 'Setup needed' : 'Checking'}</span></Row>
           </Section>
           <Section id="stt-context" title="Context">
-            <Row label="Expected language"><Select value={prefs.transcriptionLanguage} onChange={(e) => setPrefs({ ...prefs, transcriptionLanguage: e.target.value })}><option>Auto detect</option><option>English</option><option>Hindi</option><option>Multilingual</option></Select></Row>
+            <Row label="Expected language" description="Passed to whisper.cpp as the spoken language. Auto detect asks it to identify the language itself."><Select value={languageCode(prefs.transcriptionLanguage)} onChange={(e) => setPrefs({ ...prefs, transcriptionLanguage: e.target.value })}>{TRANSCRIPTION_LANGUAGES.map((entry) => <option key={entry.code} value={entry.code}>{entry.label}</option>)}</Select></Row>
             <Row label="Vocabulary hints" description="Names, acronyms, and preferred spellings passed only to the local transcriber." stacked><Input className="w-full" value={prefs.transcriptionVocabulary} onChange={(e) => setPrefs({ ...prefs, transcriptionVocabulary: e.target.value })} /></Row>
           </Section>
         </>;
@@ -893,14 +938,69 @@ export const SettingsView: React.FC = () => {
           <Row label="Canonical database" description="state/workbench.db is authoritative; Markdown and JSONL are inspectable mirrors."><HardDrive size={15} className="text-[var(--muted-foreground)]" /></Row>
         </Section>;
 
+      case 'sovereignty':
+        return <>
+          <Section
+            id="replication"
+            title="Folder replication"
+            description="Whether the folders this application writes to are copied off this machine. Read from the Windows sync-root registrations and the files' own cloud attributes — never from the folder's name, which is why a directory called OneDrive on a machine with no OneDrive account reads as local."
+          >
+            {exposure === null ? (
+              <Row label="Not run yet" description="The replication check has not completed. Nothing is claimed about these folders until it has — an empty report is not a clean one.">
+                <button onClick={() => void refreshExposure()} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Run check</button>
+              </Row>
+            ) : (
+              <>
+                <Row label={exposure.anyReplicated ? 'Replication found' : 'Verdict'} description={exposure.summary}>
+                  <button onClick={() => void refreshExposure()} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Re-check</button>
+                </Row>
+                {exposure.paths.map((row) => <ExposureRow key={`${row.label}:${row.path}`} row={row} />)}
+                <Row
+                  label="Sync clients running"
+                  description={exposure.clientsRunning.length ? 'Context only. A running client says something on this machine is synced, not that these folders are.' : undefined}
+                >
+                  <span className={`text-xs ${exposure.clientsRunning.length ? 'text-[var(--warning)]' : 'text-[var(--success)]'}`}>
+                    {exposure.clientsRunning.length ? exposure.clientsRunning.join(', ') : 'None'}
+                  </span>
+                </Row>
+                <Row label="Sync roots registered on this machine" description={exposure.registeredRoots.join(' · ') || undefined}>
+                  <span className={`text-xs ${exposure.registeredRoots.length ? 'text-[var(--warning)]' : 'text-[var(--success)]'}`}>
+                    {exposure.registeredRoots.length || 'None'}
+                  </span>
+                </Row>
+                <Row label="Checked" description={new Date(exposure.checkedAt).toLocaleString()}>
+                  <Waves size={15} className="text-[var(--muted-foreground)]" />
+                </Row>
+              </>
+            )}
+          </Section>
+          <Section id="egress" title="Egress" description="Bytes counted by the guard itself, not by what the application believes it sent.">
+            <Row label="Public internet" description="Must remain zero on an air-gapped workstation.">
+              <span className={sovereign.publicInternetBytes === 0 ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--destructive)]'}>
+                {sovereign.publicInternetBytes.toLocaleString()} bytes
+              </span>
+            </Row>
+            <Row label="Egress guard" description={settings.blockPublicInternet ? 'Installed and blocking every public destination.' : 'Public destinations are permitted by the current settings.'}>
+              <span className={sovereign.egressBlocked ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--warning)]'}>
+                {sovereign.egressBlocked ? 'Blocking' : 'Not blocking'}
+              </span>
+            </Row>
+            <Row label="Approved on-prem server" description={sovereign.privateServerName ?? 'None configured; every request is served on this workstation.'}>
+              <span className="text-xs text-[var(--muted-foreground)]">{sovereign.privateServerBytes.toLocaleString()} bytes</span>
+            </Row>
+            <Row label="Requests served on this device">
+              <span className="font-mono text-xs text-[var(--muted-foreground)]">{sovereign.deviceRequests.toLocaleString()}</span>
+            </Row>
+          </Section>
+        </>;
+
       case 'system':
       case 'about':
-      case 'sovereignty':
       case 'sandbox':
       case 'artifacts':
         return <>
           <Section id="network" title="Network">
-            <Row label="Daemon bind" description="The application API and model router remain bound to loopback."><span className="font-mono text-xs text-[var(--muted-foreground)]">{settings.routerHost}:{settings.routerPort}</span></Row>
+            <Row label="Daemon bind" description="The application API and model router remain bound to loopback."><span className="font-mono text-xs text-[var(--muted-foreground)]">{ROUTER_BIND_HOST}:{settings.routerPort}</span></Row>
             <Row label="Public egress"><span className={settings.blockPublicInternet ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--warning)]'}>{settings.blockPublicInternet ? 'Blocked' : 'Allowed'}</span></Row>
           </Section>
           <Section id="diagnostics" title="Diagnostics">

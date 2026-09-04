@@ -17,7 +17,7 @@
 //!
 //! CPU and RAM come from `sysinfo`, which reads them from the OS directly.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::CoreResult;
@@ -49,6 +49,26 @@ fn system() -> &'static Mutex<sysinfo::System> {
 fn smi_missing() -> &'static AtomicBool {
     static MISSING: OnceLock<AtomicBool> = OnceLock::new();
     MISSING.get_or_init(|| AtomicBool::new(false))
+}
+
+/// The card's measured total, kept for the admission arithmetic in `registry`.
+///
+/// `nvidia-smi` is a process spawn taking ~40 ms, and `make_room` is
+/// synchronous and on the request path, so it cannot query the card itself. This
+/// is the last reading the poller took. Zero means nothing has measured it yet.
+fn measured_total() -> &'static AtomicU32 {
+    static TOTAL: OnceLock<AtomicU32> = OnceLock::new();
+    TOTAL.get_or_init(|| AtomicU32::new(0))
+}
+
+/// What the card actually has, or nothing if it has not been measured.
+///
+/// Read by `registry::vram_total_mb`, which every admission decision goes
+/// through. Never falls back on its own: the caller decides what an unmeasured
+/// card means, and for admission that is the catalogue's tuned figure.
+pub fn measured_vram_total_mb() -> Option<u32> {
+    let mb = measured_total().load(Ordering::Relaxed);
+    (mb > 0).then_some(mb)
 }
 
 /// What `nvidia-smi` reported, or nothing.
@@ -119,27 +139,30 @@ pub async fn status(st: &AppState) -> CoreResult<HardwareStatus> {
         .unwrap_or_else(|_| sample_fallback());
 
     // `offloading` is the one field that is a judgement rather than a
-    // measurement, and it is derived from what is actually resident: if a loaded
-    // model's estimated VRAM exceeds what the card has spare, llama.cpp is
-    // keeping layers in system RAM. Saying so matters because it is the
-    // difference between 40 tokens/sec and 4, and an operator watching a slow
+    // measurement, and it is derived from what is resident against what the card
+    // physically has: if a loaded model needs more than the card can hold,
+    // llama.cpp is keeping layers in system RAM. Saying so matters because it is
+    // the difference between 40 tokens/sec and 4, and an operator watching a slow
     // answer deserves to know which one they are getting.
+    //
+    // It used to compare against the *sharing* budget, which is 1081 MiB smaller
+    // than the card on purpose. olmOCR-2 is admitted solo at 7387 MiB by design
+    // and runs fully offloaded at 54 tok/s, so the warning lit on every
+    // handwritten page — the one path where it was certainly wrong — while the
+    // measured total sat unused beside it. Against the solo limit it says what it
+    // claims to, and because that limit now follows the measured card, a machine
+    // smaller than this catalogue was tuned for is reported rather than hidden.
     let mut out = snapshot;
-    let (resident_mb, catalogue_budget) = {
-        let reg = st.registry.read().ok();
-        match reg {
-            Some(reg) => {
-                let loaded = st.loaded_ids();
-                let sum: u32 = reg
-                    .all()
-                    .iter()
-                    .filter(|e| loaded.contains(&e.id))
-                    .map(|e| e.estimated_vram_mb)
-                    .sum();
-                (sum, crate::registry::VRAM_BUDGET_MB)
-            }
-            None => (0, crate::registry::VRAM_BUDGET_MB),
+    let resident_mb: u32 = match st.registry.read() {
+        Ok(reg) => {
+            let loaded = st.loaded_ids();
+            reg.all()
+                .iter()
+                .filter(|e| loaded.contains(&e.id))
+                .map(|e| e.estimated_vram_mb)
+                .sum()
         }
+        Err(_) => 0,
     };
 
     if out.vram_total_mb == 0 {
@@ -149,8 +172,8 @@ pub async fn status(st: &AppState) -> CoreResult<HardwareStatus> {
         out.vram_total_mb = crate::registry::VRAM_TOTAL_MB;
         out.vram_used_mb = resident_mb.min(crate::registry::VRAM_TOTAL_MB);
     }
-    out.vram_budget_mb = catalogue_budget.min(out.vram_total_mb.max(1));
-    out.offloading = resident_mb > 0 && resident_mb > out.vram_budget_mb;
+    out.vram_budget_mb = crate::registry::vram_budget_mb();
+    out.offloading = resident_mb > 0 && resident_mb > crate::registry::vram_solo_mb();
 
     Ok(out)
 }
@@ -173,6 +196,12 @@ fn sample_fallback() -> HardwareStatus {
 /// The blocking half: one `nvidia-smi` query and one `sysinfo` refresh.
 fn sample() -> HardwareStatus {
     let gpu = query_gpu();
+    if let Some(mb) = gpu.as_ref().map(|g| g.total_mb).filter(|mb| *mb > 0) {
+        // Published for `registry::vram_total_mb`, which every admission
+        // decision reads. Stored on every sample rather than once, because an
+        // eGPU or a driver restart can change what the card reports.
+        measured_total().store(mb, Ordering::Relaxed);
+    }
 
     let (cpu_name, cpu_util_pct, ram_used_mb, ram_total_mb) = match system().lock() {
         Ok(mut sys) => {

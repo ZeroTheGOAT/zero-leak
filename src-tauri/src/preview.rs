@@ -177,28 +177,44 @@ async fn serve_with_preferred(
     preferred: Option<u16>,
 ) -> CoreResult<PreviewInfo> {
     // Reuse: the same folder is one server no matter who asks or how often.
+    //
+    // Probed, not assumed. The binding map says a listener exists; only a round
+    // trip says it answers, and the operator has nothing but the URL. A stale
+    // binding is dropped here and the code below binds again, so a second
+    // `serve_folder` on a folder whose server has gone returns a working link
+    // rather than the old dead one.
     if let Some((port, shutdown)) = st.previews.binding(root) {
-        let status = DevServerStatus {
-            workspace_id: workspace_id.to_string(),
-            cwd: root.display().to_string(),
-            command: format!("serve {rel}"),
-            pid: std::process::id(),
-            port: Some(port),
-            url: Some(format!("http://127.0.0.1:{port}/")),
-            status: DevServerState::Running,
-            started_at: now_ms(),
-            error: None,
-            output: vec![],
-        };
-        // Still register for this workspace: a second workspace sharing the
-        // folder, or a re-serve after the registry entry was replaced, gets
-        // its own entry pointing at the one listener — with a working Stop.
-        devserver::register_inprocess(st, status.clone(), kill_for(st, root, &shutdown));
-        return Ok(PreviewInfo {
-            status,
-            folder_exists: root.is_dir(),
-            has_index: has_index(root),
-        });
+        let url = format!("http://127.0.0.1:{port}/");
+        if answers(st, &url).await {
+            let status = DevServerStatus {
+                workspace_id: workspace_id.to_string(),
+                cwd: root.display().to_string(),
+                command: format!("serve {rel}"),
+                pid: std::process::id(),
+                port: Some(port),
+                url: Some(url),
+                status: DevServerState::Running,
+                started_at: now_ms(),
+                error: None,
+                output: vec![],
+            };
+            // Still register for this workspace: a second workspace sharing the
+            // folder, or a re-serve after the registry entry was replaced, gets
+            // its own entry pointing at the one listener — with a working Stop.
+            devserver::register_inprocess(st, status.clone(), kill_for(st, root, &shutdown));
+            return Ok(PreviewInfo {
+                status,
+                folder_exists: root.is_dir(),
+                has_index: has_index(root),
+            });
+        }
+        // Nothing is listening on the port the map remembers. Clear it and the
+        // registry entry pointing at it, then fall through to a fresh bind —
+        // the alternative is handing back a URL that does not answer, which is
+        // the one thing this module exists to prevent.
+        st.previews.remove(root);
+        shutdown.notify_waiters();
+        eprintln!("[preview] the remembered listener on {port} for {} was gone; binding again.", root.display());
     }
 
     let folder_exists = root.is_dir();
@@ -335,6 +351,13 @@ pub async fn restore_all(st: &Arc<AppState>) {
 /// taken — the caller falls through to its next candidate.
 fn try_bind(port: u16) -> Option<StdListener> {
     StdListener::bind(("127.0.0.1", port)).ok()
+}
+
+/// Whether something answers on `url`. Any HTTP response counts — a 404 from a
+/// folder with no `index.html` is a working server, and `has_index` is what
+/// reports the missing page. Only a transport failure means nothing is there.
+async fn answers(st: &Arc<AppState>, url: &str) -> bool {
+    st.http.get(url).timeout(Duration::from_secs(2)).send().await.is_ok()
 }
 
 #[cfg(test)]

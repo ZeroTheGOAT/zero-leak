@@ -79,16 +79,59 @@ impl DevServers {
         Self::default()
     }
 
-    /// Snapshot for the UI. Includes stopped/failed servers: the composer bar
-    /// shows why a server is not running, not just that one is.
+    /// Snapshot for the UI, reconciled against the OS before it is handed out.
+    /// Includes stopped/failed servers: the composer bar shows why a server is
+    /// not running, not just that one is.
+    ///
+    /// Reconciled, because nothing else would notice. A spawned server's process
+    /// can be gone without a word: there is no reaper here, and the watcher that
+    /// checks `pid_alive` only lives for the duration of one start. Every other
+    /// consumer in this module asks the OS before trusting an entry — `start`'s
+    /// reuse test, the readiness loop — and this snapshot, the one the UI and
+    /// `check_page` actually read, was the one that did not. So a crashed
+    /// `npm run dev` left the composer bar showing Running, and `check_page` was
+    /// handed its dead URL and came back with a connection failure about the
+    /// *page*, sending the model to debug a site that was never served instead of
+    /// restarting the server.
+    ///
+    /// An in-process preview carries this process's own pid, so it always reads
+    /// as live — which is right: the axum task's life is the app's, and
+    /// `preview::serve` probes the port before reusing one.
     pub fn status(&self) -> Vec<DevServerStatus> {
-        self.entries
-            .lock()
-            .expect("dev server registry lock")
-            .values()
-            .map(|e| e.status.clone())
-            .collect()
+        let mut entries = self.entries.lock().expect("dev server registry lock");
+        for e in entries.values_mut() {
+            let alive = winproc::pid_alive(e.status.pid);
+            note_exit(&mut e.status, alive);
+        }
+        entries.values().map(|e| e.status.clone()).collect()
     }
+}
+
+/// Marks an entry whose process is gone as failed. `alive` is the OS's answer
+/// for its pid.
+///
+/// Only a live-looking entry is touched, so a `Failed` set by the watcher keeps
+/// its own message — the tail of the server's output says more than this can.
+/// The URL goes with the state: a dead server's address is not something for the
+/// UI to link to or for `devserver_open` to accept.
+///
+/// One limit, shared with every other `pid_alive` caller here: a pid the OS has
+/// handed to an unrelated process reads as alive. That is a stale Running, not a
+/// false exit report, so it leaves this no worse than the rest of the module.
+fn note_exit(s: &mut DevServerStatus, alive: bool) -> bool {
+    if alive || !matches!(s.status, DevServerState::Starting | DevServerState::Running) {
+        return false;
+    }
+    s.status = DevServerState::Failed;
+    s.url = None;
+    if s.error.is_none() {
+        s.error = Some(format!(
+            "The server's process ({}) is no longer running, so nothing is listening on its port. \
+Start it again to get a live URL.",
+            s.pid
+        ));
+    }
+    true
 }
 
 /// Registers an in-process server — a `serve_folder` preview — in the same
@@ -101,7 +144,25 @@ pub(crate) fn register_inprocess(
     status: DevServerStatus,
     kill: Arc<dyn Fn() + Send + Sync>,
 ) {
-    stop(st, &status.workspace_id).ok();
+    // Only a *different* server is stopped first. Re-serving the folder this
+    // workspace is already serving arrives here with the same cwd and this
+    // process's own pid — that is the same listener, and stopping it would shut
+    // down the very server about to be registered as Running. Observed exactly
+    // that way: the second serve_folder on one folder returned
+    // http://127.0.0.1:49386/ as a live preview, the stop closure fired
+    // `notify_waiters` on the axum task behind it, and the operator's next
+    // message was "It says No Web page is found." A spawned dev server always
+    // carries its child's pid, never ours, so it can never match this.
+    let same_listener = st
+        .dev_servers
+        .entries
+        .lock()
+        .expect("dev server registry lock")
+        .get(&status.workspace_id)
+        .is_some_and(|e| same_inprocess_listener(&e.status, &status));
+    if !same_listener {
+        stop(st, &status.workspace_id).ok();
+    }
     let entry = Entry {
         status: status.clone(),
         kill,
@@ -113,6 +174,17 @@ pub(crate) fn register_inprocess(
         .expect("dev server registry lock")
         .insert(status.workspace_id.clone(), entry);
     emit(st, &status);
+}
+
+/// Whether the entry already registered for a workspace is the same in-process
+/// listener as the one about to replace it, in which case it must not be
+/// stopped: both statuses carry this process's pid and the same served folder.
+///
+/// The pid comparison is what keeps a spawned dev server out of this — its
+/// status carries the child's pid, so it never matches an in-process preview
+/// and always gets stopped properly.
+fn same_inprocess_listener(existing: &DevServerStatus, incoming: &DevServerStatus) -> bool {
+    existing.pid == incoming.pid && existing.cwd == incoming.cwd
 }
 
 fn emit(st: &AppState, status: &DevServerStatus) {
@@ -136,7 +208,9 @@ const URL_MARKERS: &[&str] = &["localhost:", "127.0.0.1:", "0.0.0.0:", "[::1]:"]
 const NUMBER_MARKERS: &[&str] = &["port ", "port="];
 
 fn port_after_marker(line: &str, marker: &str) -> Option<u16> {
-    let lower = line.to_lowercase();
+    // ASCII lowercasing: the offset is used to slice `line`, and full Unicode
+    // folding does not preserve byte length. The markers are ASCII anyway.
+    let lower = line.to_ascii_lowercase();
     let at = lower.find(marker)?;
     let digits: String = line[at + marker.len()..]
         .chars()
@@ -604,6 +678,58 @@ pub fn stop_all(st: &AppState) {
 }
 
 #[cfg(test)]
+mod inprocess_registration {
+    use super::*;
+
+    fn preview(cwd: &str, pid: u32) -> DevServerStatus {
+        DevServerStatus {
+            workspace_id: "ws-1".into(),
+            cwd: cwd.into(),
+            command: "serve ecommerce".into(),
+            pid,
+            port: Some(49_386),
+            url: Some("http://127.0.0.1:49386/".into()),
+            status: DevServerState::Running,
+            started_at: 0,
+            error: None,
+            output: vec![],
+        }
+    }
+
+    /// The bug this guards: `serve_folder` called twice on one folder stopped
+    /// the listener it was about to report as running, and the second call
+    /// handed the operator a URL that answered nothing.
+    #[test]
+    fn re_serving_the_same_folder_is_the_same_listener() {
+        let me = std::process::id();
+        let first = preview("C:/sovereign/projects/shop/files/ecommerce", me);
+        let again = preview("C:/sovereign/projects/shop/files/ecommerce", me);
+        assert!(same_inprocess_listener(&first, &again));
+    }
+
+    /// One server per workspace still holds: a different folder is a different
+    /// server and the old one is stopped.
+    #[test]
+    fn a_different_folder_in_the_same_workspace_replaces_the_server() {
+        let me = std::process::id();
+        let first = preview("C:/sovereign/projects/shop/files/ecommerce", me);
+        let other = preview("C:/sovereign/projects/shop/files/docs", me);
+        assert!(!same_inprocess_listener(&first, &other));
+    }
+
+    /// A spawned dev server carries its child's pid, so it is never mistaken
+    /// for the in-process preview and is always stopped before the preview
+    /// takes the workspace's slot.
+    #[test]
+    fn a_spawned_server_is_never_the_in_process_listener() {
+        let me = std::process::id();
+        let spawned = preview("C:/sovereign/projects/shop/files/ecommerce", me + 1);
+        let preview_here = preview("C:/sovereign/projects/shop/files/ecommerce", me);
+        assert!(!same_inprocess_listener(&spawned, &preview_here));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -611,6 +737,58 @@ mod tests {
     /// below exercises one line at a time on both paths.
     fn port_of(line: &str) -> Option<u16> {
         best_port(&[line.to_string()])
+    }
+
+    fn entry(status: DevServerState, url: Option<&str>) -> DevServerStatus {
+        DevServerStatus {
+            workspace_id: "w1".into(),
+            cwd: "C:/sovereign/projects/w1/files".into(),
+            command: "npm run dev".into(),
+            pid: 4242,
+            port: Some(5173),
+            url: url.map(String::from),
+            status,
+            started_at: 0,
+            error: None,
+            output: Vec::new(),
+        }
+    }
+
+    /// The defect this closes: the snapshot the composer bar and `check_page`
+    /// read reported Running after the process was gone.
+    #[test]
+    fn a_server_whose_process_is_gone_is_not_reported_as_running() {
+        for state in [DevServerState::Running, DevServerState::Starting] {
+            let mut s = entry(state, Some("http://127.0.0.1:5173/"));
+            assert!(note_exit(&mut s, false));
+            assert_eq!(s.status, DevServerState::Failed);
+            // Nothing for the UI to link to and nothing for `devserver_open`
+            // to match: the port answers to no one.
+            assert_eq!(s.url, None);
+            assert!(s.error.is_some_and(|e| e.contains("4242")));
+        }
+    }
+
+    #[test]
+    fn a_live_server_is_left_exactly_as_it_was() {
+        let mut s = entry(DevServerState::Running, Some("http://127.0.0.1:5173/"));
+        assert!(!note_exit(&mut s, true));
+        assert_eq!(s.status, DevServerState::Running);
+        assert_eq!(s.url.as_deref(), Some("http://127.0.0.1:5173/"));
+        assert_eq!(s.error, None);
+    }
+
+    /// A server the watcher already buried keeps the watcher's reason. The tail
+    /// of its output is worth more to the operator than "the process is gone".
+    #[test]
+    fn an_already_finished_server_keeps_its_own_reason() {
+        for state in [DevServerState::Failed, DevServerState::Stopped] {
+            let mut s = entry(state, None);
+            s.error = Some("Error: Cannot find module 'vite'".into());
+            assert!(!note_exit(&mut s, false));
+            assert_eq!(s.status, state);
+            assert_eq!(s.error.as_deref(), Some("Error: Cannot find module 'vite'"));
+        }
     }
 
     #[test]

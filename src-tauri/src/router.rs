@@ -67,7 +67,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::error::{CoreError, CoreResult};
-use crate::registry::{self, VRAM_BUDGET_MB};
+use crate::registry;
 use crate::state::{now_ms, AppState, Destination, RouterChild};
 use crate::types::*;
 use crate::winproc::{self, JobLimits};
@@ -230,8 +230,9 @@ pub async fn status(st: &AppState) -> CoreStatus {
                     router: true,
                     router_version: version,
                     detail: format!(
-                        "Router on 127.0.0.1:{} — {loaded} model(s) resident of a {VRAM_BUDGET_MB} MiB budget.",
-                        c.port
+                        "Router on 127.0.0.1:{} — {loaded} model(s) resident of a {} MiB budget.",
+                        c.port,
+                        registry::vram_budget_mb()
                     ),
                 }
             } else {
@@ -305,7 +306,7 @@ pub async fn start(st: &Arc<AppState>) -> CoreResult<CoreStatus> {
     let mut cmd = Command::new(&exe);
     cmd.arg("--models-preset").arg(&ini)
         .arg("--models-max").arg(s.max_resident_models.max(1).to_string())
-        .arg("--host").arg("127.0.0.1")
+        .arg("--host").arg(registry::ROUTER_BIND_HOST)
         .arg("--port").arg(port.to_string())
         // The server warns at startup when CORS is `*` with no key. Both halves
         // of that warning are closed here.
@@ -474,9 +475,69 @@ pub fn shutdown_blocking(st: &Arc<AppState>) {
     }
 }
 
+/// Which loaded models have gone unused long enough to give their VRAM back.
+///
+/// Pure, so the rule that matters — never take a model out from under a running
+/// chat — is testable without a router process.
+fn idle_victims(models: &[ModelRuntime], in_use: &HashSet<String>, cutoff: i64) -> Vec<String> {
+    models
+        .iter()
+        // Only `Loaded`: a `Loading` model has an admission decision behind it
+        // that has not finished, and an `Unloading` one is already going.
+        .filter(|r| r.state == ModelState::Loaded && !in_use.contains(&r.id))
+        // No recorded use means no idle time to measure, so it is left alone.
+        .filter(|r| r.last_used_at.is_some_and(|at| at < cutoff))
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// Unloads models nothing has used for `model_idle_evict_sec` seconds.
+///
+/// The setting has existed since the first build and two views state it as fact
+/// — `SettingsView` offers the number, `ModelManagerView` tells the operator that
+/// idle models are released — but nothing implemented it. So a chat model kept
+/// its 4945 MiB for the rest of the session, and the next OCR page paid for an
+/// eviction that should already have happened, or failed admission outright. On a
+/// card this size an idle model holding half of it is the difference between the
+/// handwriting model loading and not.
+///
+/// A model any live run has noted is never evicted: unloading one a chat is
+/// generating from would fail that chat mid-answer. Unlike `make_room` this does
+/// not exempt the asking run, because the poller is not inside one — every noted
+/// model belongs to somebody else. Setting the value to zero turns the sweep off,
+/// which is what an operator who wants a model pinned for a demo needs.
+async fn evict_idle(st: &AppState) {
+    let seconds = i64::from(st.settings().model_idle_evict_sec);
+    if seconds <= 0 {
+        return;
+    }
+    let cutoff = now_ms() - seconds * 1000;
+
+    let in_use: HashSet<String> = match st.runs.lock() {
+        Ok(runs) => runs.values().flat_map(|h| h.noted_models()).collect(),
+        // A poisoned lock is not a reason to start unloading things.
+        Err(_) => return,
+    };
+    let idle = match st.models.read() {
+        Ok(models) => {
+            let all: Vec<ModelRuntime> = models.values().cloned().collect();
+            idle_victims(&all, &in_use, cutoff)
+        }
+        Err(_) => return,
+    };
+
+    for id in idle {
+        // One failure does not stop the sweep, and it is not the operator's
+        // problem: the model stays resident and the next pass tries again.
+        if let Err(e) = unload(st, &id).await {
+            eprintln!("[router] Idle eviction of {id} failed: {}", e.message());
+        }
+    }
+}
+
 /// Polls residency so LRU evictions the router performs on its own show up in
-/// the UI. Ends when the router it was started for is gone, so a restart does
-/// not leave two pollers running.
+/// the UI, and runs the idle sweep. Ends when the router it was started for is
+/// gone, so a restart does not leave two pollers running.
 fn spawn_poller(st: Arc<AppState>, port: u16) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -492,6 +553,7 @@ fn spawn_poller(st: Arc<AppState>, port: u16) {
                 return;
             }
             let _ = refresh_models(&st).await;
+            evict_idle(&st).await;
         }
     });
 }
@@ -506,19 +568,54 @@ fn spawn_poller(st: Arc<AppState>, port: u16) {
 /// build b10718: the router merges its own command line into every child's
 /// preset, and keys written here override it — so global tuning and per-model
 /// overrides layer correctly, and `preset_options` from the catalogue wins.
-fn write_preset_ini(st: &AppState) -> CoreResult<(PathBuf, Vec<(String, String)>)> {
-    let dir = registry::config_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("models.ini");
+///
+/// Written on router start and again when the models directory moves: the file
+/// records absolute weight paths, and the offline/air-gapped setup reads it back
+/// to rehydrate the catalogue, so a moved folder has to be re-rendered rather
+/// than waiting for the next start.
+pub(crate) fn write_preset_ini(st: &AppState) -> CoreResult<(PathBuf, Vec<(String, String)>)> {
+    // `model_preset_path` is the real destination, not a label. The Models
+    // panel tells the operator "sizes match the curated preset at
+    // {modelPresetPath}", which was true only because the default happened to
+    // equal the location hardcoded here; writing where the setting points makes
+    // that claim true by construction, and lets the preset live off the system
+    // drive on a machine where it has to.
+    let configured = st.settings().model_preset_path;
+    let path = if configured.trim().is_empty() {
+        registry::config_dir().join("models.ini")
+    } else {
+        PathBuf::from(configured.trim())
+    };
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
 
     let reg = st.registry.read().map_err(|_| lock_err("registry"))?;
+    let entries: Vec<ModelEntry> = reg.all().to_vec();
+    drop(reg);
+
+    let (out, skipped) = render_preset_ini(&entries);
+    std::fs::write(&path, out)?;
+    Ok((path, skipped))
+}
+
+/// Renders the `models.ini` body from one catalogue snapshot: a `[id]` section
+/// per enabled this-device model whose weights (and projector, if any) are on
+/// disk. Disabled models, private-server models and models whose files have
+/// moved away are left out and reported back rather than written — a preset must
+/// never point at weights that are not there.
+///
+/// Pure apart from the `Path::is_file` probes, so the router-start write and a
+/// rewrite after the models directory moves share one implementation and cannot
+/// drift.
+fn render_preset_ini(entries: &[ModelEntry]) -> (String, Vec<(String, String)>) {
     let mut out = String::from(
         "; Generated by Sovereign AI Workbench from the model catalogue.\n\
          ; Edit models.json instead — this file is rewritten on every start.\n\n",
     );
     let mut skipped = Vec::new();
 
-    for e in reg.all() {
+    for e in entries {
         if e.priority == ModelPriority::Disabled {
             continue;
         }
@@ -582,10 +679,7 @@ fn write_preset_ini(st: &AppState) -> CoreResult<(PathBuf, Vec<(String, String)>
         out.push_str(&extra);
         out.push('\n');
     }
-    drop(reg);
-
-    std::fs::write(&path, out)?;
-    Ok((path, skipped))
+    (out, skipped)
 }
 
 fn free_port() -> CoreResult<u16> {
@@ -904,14 +998,21 @@ async fn unload(st: &AppState, model_id: &str) -> CoreResult<()> {
 /// backstop. Least-recently-used goes first, which is why `last_used_at` is
 /// touched on every request rather than only on load.
 async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
-    if want.estimated_vram_mb > VRAM_BUDGET_MB {
+    // The sharing budget is not the ceiling for a model that will be alone on
+    // the card. Only a model that cannot fit even by itself is impossible.
+    if want.estimated_vram_mb > registry::vram_solo_mb() {
         return Err(CoreError::InsufficientVram(format!(
-            "{} needs about {} MiB and the working budget on this device is {VRAM_BUDGET_MB} MiB of {} MiB total. Nothing was evicted and nothing was loaded.",
+            "{} needs about {} MiB and the most a single model may hold on this device is {} MiB of {} MiB total. Nothing was evicted and nothing was loaded.",
             want.display_name,
             want.estimated_vram_mb,
-            registry::VRAM_TOTAL_MB
+            registry::vram_solo_mb(),
+            registry::vram_total_mb()
         )));
     }
+    // The router's own count. Admission has to respect it too: admitting a model
+    // the router will not keep means the router evicts one of its own choosing,
+    // including a model a concurrent chat is generating from.
+    let cap = st.settings().max_resident_models.max(1) as usize;
 
     loop {
         // Recomputed each pass: an eviction changes the set, and a run may have
@@ -956,7 +1057,16 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
         };
 
         let used: u32 = resident.iter().map(|(_, mb, _)| *mb).sum();
-        if used + want.estimated_vram_mb <= VRAM_BUDGET_MB {
+        // How many the router is already holding, counting the ones this pass
+        // may not touch.
+        let live = in_use.len() + resident.len();
+        let fits_bytes = if live == 0 {
+            // Alone on the card: the sharing headroom is not needed.
+            want.estimated_vram_mb <= registry::vram_solo_mb()
+        } else {
+            used + held_mb + want.estimated_vram_mb <= registry::vram_budget_mb()
+        };
+        if fits_bytes && live + 1 <= cap {
             return Ok(());
         }
 
@@ -970,10 +1080,13 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
             Some(id) => unload(st, &id).await?,
             None => {
                 return Err(CoreError::InsufficientVram(format!(
-                    "{} needs about {} MiB, {used} MiB is resident and evictable, and the budget is {VRAM_BUDGET_MB} MiB. {} MiB more is held by models other running chats are using, which were not evicted. Wait for those chats to finish, or stop one of them.",
+                    "{} needs about {} MiB, {used} MiB is resident and evictable, and the sharing budget is {} MiB of which a single model may hold {}. {} MiB is held by {} model(s) other running chats are using, which were not evicted, and this device keeps at most {cap} model(s) resident. Wait for those chats to finish, or stop one of them.",
                     want.display_name,
                     want.estimated_vram_mb,
-                    held_mb
+                    registry::vram_budget_mb(),
+                    registry::vram_solo_mb(),
+                    held_mb,
+                    in_use.len()
                 )))
             }
         }
@@ -1570,5 +1683,198 @@ mod reasoning_split {
         let out = parse_completion(&v, "qwen3.5-9b").expect("parses");
         assert_eq!(out.reasoning, "");
         assert_eq!(out.text, "11.9 mm.");
+    }
+}
+
+#[cfg(test)]
+mod idle_eviction {
+    use super::*;
+
+    fn model(id: &str, state: ModelState, last_used_at: Option<i64>) -> ModelRuntime {
+        ModelRuntime { state, last_used_at, ..ModelRuntime::unloaded(id) }
+    }
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn a_model_idle_past_the_cutoff_is_released() {
+        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(500))];
+        assert_eq!(idle_victims(&models, &none(), 1_000), vec!["qwen3.5-9b".to_string()]);
+    }
+
+    #[test]
+    fn a_model_used_since_the_cutoff_is_kept() {
+        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(1_500))];
+        assert!(idle_victims(&models, &none(), 1_000).is_empty());
+    }
+
+    /// The rule that matters. A chat generating from a model has noted it, and
+    /// unloading it mid-answer would fail that chat — idle time is irrelevant
+    /// while a run holds it, because the last request only gets its timestamp
+    /// touched when it starts.
+    #[test]
+    fn a_model_a_live_run_is_using_is_never_released() {
+        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(0))];
+        let in_use: HashSet<String> = ["qwen3.5-9b".to_string()].into_iter().collect();
+        assert!(idle_victims(&models, &in_use, 1_000).is_empty());
+    }
+
+    /// A load or an unload already in flight is left to finish. Evicting a
+    /// `Loading` model would throw away the admission `make_room` just made
+    /// room for.
+    #[test]
+    fn only_a_settled_load_is_a_candidate() {
+        for state in [ModelState::Loading, ModelState::Unloading, ModelState::Unloaded, ModelState::Error] {
+            let models = [model("qwen3.5-9b", state, Some(0))];
+            assert!(idle_victims(&models, &none(), 1_000).is_empty(), "{state:?} was evicted");
+        }
+    }
+
+    /// Nothing has used it since the app started, so there is no idle interval
+    /// to compare — an unused entry is not the same as a stale one.
+    #[test]
+    fn a_model_with_no_recorded_use_is_left_alone() {
+        let models = [model("bge-m3", ModelState::Loaded, None)];
+        assert!(idle_victims(&models, &none(), 1_000).is_empty());
+    }
+
+    #[test]
+    fn every_idle_model_goes_in_one_sweep_and_the_busy_one_stays() {
+        let models = [
+            model("bge-m3", ModelState::Loaded, Some(10)),
+            model("qwen3.5-9b", ModelState::Loaded, Some(20)),
+            model("olmocr-2", ModelState::Loaded, Some(30)),
+        ];
+        let in_use: HashSet<String> = ["qwen3.5-9b".to_string()].into_iter().collect();
+        let mut got = idle_victims(&models, &in_use, 1_000);
+        got.sort();
+        assert_eq!(got, vec!["bge-m3".to_string(), "olmocr-2".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod preset_ini {
+    use super::*;
+
+    /// One model whose weights the catalogue stores under the portable
+    /// `${MODELS_ROOT}` token, the way `Registry::persist` writes it. Moving the
+    /// models-directory setting is what re-resolves that token against a new
+    /// folder, so this is the shape a moved-folder rewrite has to handle.
+    fn catalogue() -> crate::registry::ModelCatalogue {
+        crate::registry::ModelCatalogue {
+            version: 1,
+            models: vec![ModelEntry {
+                id: "moved-chat".into(),
+                display_name: "Moved Chat".into(),
+                backend: ModelBackend::LlamaCpp,
+                location: ModelLocation::ThisDevice,
+                source: "${MODELS_ROOT}/moved-chat.gguf".into(),
+                projector: None,
+                architecture: "llama".into(),
+                quantization: "Q4_K_M".into(),
+                context_size: 32_768,
+                trained_context: 32_768,
+                kv_cache_type: None,
+                capabilities: vec![ModelCapability::General],
+                estimated_vram_mb: 4_096,
+                file_size_bytes: 1,
+                priority: ModelPriority::Primary,
+                prompt_tokens_per_sec: None,
+                gen_tokens_per_sec: None,
+                note: None,
+                preset_options: None,
+            }],
+            routing: Vec::new(),
+        }
+    }
+
+    /// The catalogue reloaded the way `settings_set` does after a models-directory
+    /// change: `load_or_seed` expands `${MODELS_ROOT}` against `root`, handing the
+    /// renderer entries already pointed at that folder.
+    fn entries_at(config_dir: &Path, root: &str) -> Vec<ModelEntry> {
+        crate::registry::Registry::load_or_seed(config_dir, root)
+            .expect("the written catalogue should load")
+            .all()
+            .to_vec()
+    }
+
+    fn slash(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn a_moved_models_folder_is_rerendered_under_the_new_root() {
+        let base = std::env::temp_dir().join(format!(
+            "servergen-moved-models-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let cfg = base.join("config");
+        let old_root = base.join("models-old");
+        let new_root = base.join("models-new");
+        std::fs::create_dir_all(&cfg).expect("config dir");
+        std::fs::create_dir_all(&old_root).expect("old models dir");
+        std::fs::create_dir_all(&new_root).expect("new models dir");
+        std::fs::write(cfg.join("models.json"), serde_json::to_string(&catalogue()).expect("serialise"))
+            .expect("write catalogue");
+
+        let old_dir = slash(&old_root);
+        let new_dir = slash(&new_root);
+
+        // Phase 1 — weights live in the old folder, as the preset written at the
+        // last router start records.
+        std::fs::write(old_root.join("moved-chat.gguf"), b"test weights").expect("old weights");
+        let (pre_move, pre_skipped) = render_preset_ini(&entries_at(&cfg, &old_dir));
+        assert!(pre_skipped.is_empty(), "weights are present: {pre_skipped:?}");
+        assert!(
+            pre_move.contains(&format!("model = {old_dir}/moved-chat.gguf")),
+            "preset before the move: {pre_move}"
+        );
+
+        // Phase 2 — the operator moves the weights and repoints the setting. The
+        // catalogue reloads against the new folder, so the render must follow:
+        // leaving `models.ini` as it was would keep a `model =` line pointing at
+        // a file that no longer exists.
+        std::fs::write(new_root.join("moved-chat.gguf"), b"test weights").expect("new weights");
+        std::fs::remove_file(old_root.join("moved-chat.gguf")).expect("old weights removed");
+
+        let (post_move, post_skipped) = render_preset_ini(&entries_at(&cfg, &new_dir));
+        assert!(post_skipped.is_empty(), "weights are present: {post_skipped:?}");
+        assert!(
+            post_move.contains(&format!("model = {new_dir}/moved-chat.gguf")),
+            "preset after the move: {post_move}"
+        );
+        assert!(!post_move.contains(&old_dir), "still references the old folder: {post_move}");
+        assert_ne!(
+            pre_move, post_move,
+            "a rewrite that does not change the preset is a no-op"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_preset_never_points_at_weights_that_moved_away() {
+        let base = std::env::temp_dir().join(format!(
+            "servergen-gone-weights-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let cfg = base.join("config");
+        let empty = base.join("models");
+        std::fs::create_dir_all(&cfg).expect("config dir");
+        std::fs::create_dir_all(&empty).expect("models dir");
+        std::fs::write(cfg.join("models.json"), serde_json::to_string(&catalogue()).expect("serialise"))
+            .expect("write catalogue");
+
+        // The weights are never under this root, so the entry must be reported
+        // missing rather than rendered as a dead `model =` line.
+        let (text, skipped) = render_preset_ini(&entries_at(&cfg, &slash(&empty)));
+        assert!(!text.contains("[moved-chat]"), "a missing model must not be written: {text}");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "moved-chat");
+        assert!(skipped[0].1.contains("were not found"), "reason: {}", skipped[0].1);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

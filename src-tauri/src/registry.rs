@@ -21,10 +21,80 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CoreError, CoreResult};
 use crate::types::*;
 
-/// Usable VRAM, not installed VRAM: the card reports 8187 MiB but the desktop
-/// compositor holds roughly a gigabyte, leaving ~7106 MiB actually free.
+/// The card this catalogue was measured on: 8187 MiB installed, of which the
+/// desktop compositor holds roughly a gigabyte, leaving ~7106 MiB actually free.
+///
+/// These two are the *fallbacks*. Everything that admits a model goes through
+/// `vram_total_mb`, `vram_budget_mb` and `vram_solo_mb` below, which prefer what
+/// `nvidia-smi` measured on the machine actually running. The same build then
+/// admits correctly on hardware this catalogue was not tuned for: a 6 GiB laptop
+/// refuses olmOCR-2 with a reason the operator can read instead of letting the
+/// WDDM driver page it into system RAM and serve the demo at a tenth of the
+/// speed. §1 — the numbers a decision is made from should be the machine's own.
 pub const VRAM_BUDGET_MB: u32 = 7106;
 pub const VRAM_TOTAL_MB: u32 = 8187;
+
+/// The only address the router is ever bound to.
+///
+/// This was an editable setting, and the Settings panel offered it beside the
+/// port while the spawn passed a hardcoded `--host 127.0.0.1` — so the field the
+/// operator could type into had no effect, and the Sovereignty panel presented
+/// that same ignored field as the daemon's actual bind. Both readings were wrong,
+/// and the fixable half is not the code: §1 forbids the models being reachable
+/// from off the machine, so a host the operator can change is a setting whose
+/// only working value is this one. It is a constant, the panel states it as a
+/// fact, and the port stays configurable because a port collision is real.
+pub const ROUTER_BIND_HOST: &str = "127.0.0.1";
+
+/// What the display alone needs left over: 512 MiB, which is what Windows holds
+/// on this card with nothing running.
+const DISPLAY_RESERVE_MB: u32 = 512;
+/// What to leave when two models are meant to share the card. Larger than the
+/// display reserve because a second model's KV cache grows during a request, and
+/// derived from the pair above so the tuned machine reproduces 7106 exactly.
+const SHARING_RESERVE_MB: u32 = VRAM_TOTAL_MB - VRAM_BUDGET_MB;
+
+/// The card's total, measured if `nvidia-smi` has answered once this session.
+///
+/// The hardware poller samples every two seconds and publishes the reading;
+/// `make_room` is synchronous and on the request path, so it cannot spawn
+/// `nvidia-smi` itself. Before the first sample — and on a machine with no
+/// `nvidia-smi` at all — this is the catalogue's figure, which is what the
+/// tuning was done against.
+pub fn vram_total_mb() -> u32 {
+    crate::hardware::measured_vram_total_mb().unwrap_or(VRAM_TOTAL_MB)
+}
+
+/// The sharing budget: what all resident models together may occupy.
+pub fn vram_budget_mb() -> u32 {
+    sharing_budget(vram_total_mb())
+}
+
+/// Split out from `vram_budget_mb` so the arithmetic is testable without a card.
+fn sharing_budget(total_mb: u32) -> u32 {
+    total_mb.saturating_sub(SHARING_RESERVE_MB).max(1)
+}
+
+/// The most a *single* model may occupy when it is the only thing resident.
+///
+/// The sharing budget leaves room for a second model beside the first, and for
+/// the desktop. A model that is alone on the card needs neither, and the largest
+/// specialist here — olmOCR 2 at 7387 MiB, whose own catalogue note says
+/// "nothing else may be resident" — sits above the sharing budget and below
+/// this one.
+///
+/// Without the distinction that note described a configuration the code refused
+/// to enter: every handwritten page and every olmOCR re-read failed admission
+/// with "needs about 7387 MiB and the working budget is 7106 MiB", so the
+/// Handwriting primary could not load at all.
+pub fn vram_solo_mb() -> u32 {
+    solo_budget(vram_total_mb())
+}
+
+/// Split out from `vram_solo_mb` so the arithmetic is testable without a card.
+fn solo_budget(total_mb: u32) -> u32 {
+    total_mb.saturating_sub(DISPLAY_RESERVE_MB).max(1)
+}
 
 const MODELS_ROOT_TOKEN: &str = "${MODELS_ROOT}";
 
@@ -106,9 +176,9 @@ pub fn routing_rules() -> Vec<RouteRule> {
         rule(DigitalDocument, "Digital PDF / DOCX / XLSX / PPTX", FileType, None, None,
             "Native text extraction. No model is loaded and no OCR is run."),
         rule(ScannedDocument, "Scanned or photographed page", FileType, Some("paddleocr-vl-1.6"), Some("olmocr-2"),
-            "Printed text with no embedded text layer. 0.87 GiB and 280 tok/s."),
+            "Printed text with no embedded text layer. 0.87 GiB and 280 tok/s. A page it returns too thin to be a transcription is read again by olmOCR."),
         rule(Handwriting, "Handwritten notes / poor-quality scan", Rule, Some("olmocr-2"), Some("qwen3.5-9b"),
-            "Chosen when OCR confidence falls below threshold or the file is marked handwritten."),
+            "Chosen when the file is marked handwritten, and reached by escalation when the printed-text reader returns a page of fragments."),
         rule(EngineeringDrawing, "Engineering drawing / P&ID", Rule, Some("qwen3.5-9b"), Some("olmocr-2"),
             "Tag extraction plus vision reasoning over topology, in one pass."),
         rule(Photograph, "Equipment photograph", FileType, Some("qwen3.5-9b"), None,
@@ -265,11 +335,52 @@ pub fn default_sandbox_policy() -> SandboxPolicy {
     }
 }
 
+/// Whether a candidate directory actually holds weights, rather than merely
+/// existing.
+///
+/// The catalogue stores `<model-id>/<file>.gguf` and speech weights in `stt/`, so
+/// one level down is enough to tell a populated models root from an empty one.
+fn holds_weights(dir: &Path) -> bool {
+    fn is_weight(path: &Path) -> bool {
+        matches!(
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("gguf" | "bin" | "safetensors")
+        )
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        is_weight(&path)
+            || (path.is_dir()
+                && std::fs::read_dir(&path)
+                    .map(|inner| inner.flatten().any(|e| is_weight(&e.path())))
+                    .unwrap_or(false))
+    })
+}
+
 /// Where the weights are, if nothing has told us otherwise: a `models` folder
 /// beside the sovereign root, else beside the executable, else the checked-in
-/// development location. The first that exists wins, so a fresh install on a
-/// plant workstation finds its own layout rather than this developer's.
+/// development location.
+///
+/// The one that *holds weights* wins, not the first one that exists. Those came
+/// apart on this very machine: `C:/sovereign/models` is part of the installed
+/// layout and was created empty, so the first-existing rule pointed a fresh
+/// database at an empty folder while all seven models — and the three whisper
+/// weights under `stt/` — sat in the third candidate. The catalogue then loaded
+/// with every path missing, which the Models panel can only report as models not
+/// being installed. A directory that exists but holds nothing is still the right
+/// answer when none of the candidates has weights yet, because it is the folder
+/// the operator is meant to fill; it is the wrong answer when a populated one is
+/// sitting behind it in the list.
 pub fn detect_models_root() -> String {
+    fn normalised(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
     let candidates = [
         sovereign_root().join("models"),
         std::env::current_exe().ok()
@@ -277,12 +388,13 @@ pub fn detect_models_root() -> String {
             .unwrap_or_default(),
         PathBuf::from("C:/Users/harih/OneDrive/Documents/ocr/models"),
     ];
-    for c in candidates.iter() {
-        if c.is_dir() {
-            return c.to_string_lossy().replace('\\', "/");
-        }
+    if let Some(c) = candidates.iter().find(|c| holds_weights(c)) {
+        return normalised(c);
     }
-    sovereign_root().join("models").to_string_lossy().replace('\\', "/")
+    if let Some(c) = candidates.iter().find(|c| c.is_dir()) {
+        return normalised(c);
+    }
+    normalised(&sovereign_root().join("models"))
 }
 
 fn detect_llama_server() -> String {
@@ -306,11 +418,18 @@ pub fn default_settings() -> AppSettings {
         llama_server_path: detect_llama_server(),
         model_preset_path: config_dir().join("models.ini").to_string_lossy().replace('\\', "/"),
         models_directory: detect_models_root(),
-        router_host: "127.0.0.1".into(),
         router_port: 18080,
-        // One resident model. The 8 GiB budget does not hold two, and eviction
-        // is driven by this number rather than an explicit unload call.
-        max_resident_models: 1,
+        // Two. The byte budget in `router::make_room` is the real limit;
+        // `--models-max` is the router's own count, and at 1 the router evicted
+        // whatever the budget had just admitted — so the embeddings model and
+        // the chat model, which fit together (1300 + 4945 MiB inside 7106),
+        // thrashed against each other on every retrieval query.
+        max_resident_models: 2,
+        // Three idle minutes and a model gives its VRAM back, swept by
+        // `router::evict_idle`. Long enough to survive a pause for thought
+        // mid-conversation, short enough that a finished chat is not still
+        // holding 4945 MiB when the operator drops in a scanned drawing. Zero
+        // keeps every loaded model resident for the session.
         model_idle_evict_sec: 180,
         extended_thinking: false,
 
@@ -735,6 +854,33 @@ impl Registry {
         self.by_capability(ModelCapability::Embeddings).first().copied()
     }
 
+    /// The model to escalate to when the primary's transcription cannot be
+    /// trusted — §3's "or the file is marked handwritten" clause, from the other
+    /// direction.
+    ///
+    /// Distinct from the substitution `route` already makes. That one covers
+    /// weights that are not on disk and answers before any work is done; this one
+    /// answers after a first pass has come back unreadable, which is the case the
+    /// Handwriting and ScannedDocument rules are written for: a poor-quality scan
+    /// or a page of handwriting that PaddleOCR renders as a few characters of
+    /// noise should be tried again by olmOCR rather than returned as the best that
+    /// could be managed.
+    ///
+    /// `None` means there is nothing better to try — no fallback declared, its
+    /// weights are absent, or it is the model that just failed. Callers must not
+    /// invent one: escalating to a model that is not there produces a second
+    /// failure and hides the first.
+    pub fn escalation(&self, kind: TaskKind, tried: &str) -> Option<String> {
+        let fallback = self.rules.iter().find(|r| r.kind == kind)?.fallback_model_id.clone()?;
+        if fallback == tried || !self.is_present(&fallback) {
+            return None;
+        }
+        // A fallback that cannot do the task is not a fallback. The rules are
+        // operator-editable, so this is checked rather than assumed.
+        let entry = self.get(&fallback)?;
+        (entry.priority != ModelPriority::Disabled && supports_route(entry, kind)).then_some(fallback)
+    }
+
     /// §3 — routing, deterministic wherever the rules can decide.
     ///
     /// `token_estimate` overrides the task rule when the input will not fit:
@@ -882,14 +1028,45 @@ impl Registry {
             });
 
         let Some(candidate) = candidate else {
+            // No coordinator, so say why honestly. Either no installed model can
+            // run this kind of turn at all, or one can but none has room for this
+            // conversation. The single old message — "no model is registered for
+            // this kind of task" — blamed the catalogue for what is usually a
+            // context-budget miss, and sent the operator hunting for a model that
+            // was already installed.
+            let tool_and_cap = |m: &ModelEntry| {
+                m.priority != ModelPriority::Disabled
+                    && m.capabilities.contains(&ModelCapability::Tools)
+                    && m.capabilities.contains(&needed)
+                    && self.is_present(&m.id)
+            };
+            let capable: Vec<&ModelEntry> = self
+                .by_capability(ModelCapability::Tools)
+                .into_iter()
+                .filter(|m| tool_and_cap(m))
+                .collect();
+            let reason = if capable.is_empty() {
+                format!(
+                    "No installed model supports both tools and {needed:?}, so nothing can run this as an \
+agent turn; an OCR, embedding, or other specialist cannot coordinate."
+                )
+            } else if let Some(tokens) = token_estimate {
+                let biggest = capable.iter().map(|m| m.context_size).max().unwrap_or(0);
+                format!(
+                    "Every {needed:?}-capable tool model fits less than the ~{tokens} tokens this turn \
+needs (the largest window is {biggest}), and no substitute fits either. Shorten the task or raise a \
+model's context size."
+                )
+            } else {
+                format!(
+                    "The installed {needed:?}-capable tool models were not selected for this turn."
+                )
+            };
             return RouteDecision {
                 kind,
                 basis: worker.basis,
                 model_id: None,
-                reason: format!(
-                    "No installed model supports both tools and {:?}; an OCR, embedding, or other specialist was not substituted.",
-                    needed
-                ),
+                reason,
             };
         };
 
@@ -923,8 +1100,14 @@ impl Registry {
 
     /// §3 — file-type routing. Extension only: opening a file to decide how to
     /// open it is the sort of unnecessary work the brief rules out. `Handwriting`
-    /// and `EngineeringDrawing` are never inferred from an extension; they come
-    /// from an explicit marking or from low OCR confidence.
+    /// and `EngineeringDrawing` are never decided here — every image returns
+    /// `ScannedDocument` whatever its extension — so a caller that needs one of
+    /// the narrow kinds must ask `documents::classify_image`, which reads the
+    /// name and the pixels. A drawing is a file name carrying a drawing marker
+    /// (p&id, schematic, isometric, …) or a near-white sheet with ≥ 6 sampled
+    /// long straight-line runs; handwriting is a file name carrying a handwriting
+    /// marker (handwrit, notes, sketch, …) and nothing more. No OCR-confidence
+    /// number exists in that decision.
     pub fn classify_path(path: &str) -> TaskKind {
         let ext = Path::new(path)
             .extension()
@@ -1155,5 +1338,361 @@ mod local_model_catalogue_tests {
         assert!(agent.reason.contains("extracted natively"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// When no coordinator exists, the `None` answer must say why — and it is
+    /// usually not "nothing is registered". A tool-capable model that is present
+    /// but too small for the conversation is a different diagnosis from no
+    /// capable model at all; blurring them sends the operator hunting for a
+    /// model that was already installed.
+    #[test]
+    fn a_missing_coordinator_names_whether_the_cause_is_capability_or_context() {
+        let dir = std::env::temp_dir().join(format!(
+            "servergen-no-coordinator-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary routing directory");
+
+        // No coordinator at all: nothing in the catalogue can run the turn as an
+        // agent, whatever the conversation's size.
+        let none_at_all = Registry {
+            models: vec![],
+            rules: routing_rules(),
+            path: dir.join("empty-models.json"),
+        };
+        let empty = none_at_all.route_agent(TaskKind::ScannedDocument, Some(1_000));
+        assert_eq!(empty.model_id, None);
+        assert!(
+            empty.reason.contains("No installed model supports both tools"),
+            "{}",
+            empty.reason
+        );
+
+        // A coordinator is present but far smaller than the conversation.
+        let mut tiny = present_model(
+            &dir,
+            "tiny-coordinator",
+            vec![
+                ModelCapability::Reasoning,
+                ModelCapability::Documents,
+                ModelCapability::Tools,
+            ],
+            ModelPriority::Primary,
+        );
+        tiny.context_size = 32_768;
+        let registry = Registry {
+            models: vec![tiny],
+            rules: routing_rules(),
+            path: dir.join("small-models.json"),
+        };
+        let fits_nobody = registry.route_agent(TaskKind::ScannedDocument, Some(1_000_000));
+        assert_eq!(fits_nobody.model_id, None);
+        assert!(
+            fits_nobody.reason.contains("fits less than the ~1000000 tokens"),
+            "{}",
+            fits_nobody.reason
+        );
+        assert!(
+            !fits_nobody.reason.contains("No installed model supports"),
+            "the model is installed; the message must not say otherwise: {}",
+            fits_nobody.reason
+        );
+
+        // The same catalogue answers fine for a conversation that fits: the
+        // model was never the problem.
+        let fits = registry.route_agent(TaskKind::ScannedDocument, None);
+        assert_eq!(fits.model_id.as_deref(), Some("tiny-coordinator"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The estimate the caller now passes to `route_agent` is the whole first
+    /// request — message text *plus* the tool schemas attached to it — so a turn
+    /// that looked roomy on messages alone is routinely several thousand tokens
+    /// bigger than selection used to believe (a fresh turn rejected by the server
+    /// with a context 500, before compaction had anything to drop). Routing must
+    /// honour that larger figure: a Reasoning turn that no longer fits the 16k
+    /// primary moves to the installed long-context coordinator rather than being
+    /// blessed onto the model whose server window it would overflow.
+    #[test]
+    fn a_turn_too_big_for_the_16k_reasoner_moves_to_the_long_context_coordinator() {
+        let dir = std::env::temp_dir().join(format!(
+            "servergen-schema-reasoning-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary routing directory");
+        let mut primary = present_model(
+            &dir,
+            "qwen3.5-9b",
+            vec![
+                ModelCapability::General,
+                ModelCapability::Reasoning,
+                ModelCapability::Tools,
+            ],
+            ModelPriority::Primary,
+        );
+        primary.context_size = 16_384; // the live catalogue runs it here
+        let mut long = present_model(
+            &dir,
+            "nemotron-3-nano-4b",
+            vec![
+                ModelCapability::General,
+                ModelCapability::Reasoning,
+                ModelCapability::LongContext,
+                ModelCapability::Tools,
+            ],
+            ModelPriority::Primary,
+        );
+        long.context_size = 131_072;
+        let registry = Registry {
+            models: vec![primary, long],
+            rules: routing_rules(),
+            path: dir.join("models.json"),
+        };
+
+        // Message text alone (~10k) with its routing slack still fits the 16k
+        // primary…
+        let fits = registry.route_agent(TaskKind::Reasoning, Some(10_000));
+        assert_eq!(fits.model_id.as_deref(), Some("qwen3.5-9b"));
+        // …but once the tool schemas the request carries are counted the same
+        // turn needs more than the primary's window holds, and must not be sent
+        // there to be rejected by the server.
+        let decision = registry.route_agent(TaskKind::Reasoning, Some(15_000));
+        assert_eq!(decision.model_id.as_deref(), Some("nemotron-3-nano-4b"));
+        assert_eq!(decision.basis, RouteBasis::TokenBudget);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Coding twin of the overflow guard. The coding models run at 16k, so
+    /// a code request whose full size crosses that line must not be left with
+    /// the 16k coder — the installed long-context coordinator (which can reason
+    /// and drive tools even though it is not tagged for coding) takes it, so the
+    /// operator gets an answer instead of a context 500.
+    #[test]
+    fn a_code_turn_over_the_coding_windows_is_not_left_on_the_16k_coder() {
+        let dir = std::env::temp_dir().join(format!(
+            "servergen-schema-coding-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary routing directory");
+        let mut coder = present_model(
+            &dir,
+            "nemotron-cascade-8b",
+            vec![
+                ModelCapability::General,
+                ModelCapability::Reasoning,
+                ModelCapability::Coding,
+                ModelCapability::Tools,
+            ],
+            ModelPriority::Primary,
+        );
+        coder.context_size = 16_384;
+        let mut long = present_model(
+            &dir,
+            "nemotron-3-nano-4b",
+            vec![
+                ModelCapability::General,
+                ModelCapability::Reasoning,
+                ModelCapability::LongContext,
+                ModelCapability::Tools,
+            ],
+            ModelPriority::Primary,
+        );
+        long.context_size = 131_072;
+        let registry = Registry {
+            models: vec![coder, long],
+            rules: routing_rules(),
+            path: dir.join("models.json"),
+        };
+
+        let fits = registry.route_agent(TaskKind::Code, Some(10_000));
+        assert_eq!(fits.model_id.as_deref(), Some("nemotron-cascade-8b"));
+
+        let decision = registry.route_agent(TaskKind::Code, Some(15_000));
+        assert_eq!(
+            decision.model_id.as_deref(),
+            Some("nemotron-3-nano-4b"),
+            "a 15k-token code request must leave the 16k coder"
+        );
+        assert_eq!(decision.basis, RouteBasis::TokenBudget);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §3 — the second chance the ScannedDocument rule promises, and its limits.
+    ///
+    /// `route` substitutes when weights are missing, before any work is done.
+    /// This is the other case: PaddleOCR-VL has already run and returned a page
+    /// of fragments, so the fallback is tried with the page it failed on. The
+    /// three `None` answers matter as much as the `Some`: escalating to the model
+    /// that just failed loops, escalating to absent weights fails twice and hides
+    /// the first failure, and escalating to a model the operator disabled
+    /// overrides their decision.
+    #[test]
+    fn an_unreadable_page_escalates_once_and_never_to_a_dead_end() {
+        let dir = std::env::temp_dir().join(format!(
+            "servergen-escalation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary routing directory");
+        let fast = present_model(
+            &dir,
+            "paddleocr-vl-1.6",
+            vec![ModelCapability::Ocr, ModelCapability::Documents],
+            ModelPriority::Specialist,
+        );
+        let thorough = present_model(
+            &dir,
+            "olmocr-2",
+            vec![ModelCapability::Ocr, ModelCapability::Handwriting],
+            ModelPriority::Specialist,
+        );
+        let mut registry = Registry {
+            models: vec![fast, thorough],
+            rules: routing_rules(),
+            path: dir.join("models.json"),
+        };
+
+        // The page came back as fragments from the fast reader, so olmOCR reads it.
+        assert_eq!(
+            registry.escalation(TaskKind::ScannedDocument, "paddleocr-vl-1.6").as_deref(),
+            Some("olmocr-2")
+        );
+        // Already olmOCR's own failure: there is nothing better to try.
+        assert_eq!(registry.escalation(TaskKind::ScannedDocument, "olmocr-2"), None);
+        // A task whose fallback is not installed does not get a phantom retry.
+        assert_eq!(registry.escalation(TaskKind::Handwriting, "olmocr-2"), None);
+
+        // An operator who disables a model has decided it is not to be used, and
+        // a failure elsewhere does not reopen that decision.
+        registry
+            .models
+            .iter_mut()
+            .find(|m| m.id == "olmocr-2")
+            .expect("thorough reader")
+            .priority = ModelPriority::Disabled;
+        assert_eq!(registry.escalation(TaskKind::ScannedDocument, "paddleocr-vl-1.6"), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod vram_budgets {
+    use super::*;
+
+    /// The whole point of deriving the budgets rather than hardcoding them: on
+    /// the machine the catalogue was measured on, the derivation has to reproduce
+    /// the two numbers every tuning decision in `router` was made against.
+    #[test]
+    fn the_tuned_card_reproduces_the_catalogue_figures() {
+        assert_eq!(sharing_budget(VRAM_TOTAL_MB), VRAM_BUDGET_MB);
+        assert_eq!(solo_budget(VRAM_TOTAL_MB), 7_675);
+    }
+
+    /// olmOCR-2 needs 7387 MiB. It is admitted solo here and refused on a
+    /// smaller card — which is the correct answer, and the one the operator can
+    /// act on. Letting it load anyway is how a demo ends up serving 4 tok/s from
+    /// system RAM with nothing on screen to say why.
+    #[test]
+    fn the_handwriting_model_fits_solo_here_and_not_on_a_six_gigabyte_card() {
+        assert!(7_387 <= solo_budget(VRAM_TOTAL_MB));
+        assert!(7_387 > solo_budget(6_144));
+    }
+
+    /// The chat and embedding models share on this card (4945 + 1300), which is
+    /// what `max_resident_models: 2` exists for.
+    #[test]
+    fn the_sharing_pair_still_fits_the_sharing_budget() {
+        assert!(4_945 + 1_300 <= sharing_budget(VRAM_TOTAL_MB));
+    }
+
+    /// A larger card is allowed to hold more rather than being pinned to the
+    /// figures this laptop happened to have.
+    #[test]
+    fn a_bigger_card_gets_a_bigger_budget() {
+        assert!(sharing_budget(16_384) > sharing_budget(VRAM_TOTAL_MB));
+        assert!(solo_budget(16_384) > solo_budget(VRAM_TOTAL_MB));
+    }
+
+    /// A budget of zero would make every admission impossible and divide-by-zero
+    /// the panel's percentage bar. Nonsense readings floor at 1 MiB instead, and
+    /// the reserve is never subtracted below that.
+    #[test]
+    fn an_absurd_reading_cannot_produce_a_zero_budget() {
+        assert_eq!(sharing_budget(0), 1);
+        assert_eq!(solo_budget(0), 1);
+        assert_eq!(sharing_budget(256), 1);
+    }
+
+    /// Solo is the looser of the two by construction: a model alone on the card
+    /// needs no room for a neighbour.
+    #[test]
+    fn solo_is_never_stricter_than_sharing() {
+        for total in [0, 256, 2_048, 6_144, VRAM_TOTAL_MB, 16_384, 24_576] {
+            assert!(solo_budget(total) >= sharing_budget(total), "{total} MiB");
+        }
+    }
+}
+
+#[cfg(test)]
+mod models_root_detection {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("servergen-root-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    /// The case that actually happened: the installed layout creates
+    /// `<sovereign>/models` empty, and the weights are somewhere else.
+    #[test]
+    fn an_empty_directory_does_not_look_like_a_models_root() {
+        let dir = scratch("empty");
+        assert!(!holds_weights(&dir));
+        std::fs::create_dir_all(dir.join("stt")).expect("empty subdirectory");
+        assert!(!holds_weights(&dir), "a directory of empty directories is still empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// How the catalogue stores them: `<model-id>/<file>.gguf`.
+    #[test]
+    fn a_gguf_one_level_down_is_a_models_root() {
+        let dir = scratch("gguf");
+        std::fs::create_dir_all(dir.join("qwen3.5-9b")).expect("model directory");
+        std::fs::write(dir.join("qwen3.5-9b/Q4_K_M.gguf"), b"x").expect("weight file");
+        assert!(holds_weights(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Speech weights are `.bin` under `stt/`, and a root holding only those is
+    /// still a root — the mic has to work on a machine where the chat models were
+    /// not copied over.
+    #[test]
+    fn whisper_weights_alone_still_count() {
+        let dir = scratch("stt");
+        std::fs::create_dir_all(dir.join("stt")).expect("stt directory");
+        std::fs::write(dir.join("stt/ggml-base.bin"), b"x").expect("weight file");
+        assert!(holds_weights(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A README beside the weights is normal; a directory of only documentation
+    /// is not a models root.
+    #[test]
+    fn documentation_is_not_a_weight() {
+        let dir = scratch("docs");
+        std::fs::write(dir.join("MANIFEST.md"), b"x").expect("doc file");
+        std::fs::create_dir_all(dir.join("olmocr-2")).expect("model directory");
+        std::fs::write(dir.join("olmocr-2/README.md"), b"x").expect("doc file");
+        assert!(!holds_weights(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_that_is_not_there_holds_nothing() {
+        assert!(!holds_weights(&std::env::temp_dir().join("servergen-absent-root")));
     }
 }

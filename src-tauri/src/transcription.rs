@@ -16,7 +16,21 @@ use crate::error::{CoreError, CoreResult};
 use crate::state::AppState;
 use crate::winproc::{self, JobLimits};
 
-const MAX_WAV_BYTES: usize = 16 * 1024 * 1024;
+/// Local transcription's ceiling, in seconds of audio.
+///
+/// It was a byte count — 16 MiB — described in every message as "the
+/// five-minute local transcription limit". At the 16 kHz mono 16-bit PCM the
+/// browser side produces, 16 MiB is 8 minutes 44 seconds: a six-minute dictation
+/// was accepted, told it was inside a five-minute limit, and then killed by
+/// `TRANSCRIPTION_TIMEOUT` — after the operator had waited the whole five
+/// minutes for nothing. One number now, in the unit the operator recorded in,
+/// with the byte cap derived from it so the two cannot drift apart again.
+const MAX_AUDIO_SECONDS: usize = 5 * 60;
+/// 16 kHz, mono, 16-bit little-endian: what `recordingToWav` writes and what
+/// whisper.cpp requires. Anything else is rejected before it reaches here.
+const WAV_BYTES_PER_SECOND: usize = 16_000 * 2;
+/// The 44-byte canonical RIFF header, plus the samples.
+const MAX_WAV_BYTES: usize = 44 + MAX_AUDIO_SECONDS * WAV_BYTES_PER_SECOND;
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,11 +150,47 @@ pub fn status(st: &AppState, model_id: &str) -> CoreResult<TranscriptionStatus> 
     })
 }
 
-fn language_code(language: &str) -> Option<&'static str> {
-    match language.trim().to_ascii_lowercase().as_str() {
-        "english" => Some("en"),
-        "hindi" => Some("hi"),
-        _ => None,
+/// How long the recording actually is, from its byte count.
+fn wav_seconds(bytes: usize) -> usize {
+    bytes.saturating_sub(44) / WAV_BYTES_PER_SECOND
+}
+
+/// One phrasing for the limit, so the two places that enforce it cannot describe
+/// it differently.
+fn too_long(bytes: Option<usize>) -> CoreError {
+    let minutes = MAX_AUDIO_SECONDS / 60;
+    let measured = match bytes.map(wav_seconds) {
+        Some(s) => format!(" This one is about {}m {:02}s.", s / 60, s % 60),
+        None => String::new(),
+    };
+    CoreError::ExecutionFailed(format!(
+        "Local transcription takes up to {minutes} minutes of audio at a time.{measured} Record it in shorter passes and the transcripts will append."
+    ))
+}
+
+/// Turns the operator's language selection into whisper.cpp's `--language`.
+///
+/// The browser sends the whisper code from its own list, so there is no table
+/// here to fall out of step with the menu they picked from — anything this does
+/// not recognise becomes auto-detect, including the display names ("English",
+/// "Multilingual") that older builds stored in local preferences.
+///
+/// Auto-detect must be passed explicitly. `whisper-cli --help` on the installed
+/// runtime reads `-l LANG [en] spoken language ('auto' for auto-detect)`, so
+/// omitting the flag does not mean "detect it" — it means English. That is what
+/// both "Auto detect" and "Multilingual" did: Hindi dictation came back as
+/// English-sounding nonsense, on a workbench whose whole claim is multilingual
+/// input. Every one of the three installed models is a multilingual ggml build,
+/// so `auto` is always a valid ask.
+fn language_code(language: &str) -> String {
+    let v = language.trim().to_ascii_lowercase();
+    if v.len() == 2 && v.chars().all(|c| c.is_ascii_alphabetic()) {
+        return v;
+    }
+    match v.as_str() {
+        "english" => "en".into(),
+        "hindi" => "hi".into(),
+        _ => "auto".into(),
     }
 }
 
@@ -151,9 +201,7 @@ fn validate_wav(bytes: &[u8]) -> CoreResult<()> {
         ));
     }
     if bytes.len() > MAX_WAV_BYTES {
-        return Err(CoreError::ExecutionFailed(
-            "The microphone recording is longer than the five-minute local transcription limit.".into(),
-        ));
+        return Err(too_long(Some(bytes.len())));
     }
     Ok(())
 }
@@ -169,11 +217,11 @@ pub async fn transcribe(
     if !ready.ready {
         return Err(CoreError::ExecutionFailed(ready.detail));
     }
-    if wav_base64.len() > (MAX_WAV_BYTES * 4 / 3) + 8 {
-        return Err(CoreError::ExecutionFailed(
-            "The microphone recording is longer than the five-minute local transcription limit."
-                .into(),
-        ));
+    // A loose guard so an absurd payload is refused before it is decoded into
+    // memory. The limit itself is enforced on the decoded bytes, where the
+    // length can be stated in the unit the operator recorded in.
+    if wav_base64.len() > (MAX_WAV_BYTES * 4 / 3 + 8) * 4 {
+        return Err(too_long(None));
     }
     let wav = base64::engine::general_purpose::STANDARD
         .decode(wav_base64)
@@ -193,6 +241,7 @@ pub async fn transcribe(
     let model = PathBuf::from(ready.model_path.expect("ready status has a model"));
     let output_without_extension = temp.text.with_extension("");
     let vocabulary = vocabulary.trim().chars().take(1_000).collect::<String>();
+    let language = language_code(&language);
     let wav_path = temp.wav.clone();
     let text_path = temp.text.clone();
 
@@ -208,9 +257,7 @@ pub async fn transcribe(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(code) = language_code(&language) {
-            command.arg("--language").arg(code);
-        }
+        command.arg("--language").arg(&language);
         if !vocabulary.is_empty() {
             command.arg("--prompt").arg(vocabulary);
         }
@@ -224,7 +271,10 @@ pub async fn transcribe(
             if started.elapsed() >= TRANSCRIPTION_TIMEOUT {
                 (child.killer())();
                 return Err(CoreError::Timeout(
-                    "Local voice transcription exceeded five minutes and was stopped.".into(),
+                    format!(
+                        "Local transcription ran for {} minutes without finishing and was stopped. A shorter recording, or the Tiny model, will complete.",
+                        TRANSCRIPTION_TIMEOUT.as_secs() / 60
+                    ),
                 ));
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -272,5 +322,42 @@ mod tests {
         assert!(validate_wav(&wav).is_ok());
         wav.resize(MAX_WAV_BYTES + 1, 0);
         assert!(validate_wav(&wav).is_err());
+    }
+
+    /// The cap is stated in minutes and enforced in bytes; if those two ever
+    /// disagree again, the message operators read will be wrong once more.
+    #[test]
+    fn the_byte_cap_is_exactly_the_stated_number_of_minutes() {
+        assert_eq!(MAX_AUDIO_SECONDS, 300);
+        assert_eq!(MAX_WAV_BYTES, 44 + 300 * 32_000);
+        assert_eq!(wav_seconds(MAX_WAV_BYTES), MAX_AUDIO_SECONDS);
+        // The old 16 MiB cap: over the limit, and the message now says so instead
+        // of calling 8m44s "inside the five-minute limit".
+        assert_eq!(wav_seconds(16 * 1024 * 1024), 524);
+        assert!(16 * 1024 * 1024 > MAX_WAV_BYTES);
+    }
+
+    #[test]
+    fn the_refusal_names_the_limit_and_the_recording_it_measured() {
+        let m = too_long(Some(44 + 400 * 32_000)).message();
+        assert!(m.contains("up to 5 minutes"), "{m}");
+        assert!(m.contains("6m 40s"), "{m}");
+        // Without decoded bytes there is no duration to claim, so none is claimed.
+        assert!(!too_long(None).message().contains("about"));
+    }
+
+    /// Omitting `--language` means English, not auto-detect, so every selection
+    /// has to resolve to something passable — including the display strings older
+    /// builds persisted.
+    #[test]
+    fn every_language_selection_resolves_to_a_flag_value() {
+        assert_eq!(language_code("hi"), "hi");
+        assert_eq!(language_code(" HI "), "hi");
+        assert_eq!(language_code("Hindi"), "hi");
+        assert_eq!(language_code("English"), "en");
+        assert_eq!(language_code("auto"), "auto");
+        assert_eq!(language_code("Multilingual"), "auto");
+        assert_eq!(language_code(""), "auto");
+        assert_eq!(language_code("klingon"), "auto");
     }
 }

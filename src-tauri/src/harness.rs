@@ -457,6 +457,55 @@ struct AutomaticMemory {
     kind: MemoryKind,
 }
 
+/// Words a personal name never starts or continues with. Everything after one
+/// of them is a different clause: `call me if the reactor trips` is an
+/// instruction about phone calls, `call me Hari when you are done` is a name
+/// followed by one.
+///
+/// This is the whole difference between the two, because nothing else in the
+/// sentence distinguishes them — and getting it wrong wrote "The operator's name
+/// is if the reactor trips." into the profile under the stable upsert key
+/// `Operator name`, where it went into the system prompt of every later chat in
+/// the workspace until someone found it in the memory list and deleted it.
+const NOT_NAME_WORDS: &[&str] = &[
+    "a", "about", "after", "again", "an", "and", "anytime", "around", "as", "asap", "at",
+    "back", "because", "before", "but", "by", "during", "first", "for", "from", "he", "her",
+    "here", "him", "his", "if", "immediately", "in", "instead", "it", "its", "later", "me",
+    "my", "no", "not", "now", "of", "off", "on", "once", "only", "or", "our", "out", "over",
+    "please", "right", "she", "so", "some", "something", "soon", "straight", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "till", "to", "today",
+    "tomorrow", "tonight", "unless", "until", "up", "us", "we", "what", "whatever", "when",
+    "whenever", "where", "which", "while", "who", "why", "with", "without", "you", "your",
+];
+
+/// Phrasings that put a name in the sentence in order to reject it. `don't call
+/// me Sir` is not the operator introducing themselves, and the window is short so
+/// an unrelated "not" earlier in the sentence does not suppress a real
+/// introduction.
+const NAME_NEGATIONS: &[&str] = &["don't ", "dont ", "do not ", "never ", "stop ", "not to "];
+
+/// The name at the start of `clause`, cut at the first word that belongs to the
+/// sentence rather than to the name.
+///
+/// `None` when the clause does not begin with a name at all — which is what
+/// `call me back`, `call me at the end` and `call me once you are done` are.
+fn leading_name(clause: &str) -> Option<String> {
+    let mut words: Vec<&str> = Vec::new();
+    for word in clause.split_whitespace() {
+        let bare = word.trim_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
+        if NOT_NAME_WORDS.contains(&bare.as_str()) {
+            break;
+        }
+        words.push(word);
+        // Four is a long full name and well past a short one; a fifth word means
+        // this is a sentence being read as a name.
+        if words.len() == 4 {
+            break;
+        }
+    }
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 /// Extract only identity statements whose meaning is unambiguous without a
 /// model. Automatic memory must be conservative: project documents and casual
 /// one-off requests are evidence for the current task, not durable operator
@@ -475,6 +524,15 @@ fn automatic_profile_memory(prompt: &str) -> Option<AutomaticMemory> {
         let Some(start) = lower.find(marker) else {
             continue;
         };
+        // `don't call me Sir` puts a name in the sentence in order to refuse
+        // it. Only the dozen characters in front of the marker are consulted, so
+        // an unrelated "not" earlier in the sentence cannot suppress a real
+        // introduction.
+        let head = &lower[..start];
+        let window: String = head.chars().skip(head.chars().count().saturating_sub(12)).collect();
+        if NAME_NEGATIONS.iter().any(|n| window.contains(n)) {
+            continue;
+        }
         let remainder = &prompt[start + marker.len()..];
         let clause_end = remainder
             .char_indices()
@@ -482,7 +540,7 @@ fn automatic_profile_memory(prompt: &str) -> Option<AutomaticMemory> {
                 matches!(ch, '\n' | '\r' | '.' | ',' | ';' | '!' | '?').then_some(index)
             })
             .unwrap_or(remainder.len());
-        let mut name = remainder[..clause_end]
+        let name = remainder[..clause_end]
             .trim()
             .trim_end_matches('.')
             .trim_matches(|ch| matches!(ch, '\'' | '"' | '“' | '”'))
@@ -490,11 +548,12 @@ fn automatic_profile_memory(prompt: &str) -> Option<AutomaticMemory> {
             .to_string();
 
         // "My name is Hari and I work in inspection" still contains one clear
-        // identity fact; the role is deliberately not swept into the memory.
-        if let Some(and_at) = name.to_ascii_lowercase().find(" and ") {
-            name.truncate(and_at);
-            name = name.trim().to_string();
-        }
+        // identity fact; the role is deliberately not swept into the memory. Nor
+        // is a following clause: "call me Hari when you are done" is a name and an
+        // instruction, and "call me if the reactor trips" is only an instruction.
+        let Some(name) = leading_name(&name) else {
+            continue;
+        };
 
         let lower_name = name.to_ascii_lowercase();
         let rejected = [
@@ -507,7 +566,7 @@ fn automatic_profile_memory(prompt: &str) -> Option<AutomaticMemory> {
             "your name",
         ];
         let valid = (2..=80).contains(&name.len())
-            && name.split_whitespace().count() <= 6
+            && name.split_whitespace().count() <= 4
             && name.chars().any(char::is_alphabetic)
             && name.chars().all(|ch| {
                 ch.is_alphabetic()
@@ -831,8 +890,21 @@ pub fn remove_session_mirror(session_id: &str) -> CoreResult<()> {
     Ok(())
 }
 
-/// Removes generated project metadata while deliberately retaining `files/`.
-/// Managed project source files and every externally attached folder stay on disk.
+/// Removes generated project metadata while deliberately retaining `files/` and
+/// `artifacts/`. Managed project source files and every externally attached
+/// folder stay on disk.
+///
+/// `artifacts/` is not a mirror and is never removed. It holds what the runs in
+/// this project produced — the verified .xlsx inspection tables, the .docx
+/// reports, the .pdf deliverables — and those are the operator's work, not
+/// regenerable state. Removing a project from the sidebar withdraws the
+/// application's access to a folder; it must not be the gesture that destroys
+/// every file the application made in it, least of all through `remove_dir_all`,
+/// which does not use the recycle bin.
+///
+/// What does go: the memory mirror under `memory_root/projects`, `AGENTS.md`,
+/// `project.json` and `memories/` — every one of them written by this
+/// application from state that lives in the database.
 pub fn remove_project_mirrors(st: &AppState, workspace_id: &str) -> CoreResult<()> {
     let id = safe_id(workspace_id, "workspace")?;
     let memory_root = PathBuf::from(st.settings().memory_root).join("projects");
@@ -850,13 +922,13 @@ pub fn remove_project_mirrors(st: &AppState, workspace_id: &str) -> CoreResult<(
             fs::remove_file(file)?;
         }
     }
-    for dir in [project.join("memories"), project.join("artifacts")] {
-        if dir.exists() {
-            fs::remove_dir_all(dir)?;
-        }
+    let memories = project.join("memories");
+    if memories.exists() {
+        fs::remove_dir_all(memories)?;
     }
-    // External-folder projects leave an empty metadata directory; managed
-    // projects still contain `files/`, so this succeeds only in the safe case.
+    // External-folder projects leave an empty metadata directory; a project that
+    // still holds `files/` or `artifacts/` does not, so this succeeds only in the
+    // safe case.
     let _ = fs::remove_dir(&project);
     Ok(())
 }
@@ -965,6 +1037,59 @@ mod tests {
         assert!(automatic_profile_memory("What is my name?").is_none());
         assert!(automatic_profile_memory("My name is unknown").is_none());
         assert!(automatic_profile_memory("I am working on a name field").is_none());
+    }
+
+    /// "Call me" is also how a person asks to be contacted. Storing the rest of
+    /// that sentence as their name put it into the system prompt of every later
+    /// chat, under a stable upsert key, until someone deleted it by hand.
+    #[test]
+    fn an_instruction_about_being_contacted_is_not_a_name() {
+        for prompt in [
+            "call me if the reactor trips",
+            "Call me back when the run finishes",
+            "call me at the end of the batch",
+            "call me once you are done",
+            "call me tomorrow about the shutdown",
+            "please call me later",
+            "I go by the numbers, not by feel",
+        ] {
+            assert!(
+                automatic_profile_memory(prompt).is_none(),
+                "{prompt:?} was stored as an operator name"
+            );
+        }
+    }
+
+    /// A name followed by an instruction is still a name — the clause is cut off
+    /// rather than the whole statement thrown away.
+    #[test]
+    fn a_name_is_cut_at_the_clause_that_follows_it() {
+        assert_eq!(
+            automatic_profile_memory("call me Hari when you are done").unwrap().content,
+            "The operator's name is Hari."
+        );
+        assert_eq!(
+            automatic_profile_memory("My name is Hari Haran and I work in inspection")
+                .unwrap()
+                .content,
+            "The operator's name is Hari Haran."
+        );
+    }
+
+    /// A sentence that names something in order to reject it is not an
+    /// introduction.
+    #[test]
+    fn a_refusal_of_a_name_is_not_an_introduction() {
+        assert!(automatic_profile_memory("don't call me Sir").is_none());
+        assert!(automatic_profile_memory("Please do not call me Boss").is_none());
+        // An unrelated negation earlier in the sentence still leaves a real
+        // introduction standing.
+        assert_eq!(
+            automatic_profile_memory("I am not in the office today, my name is Hari")
+                .unwrap()
+                .content,
+            "The operator's name is Hari."
+        );
     }
 
     #[test]

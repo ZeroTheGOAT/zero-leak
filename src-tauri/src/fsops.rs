@@ -766,11 +766,17 @@ pub fn update_workspace(
     Ok(workspace)
 }
 
-/// Unregisters a workspace. Nothing on disk is touched.
+/// Unregisters a workspace. Nothing the operator or a run produced is deleted.
 ///
 /// Deliberate: removing a folder from the list withdraws the application's
 /// access to it, and destroying the operator's files would be a different and
-/// much worse operation than the one the button says.
+/// much worse operation than the one the button says. Source files, attached
+/// folders and everything under the project's `artifacts/` survive.
+///
+/// What is removed is state this application generated and can regenerate: the
+/// database rows for the workspace and its sessions, the session and project
+/// memory mirrors, `AGENTS.md` and `project.json` — see
+/// `harness::remove_project_mirrors`.
 pub fn remove_workspace(
     st: &AppState,
     id: &str,

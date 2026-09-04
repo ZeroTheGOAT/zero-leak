@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::Step;
 use crate::error::{CoreError, CoreResult};
-use crate::state::AppState;
+use crate::state::{new_id, AppState};
 use crate::types::{DevServerState, StepKind, ToolName};
 use crate::winproc::{self, JobLimits};
 
@@ -268,7 +268,14 @@ fn error_markers(body: &str) -> Vec<String> {
 }
 
 fn extract_title(body: &str) -> Option<String> {
-    let lower = body.to_lowercase();
+    // ASCII lowercasing, because these offsets are used to slice `body`.
+    // `to_lowercase` is full Unicode folding and does not preserve byte length —
+    // one `\u{130}` (dotted capital I, an ordinary letter in a Turkish or
+    // Azerbaijani page title) becomes two chars and shifts everything after it,
+    // so the title came out cut in the wrong place, and a shift that landed
+    // mid-character panicked inside the tool call. Every marker searched for here
+    // is ASCII: an HTML tag and attribute name cannot be anything else.
+    let lower = body.to_ascii_lowercase();
     let start = lower.find("<title")?;
     let after = lower[start..].find('>')? + start + 1;
     let end = lower[after..].find("</title>")? + after;
@@ -280,7 +287,8 @@ fn extract_title(body: &str) -> Option<String> {
 /// the site rather than off it. External URLs are skipped — this is a
 /// loopback check, not a link checker for the public web.
 fn local_references(body: &str) -> Vec<String> {
-    let lower = body.to_lowercase();
+    // ASCII, so the offsets stay valid in `body` — see `extract_title`.
+    let lower = body.to_ascii_lowercase();
     let mut out = Vec::new();
     for attr in ["src=\"", "src='", "href=\"", "href='"] {
         let quote = attr.chars().last().unwrap();
@@ -338,8 +346,16 @@ fn render(url: &str) -> Result<Vec<u8>, String> {
     let browser = find_chromium().ok_or(
         "no Chromium (Chrome or Edge) was found on this machine to render the page with".to_string(),
     )?;
-    let shot = std::env::temp_dir().join(format!("sovereign-checkpage-{}.png", std::process::id()));
-    let profile = std::env::temp_dir().join(format!("sovereign-checkpage-profile-{}", std::process::id()));
+    // Unique per call, not per process. Two chats can be checking two pages at
+    // once — the app runs concurrent chats by design — and on one shared name the
+    // second call's `remove_file` deleted the first call's screenshot before it
+    // was read, or the first call read the second call's image and the model was
+    // shown a page it had not asked about. Chromium is worse about the profile:
+    // it will not start on a directory another instance holds, and the winner's
+    // `remove_dir_all` pulls it out from under the loser mid-render.
+    let key = format!("{}-{}", std::process::id(), new_id("shot"));
+    let shot = std::env::temp_dir().join(format!("sovereign-checkpage-{key}.png"));
+    let profile = std::env::temp_dir().join(format!("sovereign-checkpage-profile-{key}"));
     let _ = std::fs::remove_file(&shot);
 
     let mut cmd = Command::new(&browser);
@@ -378,13 +394,18 @@ fn render(url: &str) -> Result<Vec<u8>, String> {
             _ => {
                 drop(child);
                 (kill)();
+                // The profile is this call's own, so it goes with this call.
+                let _ = std::fs::remove_dir_all(&profile);
                 return Err("the renderer did not finish in time and was stopped".into());
             }
         }
     }
-    let bytes = std::fs::read(&shot).map_err(|e| format!("no screenshot was produced ({e})"))?;
+    // Read first, then clean up on both paths: a page that produced no screenshot
+    // used to leave its Chromium profile behind on every attempt.
+    let bytes = std::fs::read(&shot).map_err(|e| format!("no screenshot was produced ({e})"));
     let _ = std::fs::remove_file(&shot);
     let _ = std::fs::remove_dir_all(&profile);
+    let bytes = bytes?;
     if bytes.len() < 200 {
         return Err("the screenshot came back empty".into());
     }
@@ -433,6 +454,30 @@ mod tests {
         assert_eq!(extract_title("<HEAD><TITLE>Pump room</TITLE></HEAD>").as_deref(), Some("Pump room"));
         assert_eq!(error_markers("Cannot GET /"), vec!["Cannot GET".to_string()]);
         assert!(error_markers("<h1>Welcome</h1>").is_empty());
+    }
+
+    /// The markers are found in a lowercased copy and the value is cut out of the
+    /// original, so the two must have identical byte offsets. Full Unicode
+    /// lowercasing does not: `\u{130}` folds to two chars and shifted every offset
+    /// after it, which cut the title in the wrong place and panicked when the
+    /// shift landed inside a character.
+    #[test]
+    fn a_title_survives_letters_that_change_length_when_lowercased() {
+        assert_eq!(
+            extract_title("<html><head><title>\u{130}zmir Pump Room</title></head></html>").as_deref(),
+            Some("\u{130}zmir Pump Room")
+        );
+        // The shifting letter ahead of the tag, which is where it moved the
+        // offsets of everything that mattered.
+        assert_eq!(
+            extract_title("<html><body>\u{130}\u{130}\u{130}</body><head><title>Plan</title></head></html>")
+                .as_deref(),
+            Some("Plan")
+        );
+        assert_eq!(
+            local_references("<p>\u{130}\u{130}</p><script src=\"/app.js\"></script>"),
+            vec!["/app.js".to_string()]
+        );
     }
 
     #[test]

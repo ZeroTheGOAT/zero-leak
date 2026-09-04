@@ -852,10 +852,12 @@ export interface AppSettings {
   llamaServerPath: string;
   modelPresetPath: string;
   modelsDirectory: string;
-  /** Router listen address. Localhost only. */
-  routerHost: string;
+  /**
+   * The router's port. Its host is not a setting — the bind is always
+   * loopback, exported as ROUTER_BIND_HOST.
+   */
   routerPort: number;
-  /** Max models resident at once. 1 on an 8 GiB card. */
+  /** Max models resident at once. 2 on an 8 GiB card. */
   maxResidentModels: number;
   /** Seconds a model is retained after its last use before eviction. */
   modelIdleEvictSec: number;
@@ -960,6 +962,12 @@ export interface SyncExposure {
   reparsePoints: number;
   /** How many files were examined, so the counts above are interpretable. */
   filesChecked: number;
+  /**
+   * The folder's contents were actually inspected. False means it could not be
+   * opened, so every count above is zero for want of looking — which is not the
+   * same finding as a folder that was read and found clean.
+   */
+  examined: boolean;
   /** The reasoning, in full. Rendered verbatim. */
   detail: string;
 }

@@ -425,6 +425,39 @@ impl Facts {
     }
 }
 
+/// What may be said about a folder that would not open, and whether that counts
+/// as having examined it.
+///
+/// *Why* it would not open decides what may be said. A folder that is not there
+/// yet is the ordinary case on a fresh install and holds nothing to replicate —
+/// that is a finding. Any other failure — a denied ACL, a disconnected network
+/// drive, a path Windows will not resolve — is a folder that exists as far as
+/// anyone here knows and was never looked at, which is not. This used to assert
+/// "it is created when the feature that uses it first runs" over every error
+/// alike: a guess, printed as a finding, about a folder that might well be
+/// replicating.
+fn unopenable(e: &std::io::Error) -> (bool, String) {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        (
+            true,
+            "This folder does not exist yet, so there is nothing in it to replicate. It is \
+             created when the feature that uses it first runs, and this check will examine it \
+             then."
+                .to_string(),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "This folder could not be opened ({e}), so its files were NOT examined and \
+                 nothing is claimed about it. That is not the same as finding it clean: a folder \
+                 this check cannot read could be replicating without this report seeing it. \
+                 Confirm the path in Settings is right and that this account can read it."
+            ),
+        )
+    }
+}
+
 /// The exposure of one path, given facts already gathered.
 fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
     let canonical = std::fs::canonicalize(path);
@@ -440,10 +473,7 @@ fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
     let canonical = match canonical {
         Ok(p) => p,
         Err(e) => {
-            let mut detail = format!(
-                "This folder could not be opened ({e}), so its files were not examined. \
-                 Nothing is claimed about it. It is created when the feature that uses it first runs."
-            );
+            let (examined, mut detail) = unopenable(&e);
             detail.push(' ');
             detail.push_str(&roots_sentence(facts, None));
             detail.push(' ');
@@ -458,6 +488,7 @@ fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
                 pin_marked_files: 0,
                 reparse_points: 0,
                 files_checked: 0,
+                examined,
                 detail,
             };
         }
@@ -550,6 +581,7 @@ fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
         pin_marked_files: scan.pinned,
         reparse_points: scan.reparse,
         files_checked: scan.files,
+        examined: true,
         detail,
     }
 }
@@ -703,6 +735,22 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
     })?;
 
     let any_replicated = paths.iter().any(|p| p.replicated);
+    // A folder that could not be opened has not been cleared, and the summary is
+    // the one line most operators will read. It used to say "All N folders are
+    // local" on the strength of `any_replicated == false`, which is also false for
+    // a folder nothing looked at.
+    let unexamined: Vec<&str> =
+        paths.iter().filter(|p| !p.examined).map(|p| p.label.as_str()).collect();
+    let caveat = match unexamined.as_slice() {
+        [] => String::new(),
+        names => format!(
+            " {} could not be opened and {} not examined, so {} not covered by this: {}.",
+            if names.len() == 1 { "One folder" } else { "Some folders" },
+            if names.len() == 1 { "was" } else { "were" },
+            if names.len() == 1 { "it is" } else { "they are" },
+            names.join(", ")
+        ),
+    };
 
     let summary = if any_replicated {
         let names: Vec<&str> = paths
@@ -711,10 +759,18 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
             .map(|p| p.label.as_str())
             .collect();
         format!(
-            "{} of {} folders replicate off this machine: {}.",
+            "{} of {} folders replicate off this machine: {}.{caveat}",
             names.len(),
             paths.len(),
             names.join(", ")
+        )
+    } else if !unexamined.is_empty() {
+        // Neither "all local" nor "something replicates" is true, so the summary
+        // says what it does know and stops there.
+        format!(
+            "{} of {} folders are local.{caveat}",
+            paths.len() - unexamined.len(),
+            paths.len()
         )
     } else if registered_roots.is_empty() && clients_running.is_empty() {
         format!(
@@ -817,5 +873,46 @@ mod exposure {
         assert_eq!(e.client_running.as_deref(), Some("OneDrive"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A folder that is not there yet is the ordinary case on a fresh install:
+    /// nothing to examine because there is nothing there, and that *is* a finding.
+    #[test]
+    fn a_folder_that_does_not_exist_yet_is_examined_and_empty() {
+        let dir = std::env::temp_dir().join("sovereign-test-absent-folder-9f2a");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let e = exposure_with("Knowledge folder", &dir.to_string_lossy(), &clean_machine());
+
+        assert!(!e.replicated);
+        assert!(e.examined, "a missing folder holds nothing, which is a finding");
+        assert!(e.detail.contains("does not exist yet"), "{}", e.detail);
+        assert!(e.detail.contains("created when the feature"), "{}", e.detail);
+        assert_eq!(e.files_checked, 0);
+    }
+
+    /// Every other reason a folder will not open is a folder that was not looked
+    /// at. The report used to print "it is created when the feature that uses it
+    /// first runs" over all of them alike — a guess about a folder that may well
+    /// exist and may well be replicating — and then the summary counted it in
+    /// "All N folders are local".
+    #[test]
+    fn an_unreadable_folder_is_not_described_as_one_that_does_not_exist_yet() {
+        use std::io::{Error, ErrorKind};
+
+        let (examined, detail) = unopenable(&Error::from(ErrorKind::NotFound));
+        assert!(examined);
+        assert!(detail.contains("does not exist yet"), "{detail}");
+
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidInput, ErrorKind::Other] {
+            let (examined, detail) = unopenable(&Error::from(kind));
+            assert!(!examined, "{kind:?} means nothing was examined");
+            assert!(!detail.contains("does not exist yet"), "{kind:?}: {detail}");
+            assert!(detail.contains("NOT examined"), "{kind:?}: {detail}");
+            assert!(
+                detail.contains("not the same as finding it clean"),
+                "the distinction is the point of the field — {kind:?}: {detail}"
+            );
+        }
     }
 }

@@ -85,10 +85,20 @@ fn normalise_path(p: &str) -> String {
     if let Some(stripped) = s.strip_prefix("//?/") {
         s = stripped.to_string();
     }
-    while s.ends_with('/') && s.len() > 3 {
+    // Every trailing separator goes, the drive root included: `D:\` has to
+    // normalise to `d:`, the same as `D:`, or the boundary test below sees a root
+    // of `d:/` and asks whether `d:/work/x.txt` continues with a *second* slash.
+    // It does not, so a rule an operator wrote as `D:\` — the spelling a folder
+    // picker returns for a drive — listed itself as active and protected nothing
+    // on the drive. Only a lone `/` is kept, because turning a root into the
+    // empty string would silently mean "protects nothing".
+    while s.len() > 1 && s.ends_with('/') {
         s.pop();
     }
-    s.to_ascii_lowercase()
+    // Full case folding, not ASCII: a protected folder named `Ölçüm` or `ЦЕХ`
+    // must match whatever case the model writes it in, which is what the
+    // "case-folded" promise above is worth.
+    s.to_lowercase()
 }
 
 /// Whether `target` lies under the protected folder `root`.
@@ -179,6 +189,41 @@ mod rules {
         assert!(path_protected("D:/anything/at/all.txt", "D:"));
         assert!(path_protected("D:/", "D:\\"));
         assert!(!path_protected("E:/elsewhere.txt", "D:"));
+    }
+
+    /// Every spelling a folder picker or an operator can produce for a drive is
+    /// the same rule. The trailing-separator forms are the ones that used to
+    /// list themselves as active and protect nothing.
+    #[test]
+    fn a_drive_root_protects_it_however_the_rule_is_spelled() {
+        for root in ["D:", "D:/", "D:\\", "d:\\", "//?/D:\\", "D:\\\\"] {
+            assert!(
+                path_protected("D:/work/readings.xlsx", root),
+                "a rule written {root:?} protected nothing under the drive"
+            );
+            assert!(path_protected("D:\\work\\readings.xlsx", root), "{root:?}");
+            assert!(!path_protected("E:/work/readings.xlsx", root), "{root:?}");
+        }
+    }
+
+    /// A trailing separator never changes what a rule covers, and never widens
+    /// it to a sibling that merely shares the prefix.
+    #[test]
+    fn a_trailing_separator_is_not_part_of_the_rule() {
+        for root in ["C:/models", "C:/models/", "C:\\models\\", "C:\\models"] {
+            assert!(path_protected("C:/models/qwen3.5-9b/weights.gguf", root), "{root:?}");
+            assert!(path_protected("C:/Models", root), "{root:?}");
+            assert!(!path_protected("C:/models-backup/weights.gguf", root), "{root:?}");
+        }
+    }
+
+    /// The doc promises case folding, so a folder whose name is not ASCII has to
+    /// fold too — an operator protecting a Cyrillic or Turkish folder name has
+    /// the same guard as one protecting `Work`.
+    #[test]
+    fn case_folding_is_not_limited_to_ascii() {
+        assert!(path_protected("C:/ЦЕХ/plan.md", "C:/цех"));
+        assert!(path_protected("C:/Ölçüm/log.csv", "C:/ölçüm"));
     }
 
     #[test]

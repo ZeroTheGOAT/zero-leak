@@ -212,6 +212,24 @@ impl Step {
     pub(crate) fn skip(self, st: &AppState) {
         self.finish(st, StepStatus::Skipped);
     }
+
+    /// Carries a fallible result past a live step: the step is closed as failed
+    /// on the error path and handed back on the success path.
+    ///
+    /// `Step` has no `Drop` — it emits `Running` when it starts and a terminal
+    /// status only when something calls `ok`/`fail`/`skip`. So a bare `?` between
+    /// the two leaves a row spinning in the operator's timeline for the rest of
+    /// the session, next to the error toast for the very same failure. This makes
+    /// the two paths impossible to write separately.
+    pub(crate) fn keep<T>(self, st: &AppState, r: CoreResult<T>) -> CoreResult<(Self, T)> {
+        match r {
+            Ok(v) => Ok((self, v)),
+            Err(e) => {
+                self.fail(st, &e.to_string());
+                Err(e)
+            }
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -223,12 +241,15 @@ impl Step {
 /// §3 says the classifier model is the last resort, so this is ordered by how
 /// much evidence each signal carries:
 ///
-/// 1. **Attachments decide first.** If the operator attached a P&ID, the task is
-///    a drawing task whatever the words say. File type is the strongest signal
-///    available and it costs nothing to read.
-/// 2. **Then explicit intent in the prompt** — "handwritten", "P&ID", "scan" are
-///    the three cases `classify_path` deliberately cannot infer from an
-///    extension, so they have to come from the operator saying so.
+/// 1. **A declared kind comes first.** "Handwritten", "P&ID", "drawing" are the
+///    cases `classify_path` deliberately cannot infer from an extension, so they
+///    have to come from the operator saying so — and the same words mean the
+///    same thing whether or not a file is attached.
+/// 2. **Then an attached file's type.** When a file is attached and the prompt
+///    declared no kind, the file is the subject: a document turn stays a
+///    document turn even if the prose contains a code verb. The file the prompt
+///    names outranks whichever was attached first, so "fix the bug in b.py" is
+///    not routed on the spec.docx that happens to sit before it.
 /// 3. **Then the shape of the work** — code verbs and code nouns against a
 ///    workspace mean a coding task, which is what routes to the coding model.
 /// 4. **Then retrieval** — a question with an index behind it is a knowledge
@@ -246,49 +267,79 @@ fn classify_task(
 ) -> (TaskKind, String) {
     let p = prompt.to_lowercase();
 
-    // 1. Attachments. Handwriting and drawings are asked for explicitly; the
-    //    rest come from the extension.
-    if let Some(first) = attachments.first() {
-        let name = Path::new(first)
+    // The attachment the request is actually about, when any are present. Rule 1
+    // used to route on the first file unconditionally, so a turn that attached
+    // two files and pointed at the second was classified on the first. If the
+    // prompt names one of them, that file is the subject; otherwise the first
+    // stands in for the set. When several are named, the earliest listed wins.
+    let subject: Option<&String> = if attachments.is_empty() {
+        None
+    } else {
+        Some(
+            attachments
+                .iter()
+                .find(|a| prompt_names_file(&p, a))
+                .unwrap_or(&attachments[0]),
+        )
+    };
+    let subject_name = subject.map_or_else(String::new, |s| {
+        Path::new(s)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| first.clone());
-        let n = attachments.len();
-        let plural = if n == 1 { String::new() } else { format!(" and {} more", n - 1) };
+            .unwrap_or_else(|| s.clone())
+    });
+    let attached_wording = if subject.is_some() {
+        let more = if attachments.len() == 1 {
+            String::new()
+        } else {
+            format!(" and {} more", attachments.len() - 1)
+        };
+        format!("You attached {subject_name}{more}")
+    } else {
+        String::new()
+    };
 
-        if p.contains("handwrit") || p.contains("hand-writ") || p.contains("hand written") {
-            return (
-                TaskKind::Handwriting,
-                format!("You attached {name}{plural} and described it as handwritten."),
-            );
-        }
-        if p.contains("p&id") || p.contains("p & id") || p.contains("piping and instrumentation")
-            || p.contains("drawing") || p.contains("isometric") || p.contains("schematic")
-        {
-            return (
-                TaskKind::EngineeringDrawing,
-                format!("You attached {name}{plural} and described it as an engineering drawing."),
-            );
-        }
-        let kind = Registry::classify_path(first);
+    // 1. The request declares the kind out loud, whether or not a file is
+    //    attached. This used to be two rules with two vocabularies — the
+    //    with-attachment copy read "hand-written", "hand written" and
+    //    "p & id", the no-attachment copy only "handwrit" and "p&id" — and the
+    //    attachment copy returned before the other could run, so the same
+    //    phrase was a handwriting or drawing turn when a scan was attached but
+    //    an ordinary request when nothing was. One vocabulary, both paths.
+    if p.contains("handwrit") || p.contains("hand-writ") || p.contains("hand written") {
+        let why = if subject.is_some() {
+            format!("{attached_wording} and described it as handwritten.")
+        } else {
+            "You asked about handwriting, which routes to the handwriting model.".into()
+        };
+        return (TaskKind::Handwriting, why);
+    }
+    // "drawing" and its synonyms need a subject to anchor on. Attached to a file
+    // they mean that file is a drawing; alone in a prompt "drawing conclusions"
+    // is ordinary prose, so without an attachment only the P&ID names count.
+    let anchored_drawing = p.contains("drawing") || p.contains("isometric")
+        || p.contains("schematic");
+    if p.contains("p&id") || p.contains("p & id") || p.contains("piping and instrumentation")
+        || (subject.is_some() && anchored_drawing)
+    {
+        let why = if subject.is_some() {
+            format!("{attached_wording} and described it as an engineering drawing.")
+        } else {
+            "You asked about a P&ID, which routes to the drawing path.".into()
+        };
+        return (TaskKind::EngineeringDrawing, why);
+    }
+
+    // 2. Attachments, by file type. When a file is attached and the prompt named
+    //    no kind, the file's own type routes the turn — the attachment is the
+    //    subject, not a general request for the reasoning rule at the bottom to
+    //    absorb. The file the prompt named (if any) is the one classified.
+    if let Some(path) = subject {
+        let kind = Registry::classify_path(path);
         return (
             kind,
-            format!("Routed on the type of the attached file {name}{plural}."),
-        );
-    }
-
-    // 2. Explicit intent with no attachment. Still worth honouring: the operator
-    //    may be about to attach, or be asking about a document already ingested.
-    if p.contains("p&id") || p.contains("piping and instrumentation") {
-        return (
-            TaskKind::EngineeringDrawing,
-            "You asked about a P&ID, which routes to the drawing path.".into(),
-        );
-    }
-    if p.contains("handwrit") {
-        return (
-            TaskKind::Handwriting,
-            "You asked about handwriting, which routes to the handwriting model.".into(),
+            format!("Routed on the type of the attached file {subject_name}{}.",
+                if attachments.len() == 1 { String::new() } else { format!(" and {} more", attachments.len() - 1) }),
         );
     }
 
@@ -350,6 +401,36 @@ fn classify_task(
         "General request with no folder open and nothing attached."
     };
     (TaskKind::Reasoning, why.into())
+}
+
+/// Whether the prompt names an attached file, so the classifier can route on the
+/// file the request is actually about rather than whichever was attached first.
+///
+/// A file is named when its basename appears in the prompt verbatim ("b.py",
+/// "spec.pdf", or a punctuated name an operator would type as-is), or when a
+/// clean one-word stem matches as a whole word ("main.py" is named by "main").
+/// Whole-word matching is what keeps "car" from matching "carpet"; stems short
+/// enough to be common words ("a.txt") are ignored so "the" cannot lock routing
+/// onto the first file.
+fn prompt_names_file(prompt: &str, path: &str) -> bool {
+    let base = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| path.to_lowercase());
+    if base.is_empty() {
+        return false;
+    }
+    // The name typed with its extension or punctuation intact.
+    if base.len() >= 3 && prompt.contains(&base) {
+        return true;
+    }
+    let stem = Path::new(&base)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| base.clone());
+    stem.len() >= 3
+        && stem.chars().all(|c| c.is_alphanumeric())
+        && words_of(prompt).iter().any(|w| *w == stem)
 }
 
 /// The prompt as words, for matching against the code-signal lists.
@@ -477,6 +558,21 @@ fn asks_for_artifact(prompt: &str) -> bool {
     creates && deliverable
 }
 
+/// Whether an earlier user turn of this conversation already asked for a
+/// deliverable file.
+///
+/// The generator tools are gated on the current turn's own words, which holds
+/// until the operator continues a deliverable without restating it — "now add a
+/// second page and re-save it" names no document type and no create verb, and
+/// the generators would vanish mid-task. Once a user turn has asked for an
+/// artifact, later turns in the same conversation keep them, so the carry-over
+/// is bounded by the same recent window the model itself sees.
+fn history_asked_for_artifact(history: &[ChatMessage]) -> bool {
+    history
+        .iter()
+        .any(|m| m.role == "user" && asks_for_artifact(&m.content))
+}
+
 fn schema(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
     json!({
         "type": "function",
@@ -506,11 +602,38 @@ fn str_prop(desc: &str) -> Value {
 /// separate on purpose: Plan mode with a folder open still reads freely, and
 /// Agent mode without a folder can still transcribe an attachment and produce an
 /// artifact. Neither restriction is a substitute for the check in `dispatch`.
+///
+/// The generator tools hang off the current prompt's own words. That is right
+/// for a fresh request and wrong for a continuing one, which is why the real
+/// run loop calls [`tool_schemas_with_artifact`] with intent carried over from
+/// earlier turns; this form is the prompt-only gate and is what the tests pin.
+#[cfg(test)]
 fn tool_schemas(
     mode: AgentMode,
     has_workspace: bool,
     indexed_docs: u32,
     prompt: &str,
+    web_enabled: bool,
+    mcp_servers: &[McpServerConfig],
+) -> Vec<Value> {
+    tool_schemas_with_artifact(mode, has_workspace, indexed_docs, prompt, false, web_enabled, mcp_servers)
+}
+
+/// As the prompt-only [`tool_schemas`] form, with the artifact gate widened by
+/// intent carried over from earlier turns of the same conversation.
+///
+/// #19: the generators were offered only while the current prompt itself said
+/// "create a PDF" — fine until the operator keeps a deliverable going without
+/// restating it. "Now add a second page and re-save it" names no document type
+/// and no create verb, so the tools vanished mid-task. `artifact_intent` is the
+/// carry-over: once an earlier user turn asked for a deliverable, the generators
+/// stay offered so the follow-ups can reach them.
+fn tool_schemas_with_artifact(
+    mode: AgentMode,
+    has_workspace: bool,
+    indexed_docs: u32,
+    prompt: &str,
+    artifact_intent: bool,
     web_enabled: bool,
     mcp_servers: &[McpServerConfig],
 ) -> Vec<Value> {
@@ -716,15 +839,6 @@ script from package.json.",
                 }),
                 &[],
             ));
-            out.push(schema(
-                "check_page",
-                "Verify the workspace's served page actually works: fetch it, check the HTML for error bodies and \
-references the server cannot answer, render it in a real browser, and have the local vision model inspect the \
-screenshot for visible defects. Call it after serve_folder or start_dev_server and before reporting the work \
-done, and fix what it reports — a URL that answers is not the same as a page that renders.",
-                json!({}),
-                &[],
-            ));
         }
         out.push(schema(
             "run_command",
@@ -751,7 +865,7 @@ done, and fix what it reports — a URL that answers is not the same as a page t
             json!({ "code": str_prop("The Python source to run. Print the result.") }),
             &["code"],
         ));
-        if asks_for_artifact(prompt) {
+        if artifact_intent || asks_for_artifact(prompt) {
             out.push(schema(
                 "generate_docx",
                 "Produce a Word document such as an inspection report, an approval note or a procedure.",
@@ -822,6 +936,23 @@ a file at a path inside the folder the operator has open, use write_file instead
                 &["file_name", "content"],
             ));
         }
+    }
+
+    // Verifying a served page is not a write either, so — like `inspect_artifact`
+    // below — it survives Plan mode: a page hosted by an earlier Agent run stays
+    // live after that run ends, and "is that page still rendering" is a question
+    // the operator may ask next without switching modes. This is the offer half
+    // of what the `dispatch` arm documents; keep the two in agreement.
+    if has_workspace {
+        out.push(schema(
+            "check_page",
+            "Verify the workspace's served page actually works: fetch it, check the HTML for error bodies and \
+references the server cannot answer, render it in a real browser, and have the local vision model inspect the \
+screenshot for visible defects. Call it after serve_folder or start_dev_server and before reporting the work \
+done, and fix what it reports — a URL that answers is not the same as a page that renders.",
+            json!({}),
+            &[],
+        ));
     }
 
     // Reading back a generated file is not a write, so it survives Plan mode:
@@ -1348,6 +1479,49 @@ struct Grounding {
     /// Its own flag rather than `markup_corrected`: the tool phase may well have
     /// spent that one, and the answer is the last thing the operator sees.
     answer_markup_retried: bool,
+    /// Whether the model has already been corrected for claiming it had no
+    /// tools this turn.
+    ///
+    /// The third shape of the same failure as `mode_claim_asked` and
+    /// `folder_claim_asked`, and the most expensive one observed: "Build me a
+    /// simple e-Commerce website and host it locally" called `update_plan`,
+    /// then stopped and told the operator "This turn has no tools available for
+    /// file creation, editing, or hosting… start a new chat where I can use the
+    /// file and hosting tools." It said it again the next turn after being told
+    /// "You can use them right now", and a turn later apologised for claims it
+    /// had never actually made. Nothing in that run was true and nothing was
+    /// built. Neither of the other two detectors sees it — it names no mode and
+    /// no folder — so it gets its own, and one correction, for the same reason
+    /// as the others: the retry must be able to fail without trapping the run.
+    tools_claim_asked: bool,
+    /// Whether the *answer* has already been re-asked for once because it told
+    /// the operator the turn had no tools.
+    ///
+    /// Its own flag rather than `tools_claim_asked`, for the same reason
+    /// `answer_markup_retried` is separate from `markup_corrected`: the two
+    /// checks are different jobs. The tool-phase one is the only one that can
+    /// still get the work done; this one exists precisely for the run where
+    /// that first correction was spent and the model said it again anyway —
+    /// which is the observed run exactly. Sharing one latch made the backstop
+    /// unreachable on every run that needed it.
+    tools_claim_answer_retried: bool,
+    /// Whether the *answer* has already been re-asked for once because it
+    /// refused the work as if the run were in the other mode.
+    ///
+    /// Separate from `mode_claim_asked` for the reason above: its own comment
+    /// describes it as the backstop for "a model that made some calls and
+    /// still answers as if it were in Plan mode", and a run that reached that
+    /// state had already spent the tool-phase latch getting there.
+    mode_claim_answer_retried: bool,
+    /// Whether the *answer* has already been re-asked for once because the run
+    /// produced nothing at all — no tool call attempted and no answer text.
+    ///
+    /// Its own flag for the same reason as the other answer retries: this is
+    /// the catch-all behind the named refusals. Every other correction keys on
+    /// words, so an answer of silence matches none of them and would otherwise
+    /// reach the operator as a blank reply. Once, so a run that can still
+    /// produce nothing ends with the empty record it is, not a second prompt.
+    silent_answer_retried: bool,
 }
 
 /// Whether a `run_command` call is really an attempt to start a dev server,
@@ -1356,11 +1530,17 @@ struct Grounding {
 /// Matched by prefix so that `vite build` — a build, not a server — passes,
 /// while `vite`, `vite dev` and `npm run dev -- --host` are caught. The list
 /// is the commands a model actually writes when asked to "run the project".
+///
+/// Bare `npm start` is deliberately absent. `start` is npm's default script
+/// name, so a model told to run a *non-server* Node project — a CLI, a one-shot
+/// script — writes `npm start` for it too; redirecting that into the 90s
+/// server-ready wait parks a run that was never starting a server. The long form
+/// `npm run start` stays: a model that writes it is naming the start script on
+/// purpose, the shape a project's real dev workflow takes.
 fn looks_like_dev_server(command: &str) -> bool {
     let c = command.trim().to_lowercase();
     let patterns = [
         "npm run dev",
-        "npm start",
         "npm run start",
         "npm run serve",
         "yarn dev",
@@ -1384,6 +1564,70 @@ fn looks_like_dev_server(command: &str) -> bool {
     patterns
         .iter()
         .any(|p| c == *p || c.starts_with(&format!("{p} ")) || c.starts_with(&format!("{p}\t")))
+}
+
+#[cfg(test)]
+mod dev_server_detection {
+    use super::*;
+
+    /// The boundary this was tuned against: a model told to run a *non-server*
+    /// Node project writes `npm start`, and redirecting that into the dev-server
+    /// wait parks the run. So bare `npm start` must not classify, while the
+    /// deliberate long forms and the other managers' dev commands still do.
+    #[test]
+    fn bare_npm_start_is_not_a_dev_server_but_the_long_form_is() {
+        assert!(!looks_like_dev_server("npm start"));
+        assert!(!looks_like_dev_server("npm start --port 3000"));
+        assert!(looks_like_dev_server("npm run start"));
+        assert!(looks_like_dev_server("npm run start -- --port 3000"));
+        assert!(looks_like_dev_server("npm run dev"));
+        assert!(looks_like_dev_server("npm run dev -- --host 0.0.0.0"));
+    }
+
+    /// Commands the models actually write for projects that do serve stay
+    /// classified, across managers and argument shapes.
+    #[test]
+    fn real_dev_server_invocations_are_still_caught() {
+        for c in [
+            "vite",
+            "vite dev",
+            "vite serve",
+            "npx vite",
+            "next dev",
+            "ng serve",
+            "webpack serve",
+            "yarn dev",
+            "yarn run start",
+            "pnpm start",
+            "pnpm run start",
+            "npm run serve",
+            "python -m http.server 8000",
+        ] {
+            assert!(
+                looks_like_dev_server(c),
+                "expected {c:?} to classify as a dev server"
+            );
+        }
+    }
+
+    /// Commands that are not server starts pass straight through to run_command.
+    #[test]
+    fn non_server_commands_are_not_caught() {
+        for c in [
+            "npm test",
+            "npm run build",
+            "npm run lint",
+            "node build.js",
+            "cargo run",
+            "python train.py",
+            "git status",
+        ] {
+            assert!(
+                !looks_like_dev_server(c),
+                "expected {c:?} NOT to classify as a dev server"
+            );
+        }
+    }
 }
 
 /// Emits one `agent://phase` transition — what the run is doing *now*.
@@ -1439,6 +1683,23 @@ struct Ctx {
     /// and a read has to be visible to a write later in the same round — which is
     /// exactly the order a model that gathers properly calls them in.
     grounding: Mutex<Grounding>,
+}
+
+/// One-shot gate for the "publish a plan" ask: true once per run, when the run
+/// is working with no published plan and no ask yet made.
+///
+/// The `!called` condition is the fix for a false premise, not a new rule: the
+/// ask's own sentence is "the checklist is empty while your tool calls land",
+/// which is only true once a real call has landed. A first round that merely
+/// corrected the model — narrating a call, claiming the wrong mode, writing
+/// unparsable markup — reached the loop with `called` still false, and asking
+/// for a plan then told the model its calls were landing when none had.
+fn take_plan_ask(g: &mut Grounding) -> bool {
+    if g.planned || g.plan_asked || !g.called {
+        return false;
+    }
+    g.plan_asked = true;
+    true
 }
 
 impl Ctx {
@@ -1559,7 +1820,8 @@ impl Ctx {
     }
 
     /// §3/§9 — the first content-producing write of a run that has read nothing
-    /// is refused, once, with what to do about it.
+    /// is refused, once, with what to do about it — but only if what it is about
+    /// to write states something about the plant.
     ///
     /// Deliberately a question and not a wall. Half of what this workbench is for
     /// is writing files whose content is the model's own — a script, a scaffold, a
@@ -1569,17 +1831,30 @@ impl Ctx {
     /// either goes and reads (which is the fix) or writes anyway (which is
     /// legitimate, and is then labelled as unsourced all the way to the operator).
     ///
+    /// The contents are read, not just the tool name, because without that the
+    /// guard held everything: `plant_facts_asserted` is where the cost of it is
+    /// written down. A file that names no reading has no reading to go and find,
+    /// so holding it spends a round and buys nothing.
+    ///
     /// `create_directory`, `run_command` and `execute_python` are absent on
     /// purpose. A folder asserts nothing, and the sandbox tools are gated by the
     /// operator per call and produce computed output rather than claims.
-    fn require_grounding(&self, tool: &str, target: &str) -> CoreResult<()> {
+    fn require_grounding(&self, tool: &str, target: &str, body: &str) -> CoreResult<()> {
+        // Cheap first: the shape scan is only worth running for a tool that takes
+        // whole file contents and a run with nothing behind it.
+        let facts = if produces_contents(tool) && self.sources().is_empty() {
+            plant_facts_asserted(body)
+        } else {
+            Vec::new()
+        };
         let mut g = match self.grounding.lock() {
             Ok(g) => g,
             // A poisoned lock is not a reason to block a write.
             Err(_) => return Ok(()),
         };
-        match gathering(tool, g.sources.len(), g.asked) {
-            // A folder, a shell command, a Python script. Nothing to source.
+        match gathering(tool, g.sources.len(), g.asked, !facts.is_empty()) {
+            // A folder, a shell command, a Python script — or a file whose
+            // contents state nothing a document is the source for.
             Gathering::NotAClaim => return Ok(()),
             Gathering::Grounded | Gathering::Allow => {
                 g.wrote = true;
@@ -1590,15 +1865,15 @@ impl Ctx {
         g.asked = true;
         Err(CoreError::Denied(format!(
             "Held once, not refused — and not a folder or permission problem: the folder is open, \
-and calling {tool} again exactly as you did will go through. It was held only because nothing has \
-been read this turn, so there is no source behind what {tool} is about to put in {target}. If it \
-is to state anything about the plant — a measurement, a limit, a date, a document number, an \
-equipment tag — find that first with query_knowledge, read_file, read_spreadsheet or \
-ocr_document and write it from what those return; do not fill it in from memory, because the \
-readings on this machine are not the ones you were trained on. If the contents are your own work, \
-such as code, a template or a covering note, simply call {tool} again unchanged — the operator \
-will be shown that it was written without a source. Either way the file is not lost and the task \
-is not blocked: retry the call now."
+and calling {tool} again exactly as you did will go through. It was held because what {tool} is \
+about to put in {target} states plant facts — {} — and nothing has been read this turn, so there is \
+no source behind them. If they are meant to be real, find them first with query_knowledge, \
+read_file, read_spreadsheet or ocr_document and write them from what those return; do not fill \
+them in from memory, because the readings on this machine are not the ones you were trained on. If \
+they are your own work — an example, a template, a figure you were given in the request — simply \
+call {tool} again unchanged, and the operator will be shown that it was written without a source. \
+Either way the file is not lost and the task is not blocked: retry the call now.",
+            facts.join(", ")
         )))
     }
 
@@ -1668,16 +1943,7 @@ is not blocked: retry the call now."
     /// the same reason as the other one-shots: the ask must be able to fail
     /// without trapping the run.
     fn should_ask_for_plan(&self) -> bool {
-        self.grounding
-            .lock()
-            .map(|mut g| {
-                if g.planned || g.plan_asked {
-                    return false;
-                }
-                g.plan_asked = true;
-                true
-            })
-            .unwrap_or(false)
+        self.grounding.lock().map(|mut g| take_plan_ask(&mut g)).unwrap_or(false)
     }
 
     /// Whether a malformed tool call should be fed back as a correction
@@ -1723,6 +1989,68 @@ is not blocked: retry the call now."
                     return false;
                 }
                 g.folder_claim_asked = true;
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whether the run should be corrected for claiming it had no tools while
+    /// the tools were being offered to it. Once, like the other one-shots.
+    /// The answer-phase counterpart, one-shot on its own flag. See
+    /// `tools_claim_answer_retried`.
+    fn should_retry_tools_claim_answer(&self) -> bool {
+        self.grounding
+            .lock()
+            .map(|mut g| {
+                if g.tools_claim_answer_retried {
+                    return false;
+                }
+                g.tools_claim_answer_retried = true;
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    /// The answer-phase counterpart, one-shot on its own flag. See
+    /// `mode_claim_answer_retried`.
+    fn should_retry_mode_claim_answer(&self) -> bool {
+        self.grounding
+            .lock()
+            .map(|mut g| {
+                if g.mode_claim_answer_retried {
+                    return false;
+                }
+                g.mode_claim_answer_retried = true;
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whether an answer of silence — no tool call attempted, no text — should
+    /// be re-asked for once. Once, like the other one-shots: `silent_answer_retried`
+    /// is set on the ask, so a run that can still produce nothing ends with the
+    /// empty record rather than a second prompt that does no better.
+    fn should_retry_silent_answer(&self) -> bool {
+        self.grounding
+            .lock()
+            .map(|mut g| {
+                if g.silent_answer_retried {
+                    return false;
+                }
+                g.silent_answer_retried = true;
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    fn should_retry_tools_claim(&self) -> bool {
+        self.grounding
+            .lock()
+            .map(|mut g| {
+                if g.tools_claim_asked {
+                    return false;
+                }
+                g.tools_claim_asked = true;
                 true
             })
             .unwrap_or(false)
@@ -1957,9 +2285,30 @@ fn harvest_tool_markup(text: &str, tools: &[Value]) -> Option<(Vec<ToolCall>, St
     Some((calls, text[..start].trim().to_string()))
 }
 
+/// Whether the tool's own arguments carry a file's body — whole contents,
+/// markdown, spreadsheet sheets, or an edit's old/new text — rather than only a
+/// path, command or question.
+///
+/// The mimicry correction's demand ("put the file path and the full contents in
+/// its arguments") only makes sense for such a tool. A read-only tool like
+/// `read_file` or `list_files` produces contents; it does not take them, so a
+/// model told to fill a contents argument it has never seen will stall.
+fn takes_file_contents(name: &str, tools: &[Value]) -> bool {
+    const BODY_KEYS: [&str; 5] = ["content", "markdown", "sheets", "old_text", "new_text"];
+    tools.iter().find(|t| schema_name(t) == Some(name)).is_some_and(|t| {
+        t["function"]["parameters"]["properties"]
+            .as_object()
+            .is_some_and(|props| props.keys().any(|k| BODY_KEYS.contains(&k.as_str())))
+    })
+}
+
 fn names_a_tool(text: &str, tools: &[Value]) -> Option<String> {
-    // A trailing letter, digit or underscore means this is a longer word that
-    // merely begins with a tool name — `read_files` is not `read_file`.
+    // The tool name must sit on a word boundary at both ends. A trailing letter,
+    // digit or underscore means this is a longer word that merely *begins* with
+    // a tool name — `read_files` is not `read_file` — and a leading one means it
+    // is a longer word that merely *ends* with a tool name: `preread_file` is
+    // not `read_file` either, and was matching because only the trailing side
+    // was checked.
     let boundary = |c: char| !(c.is_alphanumeric() || c == '_');
     for t in tools {
         let name = schema_name(t).unwrap_or_default();
@@ -1968,11 +2317,17 @@ fn names_a_tool(text: &str, tools: &[Value]) -> Option<String> {
         }
         let mut from = 0usize;
         while let Some(at) = text[from..].find(name) {
-            let end = from + at + name.len();
-            if text[end..].chars().next().is_none_or(boundary) {
+            let start = from + at;
+            let end = start + name.len();
+            let before = text[..start].chars().next_back().is_none_or(boundary);
+            let after = text[end..].chars().next().is_none_or(boundary);
+            if before && after {
                 return Some(name.to_string());
             }
-            from = end;
+            // Advance one char past the false start, not to `end`, so a real
+            // mention that begins inside it — the second name in
+            // "read_files read_file" — is still found.
+            from = start + 1;
         }
     }
     None
@@ -1981,10 +2336,12 @@ fn names_a_tool(text: &str, tools: &[Value]) -> Option<String> {
 /// What to do about a write, given the tool and what the run has read.
 #[derive(Debug, PartialEq, Eq)]
 enum Gathering {
-    /// The tool produces no file contents, so there is nothing here to source.
-    /// A folder, a shell command, a Python script: the first asserts nothing and
-    /// the other two are approved by the operator per call and print what they
-    /// computed rather than what they remember.
+    /// Nothing here a plant document would have been the source for. Either the
+    /// tool produces no file contents — a folder, a shell command, a Python run:
+    /// the first asserts nothing and the other two are approved by the operator
+    /// per call and print what they computed rather than what they remember — or
+    /// the contents themselves state no measurement, date, document number or
+    /// equipment tag, which is the whole of what there would be to go and read.
     NotAClaim,
     /// Something was read this turn. The write rests on it, whatever it was.
     Grounded,
@@ -1995,14 +2352,50 @@ enum Gathering {
     Allow,
 }
 
-/// `tool` is the wire name; `sources` is how many reads the run has behind it.
+/// The model-supplied body of a write call, as one string to scan.
 ///
-/// The list is the tools that produce whole file contents. `edit_file` is not
-/// among them on purpose: its `old_text` has to match the file byte for byte,
-/// which is itself evidence the file was opened. `every_content_tool_is_covered`
-/// below is what keeps this list level with the tools actually offered.
-fn gathering(tool: &str, sources: usize, asked: bool) -> Gathering {
-    let produces_contents = matches!(
+/// Every generator names its body differently — `content`, `markdown`, `sheets`,
+/// `slides` — and the next one added will name it something else again, so this
+/// walks the arguments rather than listing keys. The destination is skipped: a
+/// file *named* after a tag is not a file that *states* anything, and holding a
+/// write over its own filename would be the needless round this is here to
+/// remove.
+///
+/// Leaves are joined with a newline rather than a space so nothing becomes
+/// accidentally adjacent: two spreadsheet cells holding `7.1` and `mm` are not
+/// the measurement `7.1 mm`, and a scan that read them as one would be inventing
+/// the very thing it is checking for.
+fn written_body(args: &Value) -> String {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Number(n) => out.push(n.to_string()),
+            Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            Value::Object(map) => {
+                for (k, v) in map {
+                    // Where the file goes, not what is in it.
+                    if matches!(k.as_str(), "path" | "file_name" | "workspace_id") {
+                        continue;
+                    }
+                    walk(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(args, &mut out);
+    out.join("\n")
+}
+
+/// The tools that take whole file contents from the model.
+///
+/// `edit_file` is not among them on purpose: its `old_text` has to match the
+/// file byte for byte, which is itself evidence the file was opened.
+/// `every_content_tool_is_covered` below is what keeps this list level with the
+/// tools actually offered.
+fn produces_contents(tool: &str) -> bool {
+    matches!(
         tool,
         "write_file"
             | "generate_docx"
@@ -2010,16 +2403,371 @@ fn gathering(tool: &str, sources: usize, asked: bool) -> Gathering {
             | "generate_pdf"
             | "generate_pptx"
             | "generate_text"
-    );
-    if !produces_contents {
+    )
+}
+
+/// `tool` is the wire name; `sources` is how many reads the run has behind it;
+/// `claims` is whether the contents state anything a plant document would have
+/// been the source for (see `plant_facts_asserted`).
+///
+/// `claims` is the whole reason this is not just `sources == 0`. Without it every
+/// first content-producing write of an unread run was held, which held a Python
+/// script as readily as a thickness report — see `plant_facts_asserted` for what
+/// that cost in practice.
+fn gathering(tool: &str, sources: usize, asked: bool, claims: bool) -> Gathering {
+    if !produces_contents(tool) {
         Gathering::NotAClaim
     } else if sources > 0 {
         Gathering::Grounded
+    } else if !claims {
+        // A file whose contents assert nothing about the plant. Holding it buys
+        // nothing: there is no reading to go and find.
+        Gathering::NotAClaim
     } else if asked {
         Gathering::Allow
     } else {
         Gathering::Ask
     }
+}
+
+/// Plant facts asserted by text a write is about to put on disk, as the shapes
+/// the held message itself enumerates — a measurement, a limit, a date, a
+/// document number, an equipment tag.
+///
+/// Until this existed the guard looked for none of them: `sources == 0` was the
+/// entire test, so the first content-producing write of every run that had read
+/// nothing was held, whatever was in it. A run recorded on 2026-09-04 shows the
+/// cost. Asked for a Python script that adds two numbers and multiplies by
+/// three, the model called `write_file`, was held, did not retry it in place —
+/// it ran `python calculate.py` against a file that did not exist yet, and only
+/// wrote it a round later. The task finished, but a plain request looked broken
+/// on the way through, and that pattern is the largest single source of "I told
+/// it to do something and it didn't". A 9B model recovering from an unexpected
+/// refusal mid-plan is exactly what cannot be relied on, so the refusal has to
+/// be worth its round.
+///
+/// Deliberately shape-matching and not a model call: whether `11.9 mm` is a
+/// measurement has an exact answer, and asking a language model would make the
+/// guard as unreliable as the thing it guards.
+///
+/// Returns what it found, capped, so the refusal can name it — a model told
+/// which fact tripped the hold knows what to go and read. Empty means nothing
+/// in the file is the kind of statement a plant document is the source for.
+/// Enough evidence to make a refusal concrete without reprinting the file back
+/// at the model.
+const MAX_FACTS: usize = 5;
+
+fn plant_facts_asserted(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+
+    // Equipment, by the project's one definition of a tag.
+    for tag in crate::documents::extract_tags(text) {
+        add_fact(&mut found, tag);
+    }
+
+    // Measurements and dates, in one pass over the digits.
+    let c: Vec<char> = text.chars().collect();
+    let n = c.len();
+    let mut i = 0usize;
+    while i < n && found.len() < MAX_FACTS {
+        if c[i].is_ascii_digit() && !(i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '.')) {
+            if let Some((what, end)) = number_claim(&c, i) {
+                add_fact(&mut found, what);
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    for number in document_numbers(text) {
+        add_fact(&mut found, number);
+    }
+    if let Some(date) = month_year(text) {
+        add_fact(&mut found, date);
+    }
+    found
+}
+
+fn add_fact(found: &mut Vec<String>, what: String) {
+    if found.len() < MAX_FACTS && !found.contains(&what) {
+        found.push(what);
+    }
+}
+
+/// A claim made by the number starting at `at`: a date, or a figure pinned to a
+/// unit. Returns it as written and the index just past it.
+fn number_claim(c: &[char], at: usize) -> Option<(String, usize)> {
+    let n = c.len();
+    let mut end = at;
+    while end < n && c[end].is_ascii_digit() {
+        end += 1;
+    }
+    let whole = end - at;
+    if end < n && c[end] == '.' && end + 1 < n && c[end + 1].is_ascii_digit() {
+        end += 1;
+        while end < n && c[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+
+    if let Some(after) = date_after(c, end, whole) {
+        return Some((c[at..after].iter().collect(), after));
+    }
+
+    // A unit immediately after the number, or one space after, and no further:
+    // `12 of 30 bolts` is not twelve of anything.
+    if let Some(len) = unit_after(c, end) {
+        return Some((c[at..end + len].iter().collect(), end + len));
+    }
+    if end < n && c[end] == ' ' {
+        let len = unit_after(c, end + 1)?;
+        return Some((c[at..end + 1 + len].iter().collect(), end + 1 + len));
+    }
+    None
+}
+
+/// A numeric date — `2026-09-04`, `04-09-2026`, `04/09/2026` — given the number
+/// already read at `end` and the length of its integer part.
+///
+/// The `.` separator is deliberately absent: `1.2.2024` is as likely a version
+/// string as a date, and holding a write over a dependency version would be
+/// exactly the noise this is removing.
+fn date_after(c: &[char], end: usize, whole: usize) -> Option<usize> {
+    let n = c.len();
+    if !(whole == 4 || (1..=2).contains(&whole)) {
+        return None;
+    }
+    let sep = |k: usize| -> Option<usize> { (k < n && (c[k] == '-' || c[k] == '/')).then_some(k + 1) };
+    let run = |from: usize| -> usize {
+        let mut k = from;
+        while k < n && c[k].is_ascii_digit() {
+            k += 1;
+        }
+        k
+    };
+    let mid_at = sep(end)?;
+    let mid_end = run(mid_at);
+    if !(1..=2).contains(&(mid_end - mid_at)) {
+        return None;
+    }
+    let tail_at = sep(mid_end)?;
+    let tail_end = run(tail_at);
+    let tail = tail_end - tail_at;
+    let iso = whole == 4 && (1..=2).contains(&tail);
+    let dmy = whole <= 2 && tail == 4;
+    // Nothing digit-adjacent after it, so a longer serial is not a date.
+    if (iso || dmy) && (tail_end >= n || !c[tail_end].is_ascii_digit()) {
+        return Some(tail_end);
+    }
+    None
+}
+
+/// A unit at `at`, longest match first, ending at a word boundary. Returns its
+/// length in chars.
+///
+/// Bare single letters are deliberately absent. `3 m` reads as a distance in an
+/// inspection note and as nothing at all in a comment, and where the guess is
+/// that thin the cost of getting it wrong falls on a file that is making no
+/// claim. Every unit a reading is actually recorded in — `mm`, `bar`, `°C`,
+/// `rpm` — is longer than one character anyway.
+fn unit_after(c: &[char], at: usize) -> Option<usize> {
+    const UNITS: &[&str] = &[
+        // Length and thickness: what a UT reading is. Bare `in` is absent for
+        // the same reason single letters are: `if 1 in items:` and `2 in 3
+        // samples` are not inches, and the readings on this site are metric —
+        // `inch`/`inches` still cover the imperial case where it is spelled out.
+        "mm", "cm", "km", "inch", "inches", "ft", "um", "µm", "mil", "mils",
+        // Mass.
+        "kg", "mt", "ton", "tons", "tonne", "tonnes", "lb", "lbs",
+        // Pressure.
+        "bar", "barg", "bara", "pa", "kpa", "mpa", "psi", "psig", "psia", "mmwc", "kgf",
+        // Temperature.
+        "°c", "°f", "degc", "degf",
+        // Rotation, power, electrical.
+        "rpm", "hz", "khz", "kw", "mw", "kva", "kv", "ma", "amp", "amps",
+        // Flow and volume.
+        "m3", "nm3", "kl", "bpd", "mmscfd", "tph", "lpm",
+        // Time. A bare percent sign is deliberately absent: `width: 100%`,
+        // `flex-basis: 33%` and `translateX(-50%)` are a stylesheet, and a
+        // stylesheet is exactly the kind of file this run is free to invent.
+        //
+        // Nothing is lost by it. A percentage is never the only claim a real
+        // plant document makes — a wall-loss figure sits beside the tag, the
+        // thickness and the date, and each of those is still matched — while in
+        // a page, a component or a progress bar it is routinely the only match
+        // in the file. Keeping it meant every "build me a website" was held on
+        // its first write with a refusal about plant readings, which is the
+        // wasted round this list exists to avoid.
+        "ppm", "ppb", "hr", "hrs",
+    ];
+    let n = c.len();
+    if at >= n {
+        return None;
+    }
+    let mut best = 0usize;
+    for unit in UNITS {
+        let len = unit.chars().count();
+        if at + len > n || len <= best {
+            continue;
+        }
+        let matched = unit
+            .chars()
+            .zip(c[at..at + len].iter())
+            .all(|(u, got)| u == got.to_ascii_lowercase() || u == *got);
+        let boundary = at + len >= n || !(c[at + len].is_alphanumeric() || c[at + len] == '_');
+        if matched && boundary {
+            best = len;
+        }
+    }
+    (best > 0).then_some(best)
+}
+
+/// Document and standard numbers: the internal `SOP-INSP-014` shape, and a
+/// published standard named by its issuing body. Both are statements made on the
+/// authority of a document, which is the authority a run that has read nothing
+/// does not have.
+fn document_numbers(text: &str) -> Vec<String> {
+    let c: Vec<char> = text.chars().collect();
+    let n = c.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < n && out.len() < MAX_FACTS {
+        if !c[i].is_ascii_uppercase() || (i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_')) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < n && c[j].is_ascii_uppercase() && j - i < 6 {
+            j += 1;
+        }
+        let head: String = c[i..j].iter().collect();
+        let end = standard_after(&c, j, &head).or_else(|| internal_after(&c, j));
+        match end {
+            Some(end) => {
+                let found: String = c[i..end].iter().collect();
+                if !out.contains(&found) {
+                    out.push(found);
+                }
+                i = end;
+            }
+            None => i = j.max(i + 1),
+        }
+    }
+    out
+}
+
+/// `API 570`, `IS-2062`, `IEC 61511`, `ASTM A106`. Three digits minimum, so a
+/// bare `IS 5` in a sentence is not a standard.
+fn standard_after(c: &[char], from: usize, head: &str) -> Option<usize> {
+    const BODIES: &[&str] = &[
+        "API", "ASME", "ASTM", "ANSI", "AWS", "ASNT", "BS", "DIN", "EN", "IEC", "IEEE", "IS",
+        "ISO", "NACE", "NFPA", "OISD", "OSHA", "TEMA", "IBR", "PESO", "CCOE",
+    ];
+    if !BODIES.contains(&head) {
+        return None;
+    }
+    let n = c.len();
+    let mut k = from;
+    if k < n && (c[k] == ' ' || c[k] == '-' || c[k] == '_') {
+        k += 1;
+    } else {
+        return None;
+    }
+    // `A106`: the grade letter a material standard carries.
+    if k < n && c[k].is_ascii_uppercase() {
+        k += 1;
+    }
+    let digits_from = k;
+    while k < n && c[k].is_ascii_digit() && k - digits_from < 6 {
+        k += 1;
+    }
+    let boundary = k >= n || !(c[k].is_alphanumeric() || c[k] == '_');
+    if k - digits_from < 3 || !boundary {
+        return None;
+    }
+    // A citation of a computing format is not a plant citation. "Timestamps are
+    // ISO 8601" in a script the model wrote itself is not a reading anyone can
+    // go and look up in a document.
+    let number: String = c[digits_from..k].iter().collect();
+    if crate::documents::is_format_standard(head, &number) {
+        return None;
+    }
+    Some(k)
+}
+
+/// `SOP-INSP-014`, `ENG-STD-221`, `MRPL-CDU-0031`, `WO-2026-4471`.
+///
+/// The middle group is what keeps source code out: `UTF-8-BOM` has none worth
+/// the name and `AES-256-GCM` does not end in digits.
+fn internal_after(c: &[char], from: usize) -> Option<usize> {
+    let n = c.len();
+    if from >= n || c[from] != '-' {
+        return None;
+    }
+    let mid_from = from + 1;
+    let mut k = mid_from;
+    while k < n && (c[k].is_ascii_uppercase() || c[k].is_ascii_digit()) && k - mid_from < 8 {
+        k += 1;
+    }
+    if !(2..=8).contains(&(k - mid_from)) || k >= n || c[k] != '-' {
+        return None;
+    }
+    k += 1;
+    let digits_from = k;
+    while k < n && c[k].is_ascii_digit() && k - digits_from < 6 {
+        k += 1;
+    }
+    let boundary = k >= n || !(c[k].is_alphanumeric() || c[k] == '_');
+    (k - digits_from >= 2 && boundary).then_some(k)
+}
+
+/// A month name beside a four-digit year — `March 2026`, `4 March 2026`,
+/// `12 Mar 2024`, `March 4, 2026`. A covering note writes a date either way
+/// round, and the year is what makes it one rather than a word.
+fn month_year(text: &str) -> Option<String> {
+    const MONTHS: &[&str] = &[
+        "january", "february", "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug",
+        "sept", "sep", "oct", "nov", "dec",
+    ];
+    let lower = text.to_lowercase();
+    let b = lower.as_bytes();
+    let alnum = |i: usize| i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_');
+    for month in MONTHS {
+        let mut from = 0usize;
+        while let Some(rel) = lower[from..].find(month) {
+            let start = from + rel;
+            let end = start + month.len();
+            from = end;
+            // A whole word: `mar` must not come out of `market`.
+            if (start > 0 && alnum(start - 1)) || alnum(end) {
+                continue;
+            }
+            // A year within one short gap — a space, a day number, a comma.
+            let mut k = end;
+            while k < b.len()
+                && k - end <= 6
+                && matches!(b[k], b' ' | b',' | b'-' | b'.' | b'0'..=b'9')
+            {
+                if b[k] == b'1' || b[k] == b'2' {
+                    let year = &b[k..(k + 4).min(b.len())];
+                    if year.len() == 4
+                        && year.iter().all(u8::is_ascii_digit)
+                        && (year[0] == b'1' && year[1] == b'9' || year[0] == b'2' && year[1] == b'0')
+                        && !alnum(k + 4)
+                    {
+                        return Some(format!(
+                            "{month} {}",
+                            std::str::from_utf8(year).unwrap_or_default()
+                        ));
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    None
 }
 
 /// §3/§9 — a file of plant facts written without opening a plant document.
@@ -2032,37 +2780,153 @@ fn gathering(tool: &str, sources: usize, asked: bool) -> Gathering {
 #[cfg(test)]
 mod grounding {
     use super::{
-        gathering, harvest_tool_markup, names_a_tool, tool_schemas, Gathering, Grounding,
+        gathering, harvest_tool_markup, names_a_tool, plant_facts_asserted,
+        takes_file_contents, take_plan_ask, tool_schemas, written_body, Gathering, Grounding,
     };
     use crate::types::AgentMode;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::sync::Mutex;
+
+    /// The script from the run this fix exists for: "write a program in Python to
+    /// add two numbers then multiply by 3". Its numbers are its own arithmetic,
+    /// and holding it sent the model on to run a file it had not yet written.
+    const SCRIPT: &str = "a = 10\nb = 20\nprint((a + b) * 3)\n# 10 % 3 == 1\n";
+
+    /// A thickness note, which is what the guard is actually for.
+    const NOTE: &str = "TP-04 on 4-P-1102 measured 7.1 mm against a 9.8 mm retirement limit \
+per API 570, recorded 2026-09-04 under SOP-INSP-014.";
 
     #[test]
     fn a_tool_that_states_nothing_is_never_questioned() {
         for tool in ["create_directory", "run_command", "execute_python", "edit_file"] {
-            assert_eq!(gathering(tool, 0, false), Gathering::NotAClaim, "{tool}");
+            assert_eq!(gathering(tool, 0, false, true), Gathering::NotAClaim, "{tool}");
         }
     }
 
     #[test]
     fn a_write_with_a_read_behind_it_goes_straight_through() {
-        assert_eq!(gathering("write_file", 1, false), Gathering::Grounded);
-        assert_eq!(gathering("generate_docx", 3, true), Gathering::Grounded);
+        assert_eq!(gathering("write_file", 1, false, true), Gathering::Grounded);
+        assert_eq!(gathering("generate_docx", 3, true, true), Gathering::Grounded);
     }
 
     #[test]
     fn the_first_ungrounded_write_of_a_run_is_questioned() {
-        assert_eq!(gathering("write_file", 0, false), Gathering::Ask);
-        assert_eq!(gathering("generate_pdf", 0, false), Gathering::Ask);
+        assert_eq!(gathering("write_file", 0, false, true), Gathering::Ask);
+        assert_eq!(gathering("generate_pdf", 0, false, true), Gathering::Ask);
     }
 
     /// The nudge must not become a wall. A script, a scaffold or a covering note
     /// has no source to read and still has to be writable.
     #[test]
     fn a_second_attempt_is_allowed_so_a_script_can_still_be_written() {
-        assert_eq!(gathering("write_file", 0, true), Gathering::Allow);
-        assert_eq!(gathering("generate_text", 0, true), Gathering::Allow);
+        assert_eq!(gathering("write_file", 0, true, true), Gathering::Allow);
+        assert_eq!(gathering("generate_text", 0, true, true), Gathering::Allow);
+    }
+
+    /// The round the fix buys back: contents that state nothing about the plant
+    /// are not held even once, so a code request is not answered with a refusal
+    /// the model then has to work out how to retry.
+    #[test]
+    fn contents_that_claim_nothing_are_not_held_at_all() {
+        assert!(plant_facts_asserted(SCRIPT).is_empty(), "{:?}", plant_facts_asserted(SCRIPT));
+        assert_eq!(gathering("write_file", 0, false, false), Gathering::NotAClaim);
+        assert_eq!(gathering("generate_docx", 0, false, false), Gathering::NotAClaim);
+    }
+
+    #[test]
+    fn a_plant_fact_with_nothing_read_behind_it_still_is_questioned() {
+        let facts = plant_facts_asserted(NOTE);
+        assert!(facts.contains(&"TP-04".to_string()), "{facts:?}");
+        assert_eq!(gathering("write_file", 0, false, !facts.is_empty()), Gathering::Ask);
+    }
+
+    /// Each shape the refusal names, alone, so none of them rests on another
+    /// being present.
+    #[test]
+    fn every_shape_the_refusal_names_is_found_on_its_own() {
+        for (text, expected) in [
+            ("wall thickness 11.9 mm at the elbow", "11.9 mm"),
+            ("design pressure 10.5 barg", "10.5 barg"),
+            ("outlet held at 250 °C", "250 °C"),
+            ("driver runs 2980 rpm", "2980 rpm"),
+            ("inspected 2026-09-04 by the TPI", "2026-09-04"),
+            ("inspected 04/09/2026 by the TPI", "04/09/2026"),
+            ("issued March 2026", "march 2026"),
+            ("as per API 570 clause 7", "API 570"),
+            ("raised under SOP-INSP-014", "SOP-INSP-014"),
+            ("pump P-4102A was opened", "P-4102A"),
+        ] {
+            assert!(
+                plant_facts_asserted(text).contains(&expected.to_string()),
+                "{text:?} did not yield {expected:?}: {:?}",
+                plant_facts_asserted(text)
+            );
+        }
+    }
+
+    /// The false positives that would put the old behaviour back. Every one of
+    /// these is ordinary source code or a version string, and holding a write for
+    /// any of them is the failure this removes.
+    #[test]
+    fn source_code_shapes_are_not_plant_facts() {
+        for text in [
+            SCRIPT,
+            "x = 10 % 3",
+            "printpdf = \"0.12.7\"",
+            "for i in range(3): total += i",
+            "encoding = UTF-8-BOM",
+            // A stylesheet, a layout and a template: the run this guard must
+            // not spend a round on, because the operator asked for a website
+            // and the model is the source of every number in it.
+            ".hero { width: 100%; max-width: 1200px; padding: 2rem }",
+            "transform: translateX(-50%) scale(1.05);",
+            "grid-template-columns: repeat(3, minmax(0, 1fr));",
+            "opacity: 0.85; transition: all 0.2s ease-in-out;",
+            "<img src=\"logo.png\" width=\"100%\" alt=\"Refinery\">",
+            "setProgress(72)  // percent complete",
+            "if 1 in items: return items[0]",
+            "for i in range(30): pass",
+            "cipher = AES-256-GCM",
+            "let mut retries = 5;",
+            "sleep(30)  # settle",
+            "the market moved in 2026",
+            // The formats a script names, which are not plant citations.
+            "timestamps are written ISO 8601 in UTC",
+            "charset = ISO-8859-1",
+            "rounding follows IEEE 754",
+        ] {
+            assert!(
+                plant_facts_asserted(text).is_empty(),
+                "{text:?} was read as a plant fact: {:?}",
+                plant_facts_asserted(text)
+            );
+        }
+    }
+
+    /// The body is scanned wherever a generator happens to keep it, and the
+    /// destination is not part of it.
+    #[test]
+    fn the_body_is_found_whatever_the_generator_calls_it() {
+        let docx = json!({"file_name": "note.docx", "title": "Thickness", "markdown": NOTE});
+        assert!(!plant_facts_asserted(&written_body(&docx)).is_empty());
+
+        let xlsx = json!({
+            "file_name": "readings.xlsx",
+            "sheets": [{"name": "UT", "rows": [["TP-04", "7.1 mm"]]}]
+        });
+        assert!(plant_facts_asserted(&written_body(&xlsx)).contains(&"TP-04".to_string()));
+
+        // Two cells are not one measurement.
+        let split = json!({"sheets": [{"rows": [["7.1", "mm"]]}]});
+        assert!(plant_facts_asserted(&written_body(&split)).is_empty());
+
+        // A file named after a tag states nothing by being named that.
+        let named = json!({"path": "TP-04.py", "content": SCRIPT});
+        assert!(
+            plant_facts_asserted(&written_body(&named)).is_empty(),
+            "{:?}",
+            plant_facts_asserted(&written_body(&named))
+        );
     }
 
     /// Every tool offered in Agent mode that takes whole file contents has to be
@@ -2085,7 +2949,7 @@ mod grounding {
             }
             checked += 1;
             assert_eq!(
-                gathering(&name, 0, false),
+                gathering(&name, 0, false, true),
                 Gathering::Ask,
                 "{name} takes whole file contents and is not questioned when nothing was read"
             );
@@ -2134,6 +2998,59 @@ mod grounding {
     }
 
     #[test]
+    fn a_word_that_merely_ends_with_a_tool_name_is_not_one() {
+        // `read_file` is a *suffix* of `preread_file`, which is not a tool. The
+        // trailing boundary never caught this side; only a leading one does.
+        assert_eq!(names_a_tool("preread_file(a, b)", &offered()), None);
+        assert_eq!(names_a_tool("the xread_file helper", &offered()), None);
+        assert_eq!(names_a_tool("my_write_file_draft", &offered()), None);
+    }
+
+    #[test]
+    fn a_real_name_after_a_false_start_is_still_caught() {
+        // The leading-boundary skip must not hide a genuine mention that sits
+        // inside a word which merely starts like one, nor one after punctuation.
+        assert_eq!(
+            names_a_tool("read_files, read_file", &offered()).as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(names_a_tool("(read_file)", &offered()).as_deref(), Some("read_file"));
+    }
+
+    /// The mimicry correction that tells a model to "put the file path and the
+    /// full contents in its arguments" must only be addressed to tools that take
+    /// file contents. A read-only tool has no contents argument, so a model told
+    /// to fill one it has never seen stalls. This is the classification that
+    /// branches it.
+    #[test]
+    fn content_carrying_tools_are_told_apart_from_read_only_ones() {
+        let tools = offered();
+        for name in [
+            "write_file",
+            "edit_file",
+            "generate_docx",
+            "generate_xlsx",
+            "generate_pdf",
+            "generate_pptx",
+            "generate_text",
+        ] {
+            assert!(takes_file_contents(name, &tools), "{name} carries file contents");
+        }
+        for name in [
+            "read_file",
+            "list_files",
+            "search_files",
+            "analyze_image",
+            "ocr_document",
+            "query_knowledge",
+            "run_command",
+            "execute_python",
+        ] {
+            assert!(!takes_file_contents(name, &tools), "{name} is read-only or execute");
+        }
+    }
+
+    #[test]
     fn an_offer_to_use_a_tool_is_caught_too_and_that_is_the_intended_cost() {
         // Naming a tool in a run that invoked nothing is treated as narration,
         // which does also catch a genuine offer to act. It costs one round, once,
@@ -2167,6 +3084,30 @@ mod grounding {
                 "a run that {label} is reporting its work, not inventing it"
             );
         }
+    }
+
+    /// The "publish a plan" ask exists to name work the operator can already see
+    /// landing, so its own sentence — "the checklist is empty while your tool
+    /// calls land" — is only true once a real call has landed. A first round
+    /// that merely corrected the model has no call landing, and must neither ask
+    /// nor spend the one-shot, or the ask would be dead before the work began.
+    #[test]
+    fn the_plan_ask_waits_until_a_call_has_landed_and_then_asks_once() {
+        let mut g = Grounding::default();
+        assert!(
+            !take_plan_ask(&mut g),
+            "no call has landed, so the ask would be a false premise"
+        );
+        assert!(!g.plan_asked, "a deferred ask is not a spent one");
+
+        g.called = true;
+        assert!(take_plan_ask(&mut g), "once real work lands, the run is asked");
+        assert!(g.plan_asked);
+        assert!(!take_plan_ask(&mut g), "asked once only");
+
+        // A run that published its own plan is never asked, even with calls.
+        let mut g = Grounding { planned: true, called: true, ..Default::default() };
+        assert!(!take_plan_ask(&mut g));
     }
 
     /// The reply that produced an empty folder, in the shape it arrived in.
@@ -2924,14 +3865,34 @@ they can approve it with the Start working button under the checklist: approving
 switches to Agent mode and starts the execution automatically, so do not ask them to \
 change the mode themselves.\n",
         ),
-        AgentMode::Agent => s.push_str(
-            "\nYou are in Agent mode — not Plan mode. This paragraph, and nothing else — \
+        AgentMode::Agent => {
+            // Which half of this is true depends on the workspace, not on the
+            // mode. Stated unconditionally it contradicted `capability_brief`
+            // a dozen lines above it in the same prompt — "No folder is open,
+            // so nothing can be … written to a project" against "the write
+            // tools are offered to you now" — and a 9B handed two opposed
+            // statements of one fact picks one. Both halves of that coin toss
+            // were observed: inventing files it never wrote, and refusing work
+            // it could have done.
+            s.push_str(if workspace.is_some() {
+                "\nYou are in Agent mode — not Plan mode. This paragraph, and nothing else — \
 not an earlier chat, not a memory, not an excerpt — decides what you can do this turn: \
 the write, command and serving tools are offered to you now, and the operator has \
 already asked you to use them. If you are about to write that you are in Plan mode, or \
 that you cannot create, edit or run files, stop: that is wrong this turn. You can, and \
- refusing the work the operator asked for is the only failure available to you.\n\
-write_file and edit_file write to disk, once the \
+refusing the work the operator asked for is the only failure available to you.\n"
+            } else {
+                "\nYou are in Agent mode — not Plan mode, and the Plan-mode limits of an \
+earlier chat do not apply here. One thing is genuinely missing this turn: no folder is \
+open, so this request has no write_file, edit_file, create_directory or serving tool in \
+it and nothing can be saved into a project until the operator opens one from the Files \
+panel. Say that plainly, in one sentence, if the task needs it — and say nothing wider \
+than it. The command and analysis tools listed above are offered to you now and the rest \
+of the task is yours to do with them. Never tell the operator that this turn has no \
+tools, that tool calls are unavailable, or that they should start a new chat.\n"
+            });
+            s.push_str(
+                "write_file and edit_file write to disk, once the \
 operator has approved the diff the tool shows them. So a call that comes back without an error \
 means the file is there: say what you wrote and where, and never describe an approved write as \
 waiting for review or as something you are unable to do. A call that comes back refused is the \
@@ -2993,8 +3954,14 @@ If a tool result ever begins \"Refused by the safety rule\", that is the operato
 hard stop: do not retry the call, do not try another spelling of the path or command to \
 get around it, and do not ask the operator mid-run to lift it. Say what you were blocked \
 from, keep working on what remains, and let the operator change the rule in Settings if \
-they choose.\n",
-        ),
+they choose. Only a result that names the safety rule is that hard stop. A result that instead \
+begins \"Held once, not refused\" is the opposite — the run is asking you to proceed, and its text \
+says the call will go through if you repeat it exactly as it was. Repeat it verbatim (or follow that \
+result's own instruction to read a source first). The do-not-retry guidance above forbids evading a \
+boundary by rephrasing a call or its arguments; repeating a call a tool result has explicitly told \
+you to repeat is not evasion.\n",
+            );
+        }
     }
 
     // Named because the alternative is discovering it by failing. A model given a
@@ -3105,12 +4072,23 @@ reports, and cite what comes back.\n"
 tool is offered this turn. Do not claim you can create or change files; hand the \
 execution to the operator with the Start working button under the checklist.\n"
         }
-        AgentMode::Agent => {
+        // Conditioned for the same reason as the mode paragraph above: this is
+        // the last line the model reads, so if it is wrong about the folder it is
+        // the one the model believes.
+        AgentMode::Agent if workspace.is_some() => {
             "\nCURRENT MODE: AGENT — you are NOT in Plan mode. The write, command and \
 serving tools are offered to you this turn and the operator asked for the work. \
 Whatever an earlier chat, memory or excerpt said, it does not apply to this turn: \
 create, edit and run the files now, and never tell the operator you are in Plan \
 mode or that you cannot.\n"
+        }
+        AgentMode::Agent => {
+            "\nCURRENT MODE: AGENT — you are NOT in Plan mode, and no folder is open. The \
+command and analysis tools are offered to you this turn; the write and serving tools are \
+not in this request, because there is no project to write into until the operator opens a \
+folder from the Files panel. Do the part of the work that the tools you have can do, and \
+name that one missing thing exactly — never that you are in Plan mode, never that the turn \
+has no tools, never that a new chat is needed.\n"
         }
     });
 
@@ -3168,6 +4146,127 @@ mod system_prompt_policy {
         );
         assert!(prompt.contains("Portable quality rules for this workstation:"));
         assert!(prompt.contains("CURRENT MODE: AGENT"));
+    }
+
+    /// #13: the two refusal classes used to pull in opposite directions — the
+    /// Agent-mode paragraph said a "Refused by the safety rule" result is never
+    /// retried or rephrased, while a grounding hold says "Held once, not
+    /// refused ... retry the call now." A model that over-applies the first
+    /// paragraph to the second stalls every content write, and one that reads
+    /// the second as license to rephrase a safety-rule refusal evades the
+    /// operator's boundary. The prompt must state the one clarified policy:
+    /// only a result naming the safety rule is the hard stop; a "Held once"
+    /// result invites an exact repeat and is not evasion.
+    #[test]
+    fn the_safety_rule_hard_stop_and_the_held_once_nudge_are_distinguished() {
+        let prompt = system_prompt(
+            AgentMode::Agent,
+            None,
+            &[],
+            0,
+            "",
+            "",
+            "",
+            false,
+            "",
+            &[],
+        );
+        // The operator's hard stop, in the model's own words.
+        assert!(prompt.contains("Refused by the safety rule"), "hard-stop trigger wording is gone");
+        assert!(
+            prompt.contains("do not retry the call, do not try another spelling"),
+            "the no-retry rule for safety refusals is gone"
+        );
+        // The carve-out: a result that names the rule is the hard stop — the
+        // opposite beginning means the run is asking for the call to proceed.
+        assert!(
+            prompt.contains("Only a result that names the safety rule is that hard stop"),
+            "the carve-out gate is missing"
+        );
+        assert!(
+            prompt.contains("begins \"Held once, not refused\" is the opposite"),
+            "the held-once result is no longer named as the opposite of the hard stop"
+        );
+        assert!(
+            prompt.contains("Repeat it verbatim"),
+            "the exact-repeat instruction for a held-once result is missing"
+        );
+        assert!(
+            prompt.contains("repeating a call a tool result has explicitly told you to repeat is not evasion"),
+            "the rephrasing-vs-verbatim-repeat boundary is missing"
+        );
+        // And the blanket no-retry rule itself stays — the carve-out refines
+        // it, it does not remove it.
+        assert!(prompt.contains("do not ask the operator mid-run to lift it"));
+    }
+
+    /// The prompt states the folder fact in three places — `capability_brief`,
+    /// the mode paragraph and the closing CURRENT MODE line. They used to
+    /// disagree: two of them asserted the write tools were offered on the mode
+    /// alone, while the first said no folder was open, and a 9B given two
+    /// opposed statements of one fact picks one. Both branches of that pick were
+    /// observed in real runs, so the prompt is asserted to say one thing.
+    #[test]
+    fn the_prompt_never_states_both_halves_of_the_folder_fact() {
+        let ws = Workspace {
+            id: "ws-1".into(),
+            name: "demo".into(),
+            path: "C:/sovereign/projects/demo".into(),
+            folders: vec![],
+            approved: true,
+            pinned: false,
+            archived: false,
+            added_at: 0,
+            file_count: None,
+            indexed_count: None,
+        };
+        let with_folder = system_prompt(
+            AgentMode::Agent,
+            Some(&ws),
+            &[],
+            0,
+            "",
+            "",
+            "",
+            false,
+            "",
+            &tool_schemas(AgentMode::Agent, true, 0, "build a site", false, &[]),
+        );
+        assert!(with_folder.contains("the write, command and serving tools are offered to you now"));
+        assert!(!with_folder.contains("No folder is open, so nothing can be read from"));
+
+        let without = system_prompt(
+            AgentMode::Agent,
+            None,
+            &[],
+            0,
+            "",
+            "",
+            "",
+            false,
+            "",
+            &tool_schemas(AgentMode::Agent, false, 0, "build a site", false, &[]),
+        );
+        // The one place it may be said is where it is true, and the two
+        // assertions of the opposite are gone.
+        assert!(without.contains("No folder is open, so nothing can be read from"));
+        assert!(!without.contains("the write, command and serving tools are offered to you now"));
+        assert!(!without.contains("The write, command and 
+serving tools are offered to you this turn"));
+        assert!(without.contains("no folder is open"));
+        // And the refusal the detectors exist to catch is only ever forbidden,
+        // never stated. The harness used to hand the model the phrase itself —
+        // "and this turn has no tools" — and the model repeated it back to the
+        // operator, so every occurrence has to be inside a prohibition.
+        let lower = without.to_lowercase();
+        for shape in ["start a new chat", "has no tools", "no tools available", "no tools are available"] {
+            for sentence in lower.split(['.', '\n']).filter(|s| s.contains(shape)) {
+                assert!(
+                    ["never", "not ", "n't"].iter().any(|neg| sentence.contains(neg)),
+                    "the prompt states the refusal instead of forbidding it: {sentence:?}"
+                );
+            }
+        }
     }
 }
 
@@ -3550,6 +4649,24 @@ fn render_plan(items: &[PlanItem]) -> String {
     out
 }
 
+/// The text an `ask_operator` call reads back for its result, and whether the
+/// operator actually answered.
+///
+/// A question's wait ends three ways — answered, timed out, or cancelled — and
+/// the wording the model receives must not claim a reply that never came: a
+/// model told "The operator replied:" on a timeout would believe it is holding
+/// on a real answer that will never arrive. The timeout and cancellation
+/// strings are the ones the waiter returns, matched verbatim.
+fn frame_operator_reply(answer: &str) -> (String, bool) {
+    let answered = !answer.contains("did not answer in time")
+        && !answer.contains("cancelled by the operator");
+    if answered {
+        (format!("The operator replied:\n{answer}"), true)
+    } else {
+        (answer.to_string(), false)
+    }
+}
+
 /// Runs one tool call and returns what the model should read back, plus any
 /// citations worth attaching to the step.
 ///
@@ -3665,14 +4782,13 @@ blocks you, briefly — the operator reads this mid-task.".into(),
             );
             match ctx.st.ask_operator(q, QUESTION_TIMEOUT).await {
                 Ok(answer) => {
-                    let answered = !answer.contains("did not answer in time")
-                        && !answer.contains("cancelled by the operator");
+                    let (text, answered) = frame_operator_reply(&answer);
                     if answered {
                         step.detail("The operator replied.").ok(&ctx.st);
                     } else {
                         step.detail(&answer).skip(&ctx.st);
                     }
-                    Ok((format!("The operator replied:\n{answer}"), vec![]))
+                    Ok((text, vec![]))
                 }
                 Err(e) => {
                     step.fail(&ctx.st, &e.message());
@@ -3962,7 +5078,8 @@ fn guard_refusal(ctx: &Ctx, call: &ToolCall) -> Option<String> {
 
 /// The write half of `dispatch`, split out so the Plan-mode refusal above covers
 /// all of it in one place and cannot be forgotten for a newly added tool.
-async fn dispatch_write(ctx: &Ctx, call: &ToolCall) -> CoreResult<(String, Vec<Citation>)> {    let a = &call.arguments;
+async fn dispatch_write(ctx: &Ctx, call: &ToolCall) -> CoreResult<(String, Vec<Citation>)> {
+    let a = &call.arguments;
     let s = |k: &str| -> Option<String> {
         a.get(k).and_then(|v| v.as_str()).map(str::to_string).filter(|v| !v.is_empty())
     };
@@ -3976,12 +5093,14 @@ async fn dispatch_write(ctx: &Ctx, call: &ToolCall) -> CoreResult<(String, Vec<C
     };
 
     // §3/§9 — before any of this reaches the operator's review panel, ask once
-    // whether the run has read anything at all. See `require_grounding`: it is a
-    // question, not a wall, and the answer to it is what the panel goes on to
-    // show. Placed here so a write tool added later inherits it.
+    // whether the run has read anything at all, and only if the contents state
+    // something about the plant. See `require_grounding`: it is a question, not a
+    // wall, and the answer to it is what the panel goes on to show. Placed here
+    // so a write tool added later inherits it.
     ctx.require_grounding(
         &call.name,
         &s("path").or_else(|| s("file_name")).unwrap_or_else(|| "that file".to_string()),
+        &written_body(a),
     )?;
 
     // Operator safety rules run before the approval gate and before any work:
@@ -4658,6 +5777,189 @@ fn claims_no_folder(text: &str) -> bool {
     .any(|cue| lower.contains(cue))
 }
 
+/// Whether an answer refuses work by claiming the turn offered no tools.
+///
+/// The third shape of the refusal `claims_wrong_mode` and `claims_no_folder`
+/// catch, and the one that costs most, because it survives being contradicted.
+/// Observed in full: "Build me a simple e-Commerce website and host it locally"
+/// called `update_plan`, then stopped with "This turn has no tools available for
+/// file creation, editing, or hosting… Start a new chat where I can use the file
+/// and hosting tools." Told "You can use them right now. You are on agent mode",
+/// it created one directory and said it again. Two turns later it apologised for
+/// fabricating a site it had never written — while the tools had been in every
+/// request all along.
+///
+/// It names no mode and no folder, so neither of the other two sees it. The cues
+/// are the claim itself and the advice that follows from it; a passage naming a
+/// specific tool's own failure ("no Chromium was found to render with", "the
+/// serve_folder call was refused") is a legitimate report and must not match.
+///
+/// Every cue has to be false *whenever it matches*, which rules out the obvious
+/// wordings. "not available in this turn" reads like the refusal but is exactly
+/// how a run truthfully reports a tool it really was not given — "web_search is
+/// not available in this turn" with the web switched off — and a correction that
+/// calls that false pushes the model at a call it cannot make. So the generic
+/// cues are all anchored to the plural, subjectless claim ("no tools", "the
+/// tools"), and the capability cues name the capability the workbench always
+/// offers an Agent turn with a folder open.
+fn claims_no_tools(text: &str) -> bool {
+    // Emphasis markup is stripped for the same reason as the other two: the
+    // observed refusals bolded their false claims.
+    let lower: String = text
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(*c, '*' | '_' | '`'))
+        .collect();
+    [
+        "no tools available",
+        "no tools are available",
+        "no tool is available",
+        "tools are not available",
+        "tools were not available",
+        "tools are unavailable",
+        "tools were unavailable",
+        "tool calls are not available",
+        "tool calls were not available",
+        "i have no tools",
+        "i do not have tools",
+        "i don't have tools",
+        "i have no access to tools",
+        "there are no tools",
+        // The capability, not a named tool: with a folder open the workbench
+        // offers all three, so each of these is false whenever it matches.
+        "file creation is not available",
+        "file creation, editing, or hosting",
+        "file creation or editing is not available",
+        "writing files is not available",
+        "creating files is not available",
+        "hosting is not available",
+        "not have access to the file creation",
+        "not have access to file creation",
+        "not have access to the file tools",
+        "no access to the file creation",
+        "start a new chat where",
+        "new chat where i can use",
+        "new chat where the file",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
+/// Whether a finished run has nothing at all to show: no tool call was ever
+/// attempted and the answer it produced is empty.
+///
+/// The catch-all behind the named refusals. `claims_no_tools`,
+/// `claims_wrong_mode`, `claims_no_folder` and the markup checks all key on
+/// words, so an answer of silence — the run that never reached for a tool and
+/// then produced no text either — matches none of them and would otherwise be
+/// stored as an empty message. An empty answer is never a legitimate outcome,
+/// so this is what finally catches it, and the correction it feeds names the
+/// one thing that is always true here: nothing happened.
+fn empty_after_no_calls(text: &str, called: bool) -> bool {
+    !called && text.trim().is_empty()
+}
+
+#[cfg(test)]
+mod silent_run_tests {
+    use super::*;
+
+    /// The run the catch-all exists for: nothing attempted, nothing said.
+    #[test]
+    fn a_run_that_called_nothing_and_said_nothing_is_caught() {
+        assert!(empty_after_no_calls("", false));
+        assert!(empty_after_no_calls("   \n\t ", false));
+    }
+
+    /// Any words at all are an answer worth delivering, even a refusal: the
+    /// operator can act on "I can't" but not on silence.
+    #[test]
+    fn words_however_thin_are_not_silence() {
+        assert!(!empty_after_no_calls("I could not complete this.", false));
+        assert!(!empty_after_no_calls("Done.", false));
+    }
+
+    /// A run that reached for a tool — even one that failed or was refused — is
+    /// not this silent shape: its calls are on the record, and its failures have
+    /// their own named corrections. This catch-all is only for the run that did
+    /// nothing at all.
+    #[test]
+    fn a_called_tool_is_not_silence_even_if_the_answer_is_empty() {
+        assert!(!empty_after_no_calls("", true));
+    }
+}
+
+#[cfg(test)]
+mod no_tools_claim_tests {
+    use super::*;
+
+    /// The observed run, quoted from its own transcript.
+    #[test]
+    fn the_refusal_that_cost_a_whole_website_is_detected() {
+        assert!(claims_no_tools(
+            "However, I cannot proceed with the actual work. This turn has no tools available for file creation, editing, or hosting. The update_plan tool ran, but the subsequent steps (create_directory, write_file, serve_folder, etc.) are not available in this turn."
+        ));
+        assert!(claims_no_tools(
+            "1. Start a new chat where I can use the file and hosting tools"
+        ));
+        assert!(claims_no_tools(
+            "However, I cannot proceed with writing the HTML, CSS, and JavaScript files in this turn because tool calls are not available right now."
+        ));
+        assert!(claims_no_tools(
+            "In this turn, I did NOT have access to the file creation and hosting tools. Despite being in \"Agent mode\", the tools (write_file, create_directory, serve_folder) were not available to me."
+        ));
+    }
+
+    /// A tool that ran and failed, a dependency that is genuinely missing, and a
+    /// finished report are all legitimate prose. The detector fires on the claim
+    /// that the turn had no tools, not on any mention of a tool not working.
+    #[test]
+    fn a_tool_that_failed_is_not_a_missing_tool() {
+        assert!(!claims_no_tools(
+            "serve_folder returned an error, so the site is on disk but not hosted."
+        ));
+        assert!(!claims_no_tools(
+            "check_page could not run: no Chromium was found on this machine to render with."
+        ));
+        assert!(!claims_no_tools(
+            "I wrote index.html, styles.css and script.js, then served the folder at http://127.0.0.1:4317/."
+        ));
+        assert!(!claims_no_tools(
+            "The operator declined the write, so nothing was saved."
+        ));
+        assert!(!claims_no_tools(""));
+    }
+
+    /// A tool the turn really did not offer is a fact, and saying so is the
+    /// honest thing. Calling that false would send the model at a call the
+    /// request does not contain, which is worse than the refusal: the run burns
+    /// its rounds on rejected calls and still writes nothing.
+    #[test]
+    fn a_tool_that_was_genuinely_not_offered_may_be_reported() {
+        for honest in [
+            "web_search is not available in this turn, so I answered from the open documents.",
+            "web_fetch was not available to me in this turn — the web switch is off.",
+            "I do not have access to the file system outside the open folder, so I wrote inside it.",
+            "generate_pdf is not available in this turn; the write went to a .md file instead.",
+            "mcp_call is not available in this turn because no server is connected.",
+        ] {
+            assert!(!claims_no_tools(honest), "an honest report was called a refusal: {honest:?}");
+        }
+    }
+
+    /// The three detectors divide the work: each sees its own refusal and not
+    /// the others, so a correction always names the thing that was actually
+    /// claimed.
+    #[test]
+    fn the_three_refusal_shapes_do_not_overlap() {
+        let no_tools = "This turn has no tools available for file creation.";
+        let wrong_mode = "I am in Plan Mode, so I cannot create files.";
+        let no_folder = "No folder is currently open, so there is nowhere to write.";
+        assert!(claims_no_tools(no_tools) && !claims_wrong_mode(no_tools) && !claims_no_folder(no_tools));
+        assert!(claims_wrong_mode(wrong_mode) && !claims_no_tools(wrong_mode));
+        assert!(claims_no_folder(no_folder) && !claims_no_tools(no_folder));
+    }
+}
+
 #[cfg(test)]
 mod no_folder_claim_tests {
     use super::*;
@@ -5095,10 +6397,62 @@ fn estimate_tokens(messages: &[ChatMessage]) -> u32 {
     (bytes / 4).max(1) as u32
 }
 
+/// The same rough count for the tool schemas, which are prefixed to every
+/// request and are not messages.
+///
+/// Left out of `estimate_tokens`, they were left out of every size decision
+/// that mattered: a full Agent turn carries around twenty thousand characters
+/// of schema source, so compaction was measuring a request several thousand
+/// tokens smaller than the one being sent, and firing that much too late.
+fn estimate_schema_tokens(tools: &[Value]) -> u32 {
+    let bytes: usize = tools.iter().map(|t| t.to_string().len() + 8).sum();
+    (bytes / 4) as u32
+}
+
+/// The size of the request a server will actually ingest: the message text
+/// *plus* the tool schemas that ride on it.
+///
+/// Every gate that decides whether a model can hold a turn must read this, not
+/// `estimate_tokens` alone. A schema-blind figure is how a fresh turn overflowed
+/// its window: selection measured only the messages, ~5k tokens of schema were
+/// then attached on the wire, and the server — not the router — rejected the
+/// request with a hard 500 on a turn too new to compact.
+fn request_estimate_tokens(messages: &[ChatMessage], tools: &[Value]) -> u32 {
+    estimate_tokens(messages) + estimate_schema_tokens(tools)
+}
+
+/// How much output room a round has to be able to ask for, given what it may
+/// have to produce.
+///
+/// A round that can carry file contents needs the whole file in one call; a
+/// reading round does not, and a large cap there is only a runaway budget.
+fn round_output_budget(tools: &[Value]) -> u32 {
+    if offers_file_contents(tools) {
+        WRITE_ROUND_TOKENS
+    } else {
+        1536
+    }
+}
+
 /// Margin between "tokens of messages" and "model window full" that must stay
 /// free: the answer turn's own budget plus the same safety slack the router's
 /// fitting rules use.
+///
+/// This is the floor, not the whole reserve. A tool round that may carry a
+/// whole file asks for `WRITE_ROUND_TOKENS` of output, three times the answer
+/// turn's budget, and sizing the margin for the answer alone let a 16k model
+/// accept 10k of messages and then be asked for 12k more: the call comes back
+/// cut off mid-JSON as a `MalformedToolCall`, and the retry has exactly the
+/// same arithmetic against it. `compaction_reserve` is what the gate uses.
 const COMPACT_SLACK_TOKENS: u32 = ANSWER_TOKENS + 2048;
+
+/// What must stay free for the *next* request to fit: its output budget, the
+/// schemas it carries, and the safety slack. Never below
+/// `COMPACT_SLACK_TOKENS`, because the answer turn still has to fit after the
+/// last tool round.
+fn compaction_reserve(tools: &[Value]) -> u32 {
+    (round_output_budget(tools) + estimate_schema_tokens(tools) + 2048).max(COMPACT_SLACK_TOKENS)
+}
 
 /// Split a conversation for compaction. Pure, so the policy is testable
 /// without a model behind it.
@@ -5231,6 +6585,9 @@ fn lift_preserved(
 async fn compact_if_needed(
     ctx: &Ctx,
     messages: &mut Vec<ChatMessage>,
+    // The round's own schemas, so the gate measures the request that will
+    // actually be sent rather than only its message half.
+    tools: &[Value],
 ) -> CoreResult<bool> {
     let window = {
         let reg = ctx.st.registry.read().expect("registry lock");
@@ -5242,8 +6599,8 @@ async fn compact_if_needed(
     // checked against.
     let window = if window == 0 { 16_384 } else { window };
 
-    let used = estimate_tokens(messages);
-    if used + COMPACT_SLACK_TOKENS <= window {
+    let used = request_estimate_tokens(messages, tools);
+    if used + compaction_reserve(tools) <= window {
         return Ok(false);
     }
 
@@ -5449,13 +6806,35 @@ itself, and execution starts only when the operator approves it with the Start w
 checklist."
                         ),
                     )
-                } else {
+                } else if ctx.workspace_id.is_none() {
                     (
                         format!("Refused a {name} call with no folder open"),
                         format!(
                             "{brief}, so nothing ran. {name} needs an open folder and none is open, so \
 calling it again will fail the same way. Do not call it again. Tell the operator plainly to open a folder \
 from the Files panel first; nothing can be written until they do."
+                        ),
+                    )
+                } else {
+                    // A folder IS open and the tool still is not offered — a
+                    // generator this prompt did not ask for, a web tool with the
+                    // web switched off, mcp_call with no server, or a name the
+                    // model invented. The folder sentence above was reached here
+                    // too, which is how the operator got told to open a folder
+                    // that was already open; the honest correction names the
+                    // list instead of guessing a reason.
+                    let available = tools
+                        .iter()
+                        .filter_map(schema_name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        format!("Refused a {name} call this turn does not offer"),
+                        format!(
+                            "{brief}, so nothing ran. {name} is not one of the tools in this request, so \
+calling it again will fail the same way. Do not call it again. What this turn offers is: {available}. Use one \
+of those if it can do the job, and if none of them can, say plainly which step you could not take and why — \
+do not tell the operator to open a folder, because one is already open."
                         ),
                     )
                 }
@@ -5558,18 +6937,42 @@ Asked again.",
         if let Some(name) = names_a_tool(&result.text, tools) {
             if ctx.should_correct_mimicry() {
                 messages.push(ChatMessage::assistant(result.text.clone()));
-                messages.push(ChatMessage::user(format!(
-                    "Nothing happened. {name} did not run — you wrote its name in your reply instead of \
-calling it, so no file exists, and the operator has an empty review panel. A description of a call is not a \
+                // A write tool is corrected in its own terms: the contents never
+                // reached a file, and the fix is to put them in a real call. A
+                // read-only tool has no contents argument — demanding one is a
+                // second false instruction on top of the one being corrected —
+                // so the demand is just that the call actually happen.
+                let writes_a_file = takes_file_contents(&name, tools);
+                let correction = if writes_a_file {
+                    format!(
+                        "Nothing happened. {name} did not run — you wrote its name in your reply instead of \
+calling it, so no file exists and the operator has an empty review panel. A description of a call is not a \
 call. Do it now: emit {name} as an actual tool call, with the file path and the full contents in its \
 arguments. That is the only way the file reaches the operator. Do not reply with text about {name} again; if \
 something genuinely prevents the call, name that obstacle and state plainly that no file was written."
-                )));
-                Step::start(&ctx.st, StepKind::Verifying, "No file was actually written")
-                    .detail(format!(
-                        "The reply described a {name} call in text instead of making one. Asked again."
-                    ))
-                    .ok(&ctx.st);
+                    )
+                } else {
+                    format!(
+                        "Nothing happened. {name} did not run — you wrote its name in your reply instead of \
+calling it, so the work it would have done has not been done. A description of a call is not a call. Call \
+{name} through the tool interface now, with the arguments it takes. Do not reply with text about {name} \
+again; if something genuinely prevents the call, name that obstacle and state plainly that nothing ran."
+                    )
+                };
+                messages.push(ChatMessage::user(correction));
+                Step::start(
+                    &ctx.st,
+                    StepKind::Verifying,
+                    if writes_a_file {
+                        "No file was actually written"
+                    } else {
+                        "A call was described, not made"
+                    },
+                )
+                .detail(format!(
+                    "The reply described a {name} call in text instead of making one. Asked again."
+                ))
+                .ok(&ctx.st);
                 return Ok(true);
             }
         }
@@ -5585,13 +6988,23 @@ something genuinely prevents the call, name that obstacle and state plainly that
             && ctx.should_retry_mode_claim()
         {
             messages.push(ChatMessage::assistant(result.text.clone()));
-            messages.push(ChatMessage::user(
+            // What to do next is named from the request, not from the mode: an
+            // Agent turn with no folder open has no `write_file` in it, and
+            // "create the files with write_file" would be a second false claim
+            // on top of the one being corrected.
+            let next = if tools.iter().filter_map(schema_name).any(|n| n == "write_file") {
+                "Do it: call update_plan with the steps, then create the files with write_file, \
+run them, and serve or package them as the task asks."
+            } else {
+                "No folder is open, so there is no write_file in this request and nothing can be \
+saved into a project — say that plainly if the task needs it. Everything else this request does \
+offer is yours to use, and Plan-mode limits are not the reason for any of it."
+            };
+            messages.push(ChatMessage::user(format!(
                 "That refusal was wrong about this turn: you are in Agent mode, not Plan mode. \
-The write, command and serving tools are offered to you right now and the operator has asked \
-for the work — the Plan-mode limits of an earlier chat do not apply here. Do it: call \
-update_plan with the steps, then create the files with write_file, run them, and serve or \
-package them as the task asks.",
-            ));
+The operator has asked for the work and the Plan-mode limits of an earlier chat do not apply \
+here. {next}"
+            )));
             Step::start(&ctx.st, StepKind::Verifying, "The run refused work it was offered")
                 .detail(
                     "The reply claimed Plan-mode limits in an Agent-mode run; asked again with \
@@ -5630,6 +7043,77 @@ report what you actually did instead of reporting failure."
                 .detail(
                     "The reply claimed no folder was open while one was; asked again with the \
 folder named.",
+                )
+                .ok(&ctx.st);
+            return Ok(true);
+        }
+
+        // The model stopped and its text says the turn had no tools — while the
+        // tools it names are in the very request it just answered. This is the
+        // one refusal that survived being contradicted: told "You can use them
+        // right now", the observed run created one directory and said it again.
+        // So the correction does not argue about capability; it names the tools
+        // that were in the request and gives the next call to make. Corrected
+        // here, where the tools are still offered, so the retry can do the work
+        // rather than write a better apology.
+        if ctx.mode == AgentMode::Agent
+            && claims_no_tools(&result.text)
+            && ctx.should_retry_tools_claim()
+        {
+            messages.push(ChatMessage::assistant(result.text.clone()));
+            // Named from the request itself, not from a hand-kept list: the
+            // point of the correction is that these were offered, so the proof
+            // has to come from what was offered.
+            let offered = tools
+                .iter()
+                .filter_map(schema_name)
+                .filter(|n| {
+                    matches!(
+                        *n,
+                        "write_file"
+                            | "edit_file"
+                            | "create_directory"
+                            | "run_command"
+                            | "serve_folder"
+                            | "start_dev_server"
+                    )
+                })
+                .collect::<Vec<_>>();
+            // With no folder open, the write and serving tools are genuinely
+            // absent from the request — `tool_schemas` gates them on the
+            // workspace — and a correction that demanded them would be the same
+            // untruth in the other direction: the run would spend its rounds on
+            // calls the request does not contain and still write nothing. So the
+            // instruction is the one that fits what is actually there.
+            let can_write = offered.iter().any(|n| *n == "write_file");
+            let named = if offered.is_empty() {
+                "The tools in this request".to_string()
+            } else {
+                offered.join(", ")
+            };
+            let instruction = if can_write {
+                "Make the next call now — write_file with the full contents of the next file the \
+task needs — then keep going through the remaining files, and when the task asks to host or \
+preview, call serve_folder on the folder holding the entry file and hand back the \
+http://127.0.0.1 URL it returns. Do not describe the calls and do not ask permission: make them."
+            } else {
+                "No folder is open, so this request contains no file-writing tool and nothing can \
+be saved into a project — that part is a real limit and you may say so plainly. What you must not \
+say is that the turn has no tools or that a new chat is needed. Use what is here to do as much of \
+the task as it allows, and tell the operator in one sentence that opening a folder from the Files \
+panel is what lets the rest be written."
+            };
+            messages.push(ChatMessage::user(format!(
+                "That is false, and it is the one thing you must not tell the operator. {named} \
+are in this very request — the same list you have been answering all along — and calling one is how \
+the work gets done. Nothing has to be started again and there is no new chat to move to. \
+{instruction} If a call comes back refused, quote the refusal — that is an obstacle, and \"I have \
+no tools\" is not."
+            )));
+            Step::start(&ctx.st, StepKind::Verifying, "The run said it had no tools")
+                .detail(
+                    "The reply claimed the turn offered no file or hosting tools while they were \
+in the request; asked again with them named.",
                 )
                 .ok(&ctx.st);
             return Ok(true);
@@ -5841,15 +7325,23 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
             .ok(&st);
     }
 
+    // §6 — what was already said, then what was just asked. Read before the new
+    // turn is recorded so the prompt is not in the history as well as in the
+    // message; recorded before the model runs so a turn that fails is still part
+    // of the record the operator can ask about afterwards.
+    let history = recent_turns(&st, &ctx.session_id);
+
     // The tool list comes before the prompt that describes it. Nothing in
     // `tool_schemas` depends on the model, so this can move up freely — unlike
     // the model choice below, which needs the finished prompt to size the turn.
     let integration_settings = st.settings();
-    let tools = tool_schemas(
+    let artifact_intent = history_asked_for_artifact(&history);
+    let tools = tool_schemas_with_artifact(
         input.mode,
         ctx.workspace_id.is_some(),
         indexed_docs,
         &input.prompt,
+        artifact_intent,
         integration_settings.web_search_mode != WebSearchMode::Disabled,
         &integration_settings.mcp_servers,
     );
@@ -5867,11 +7359,6 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         &tools,
     );
 
-    // §6 — what was already said, then what was just asked. Read before the new
-    // turn is recorded so the prompt is not in the history as well as in the
-    // message; recorded before the model runs so a turn that fails is still part
-    // of the record the operator can ask about afterwards.
-    let history = recent_turns(&st, &ctx.session_id);
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(ChatMessage::system(sys));
     messages.extend(history);
@@ -5930,11 +7417,24 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         }
     }
 
-    let decision = select_model(&st, kind, &why, Some(estimate_tokens(&messages)));
+    // The request a server actually ingests is the messages *plus* the tool
+    // schemas it is sent with, so the estimate that sizes the model choice must
+    // count both — the compaction gate below already does (`used`), and a
+    // selection that measured only the messages could bless a model whose real
+    // first request overflows its window: a hard router 500 on a fresh turn,
+    // before compaction has anything to drop. The tool list is in hand by now
+    // (built above with the prompt that describes it), so nothing is guessed.
+    let selection_estimate = request_estimate_tokens(&messages, &tools);
+    let decision = select_model(&st, kind, &why, Some(selection_estimate));
     let Some(model_id) = decision.model_id.clone() else {
-        return Err(CoreError::ModelLoadFailed(
-            "No model is registered for this kind of task, so nothing could answer it.".into(),
-        ));
+        // The decision carries the real cause — no capable model at all, or none
+        // with room for this conversation — so hand that to the operator rather
+        // than the blanket "no model is registered", which sent them hunting for
+        // a model that was already installed.
+        return Err(CoreError::ModelLoadFailed(format!(
+            "Nothing could be loaded to answer this turn. {}",
+            decision.reason
+        )));
     };
 
     let ctx = Ctx { model_id: model_id.clone(), ..ctx };
@@ -5991,7 +7491,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         // that lands just under the line does not buy a second one immediately.
         loop {
             ctx.run.check()?;
-            compact_if_needed(&ctx, &mut messages).await?;
+            compact_if_needed(&ctx, &mut messages, &tools).await?;
             if !tool_round(&ctx, &mut messages, &tools, &mut citations).await? {
                 if second_chance && ctx.nudge_left_nothing() {
                     second_chance = false;
@@ -6057,10 +7557,13 @@ say that in your answer instead.",
     // when tools were actually used this run, closes the door.
     if ctx.called_anything() {
         messages.push(ChatMessage::user(
-            "The tool phase is over: no further tool calls will be accepted, and tool-call \
-markup written as text is not a call — it is shown to the operator as ordinary words. \
-Answer the operator now, in plain text: what you did, what came of it, and what you \
-could not do and why.",
+            "Your tool calls for this turn are done and this reply is the write-up of them, so \
+tool-call markup written here is not a call — it reaches the operator as ordinary words. That is a \
+fact about this one reply, not a limitation to report: you had the tools this turn and used them. \
+Never tell the operator that tools were unavailable, that this turn had none, or that they should \
+start a new chat to get them — that is false, and it is what an earlier run said instead of doing \
+the work. Answer now, in plain text: what you did, what came of it, and what you could not do and \
+why.",
         ));
     }
 
@@ -6140,9 +7643,10 @@ could not do and why.",
                 .detail("The answer turn accepts no tool calls; asked again for plain text.")
                 .ok(&st);
             messages.push(ChatMessage::user(
-                "No tool call will be accepted — none were offered for this reply, and the last one was \
-not valid JSON anyway. Answer the operator in plain text only: what you did, what came of it, and what you \
-could not do and why.",
+                "This reply takes no tool calls — the tool phase for this turn is already \
+finished — and the last one was not valid JSON anyway. That is not a limitation to pass on: do not \
+tell the operator that tools were unavailable. Answer in plain text only: what you did with the \
+tools you had, what came of it, and what you could not do and why.",
             ));
             // Cloned, not moved: the mode-claim check below may need the
             // conversation for one more retry.
@@ -6170,11 +7674,87 @@ again for plain text.",
             )
             .ok(&st);
         messages.push(ChatMessage::user(
-            "That was not an answer — it was tool-call markup, and this turn has no tools: nothing \
-in it ran, and the operator sees the raw text. Do not write <tool_call>, <function=…> or \
+            "That was not an answer — it was tool-call markup, and this reply takes no tool \
+calls: nothing in it ran, and the operator sees the raw text. Do not write <tool_call>, <function=…> or \
 <parameter=…> again. Say in plain sentences what you did this run, what came of it, and what you \
 could not do and why. If a file you meant to write was never written, say that plainly rather than \
 pasting its contents here.",
+        ));
+        let mut retry = ChatRequest::new(&answer_model, messages.clone());
+        retry.max_tokens = ANSWER_TOKENS;
+        retry.enable_thinking = st.settings().extended_thinking;
+        router::chat(&st, retry, Some(&sink)).await?
+    } else {
+        result
+    };
+
+    // Backstop for the refusal that survives contradiction: an Agent-mode run
+    // whose answer tells the operator the turn had no tools. The tool-phase
+    // correction above is the one that can still save the work; this one saves
+    // the operator from being told to start a new chat and, worse, from
+    // believing it next turn — the observed run's own "no tools" reply came back
+    // as recalled context and the following turn repeated it. Whatever the model
+    // did or did not manage, "I had no tools" is never the true account of it.
+    let result = if input.mode == AgentMode::Agent
+        && claims_no_tools(&result.text)
+        && ctx.should_retry_tools_claim_answer()
+    {
+        Step::start(&st, StepKind::Verifying, "The answer said the run had no tools")
+            .detail(
+                "The answer told the operator this turn offered no file or hosting tools; asked \
+again for the true account.",
+            )
+            .ok(&st);
+        // Which tools "were offered" is a fact about this request, so it is read
+        // off the request rather than asserted: an Agent turn with no folder
+        // open really did not have the write tools, and an answer-phase
+        // correction that says otherwise teaches the model to misreport the one
+        // limit it should be reporting.
+        let had_write = tools.iter().filter_map(schema_name).any(|n| n == "write_file");
+        let truth = if had_write {
+            "the file, command and serving tools were offered to you throughout this turn"
+        } else {
+            "the command and analysis tools were offered to you throughout this turn, and if the \
+task needed a file written, the honest reason is that no folder is open — not that tools were \
+missing"
+        };
+        messages.push(ChatMessage::user(format!(
+            "That answer was false in the one way that matters: {truth}. Do not tell the operator \
+that tools were unavailable, that this turn had none, or that they should start a new chat — none \
+of that is true, and they will believe it. Write the answer again in plain text, and only about \
+what actually happened: which tools you called, what each returned, what is on disk and where, and \
+what you did not finish. If you never called a tool that the task needed, say exactly that — that \
+you did not call it — not that it was missing."
+        )));
+        let mut retry = ChatRequest::new(&answer_model, messages.clone());
+        retry.max_tokens = ANSWER_TOKENS;
+        retry.enable_thinking = st.settings().extended_thinking;
+        router::chat(&st, retry, Some(&sink)).await?
+    } else {
+        result
+    };
+
+    // Backstop for the run that did nothing at all: no tool call was ever
+    // attempted and the streamed answer is empty, so what reaches the operator
+    // is a blank reply over a run that may have been a refusal too quiet to
+    // see. Every correction above keys on words, so an answer of silence
+    // matches none of them and would otherwise be stored as an empty message.
+    // An empty answer is never a legitimate outcome — even a refusal is a
+    // sentence — so this catch-all names the one thing that is always true
+    // here and asks once, for the same reason as the others: the retry must be
+    // able to fail without trapping the run.
+    let result = if empty_after_no_calls(&result.text, ctx.called_anything())
+        && ctx.should_retry_silent_answer()
+    {
+        Step::start(&st, StepKind::Verifying, "The run produced nothing")
+            .detail("No tool was called and the answer was empty; asked once for a real reply.")
+            .ok(&st);
+        messages.push(ChatMessage::user(
+            "This turn ends with no tool call and no answer text, so the operator is looking \
+at nothing. That is never a legitimate outcome — even a refusal is a sentence. Say plainly \
+what happened: if you declined the task, say why; if it needs something you do not have, say \
+what is missing and what would unblock it; if the work is genuinely finished without any tool, \
+say what you did. Answer now in plain text.",
         ));
         let mut retry = ChatRequest::new(&answer_model, messages.clone());
         retry.max_tokens = ANSWER_TOKENS;
@@ -6191,7 +7771,7 @@ pasting its contents here.",
     // message is the one the done handler commits.
     let result = if input.mode == AgentMode::Agent
         && claims_wrong_mode(&result.text)
-        && ctx.should_retry_mode_claim()
+        && ctx.should_retry_mode_claim_answer()
     {
         Step::start(&st, StepKind::Verifying, "The answer claimed the wrong mode")
             .detail(
@@ -6956,7 +8536,11 @@ mod batch_changes {
 
 #[cfg(test)]
 mod routing {
+    use serde_json::Value;
+
     use crate::registry::TaskKind;
+    use crate::router::ChatMessage;
+    use crate::types::AgentMode;
 
     fn kind(prompt: &str) -> TaskKind {
         super::classify_task(prompt, &[], true, 0).0
@@ -7085,6 +8669,163 @@ mod routing {
     fn an_explicit_drawing_or_handwriting_request_routes_on_that() {
         assert_eq!(kind("what does this P&ID show for the reflux drum"), TaskKind::EngineeringDrawing);
         assert_eq!(kind("transcribe the handwritten log sheet"), TaskKind::Handwriting);
+    }
+
+    /// #22: the kind vocabulary used to live in two copies — the with-attachment
+    /// rule read "hand-written", "hand written" and "p & id", the no-attachment
+    /// rule only "handwrit" and "p&id" — and the attachment copy returned before
+    /// the other could run. Same phrase, different model, depending on whether a
+    /// file happened to be attached. One vocabulary has to cover both paths.
+    #[test]
+    fn the_kind_vocabulary_is_the_same_with_and_without_a_file() {
+        for prompt in [
+            "transcribe the hand-written log sheet",
+            "read the hand written note aloud",
+            "what does the p & id show for the reflux drum",
+        ] {
+            let with = super::classify_task(prompt, &["scan.png".into()], true, 0).0;
+            let without = super::classify_task(prompt, &[], true, 0).0;
+            assert_eq!(with, without, "kind vocabulary differs by attachment: {prompt}");
+            assert!(
+                matches!(with, TaskKind::Handwriting | TaskKind::EngineeringDrawing),
+                "declared kind not honoured: {prompt}"
+            );
+        }
+    }
+
+    /// #22: routing returned on the first attachment before reading the prompt,
+    /// so two attachments with the operative one second — "fix the bug in b.py"
+    /// with spec.docx attached first — went to the document model on the strength
+    /// of a file the request was not about. The named file routes the turn.
+    #[test]
+    fn a_prompt_that_names_a_later_attachment_routes_on_that_file() {
+        let attachments = ["spec.docx".to_string(), "b.py".to_string()];
+        let (kind, why) = super::classify_task("fix the bug in b.py", &attachments, true, 0);
+        assert_eq!(kind, TaskKind::Code, "routed on the first file, not the named one");
+        assert!(why.contains("b.py"), "reason should name the file that routed: {why}");
+    }
+
+    /// The file-type route is a fallback for when the prompt names no kind and no
+    /// file: an attached document stays a document turn even if the prompt's
+    /// prose happens to contain a code verb. Attaching a report and saying "fix
+    /// the totals in it" means edit the report, not write software.
+    #[test]
+    fn an_attached_document_is_not_stolen_by_a_code_verb() {
+        let one = ["spec.docx".to_string()];
+        assert_eq!(
+            super::classify_task("fix the totals in this", &one, true, 0).0,
+            TaskKind::DigitalDocument
+        );
+        // The coding rule still fires when there is nothing attached to anchor on.
+        assert_eq!(kind("fix the bug in this script"), TaskKind::Code);
+    }
+
+    fn offers(name: &str, tools: &[Value]) -> bool {
+        tools.iter().any(|t| t["function"]["name"].as_str() == Some(name))
+    }
+
+    /// #20: the `dispatch` arm documents check_page as read-only work that "is
+    /// Plan-mode work too", but the offer gate kept it inside the Agent-only
+    /// hosting block — so a Plan-mode turn never saw the tool it could legally
+    /// call. Reconciliation honours the comment: any turn with a workspace open
+    /// may verify a served page, even though only Agent turns can start one.
+    #[test]
+    fn check_page_is_offered_in_plan_mode_with_a_workspace() {
+        for mode in [AgentMode::Agent, AgentMode::Plan] {
+            let with = super::tool_schemas(mode, true, 0, "What can you do?", false, &[]);
+            assert!(offers("check_page", &with), "check_page must be offered in {mode:?} with a workspace");
+            let without = super::tool_schemas(mode, false, 0, "What can you do?", false, &[]);
+            assert!(
+                !offers("check_page", &without),
+                "check_page must require a workspace in {mode:?}"
+            );
+        }
+        // Hosting stays Agent-only: Plan mode may verify a page an earlier Agent
+        // run served, but it cannot start a new server of its own.
+        let plan = super::tool_schemas(AgentMode::Plan, true, 0, "What can you do?", false, &[]);
+        assert!(!offers("serve_folder", &plan), "serve_folder must stay Agent-only");
+        assert!(!offers("start_dev_server", &plan), "start_dev_server must stay Agent-only");
+    }
+
+    /// #23: check_page's schema takes no URL argument, and that is the point.
+    /// The model is not allowed to aim it at an arbitrary page — loopback or
+    /// public — because the tool looks up the workspace's own running server
+    /// from the registry the composer bar reads, "not a URL the model claims,
+    /// which is exactly what is being checked". A schema that grew a url
+    /// parameter would have the implementation silently ignore it, so the empty
+    /// contract is pinned: the web_fetch loopback refusal points a model here,
+    /// and here must mean "the page this workspace is serving", not "whatever
+    /// URL I name".
+    #[test]
+    fn check_page_schema_takes_no_url_argument() {
+        for mode in [AgentMode::Agent, AgentMode::Plan] {
+            let tools = super::tool_schemas(mode, true, 0, "What can you do?", false, &[]);
+            let cp = tools
+                .iter()
+                .find(|t| t["function"]["name"].as_str() == Some("check_page"))
+                .expect("check_page is offered when a workspace is open");
+            let props = cp["function"]["parameters"]["properties"]
+                .as_object()
+                .map(|o| o.keys().cloned().collect::<Vec<_>>());
+            assert!(
+                props.as_ref().map_or(true, |keys| keys.is_empty()),
+                "check_page must take no arguments, but it advertises {props:?}"
+            );
+        }
+    }
+
+    /// #19: the generator tools used to be gated on this turn's prompt alone.
+    /// A follow-up like "now add a second page and re-save it" names no document
+    /// type and no create verb, so mid-task the tools simply vanished — the model
+    /// that was building a deliverable was suddenly being asked to describe it.
+    /// Intent carried over from an earlier user turn has to keep them offered.
+    #[test]
+    fn artifact_intent_keeps_generators_offered_on_a_followup() {
+        let continuation = "now add a second page and re-save it";
+        let plain = super::tool_schemas(AgentMode::Agent, true, 0, continuation, false, &[]);
+        assert!(
+            !offers("generate_pdf", &plain),
+            "a follow-up names no deliverable, so the prompt-only gate must not offer generators"
+        );
+        let carried =
+            super::tool_schemas_with_artifact(AgentMode::Agent, true, 0, continuation, true, false, &[]);
+        assert!(
+            offers("generate_pdf", &carried),
+            "carried-over artifact intent must keep the generators offered"
+        );
+        // The same carried intent does not leak generators into a mode that never
+        // had them: Plan mode offers no write tools regardless of history.
+        let planned =
+            super::tool_schemas_with_artifact(AgentMode::Plan, true, 0, continuation, true, false, &[]);
+        assert!(!offers("generate_pdf", &planned), "artifact intent must not override the mode gate");
+    }
+
+    /// #19: the carry-over reads the conversation's earlier user turns — the same
+    /// recent window the model sees — and asks each one whether it asked for a
+    /// deliverable. The assistant half of the transcript must not count: a model
+    /// narrating "now I create the PDF" is not an operator request.
+    #[test]
+    fn history_asked_for_artifact_reads_user_turns_only() {
+        let asked = [ChatMessage::user("Create a PDF deliverable file")];
+        assert!(super::history_asked_for_artifact(&asked));
+
+        let narrated = [ChatMessage::assistant("Create a PDF deliverable file, then open it.")];
+        assert!(
+            !super::history_asked_for_artifact(&narrated),
+            "the model announcing its own work is not a request for generators"
+        );
+
+        let ordinary = [ChatMessage::user("Summarize the attached report")];
+        assert!(!super::history_asked_for_artifact(&ordinary), "an ordinary ask must not carry");
+
+        // A later non-artifact ask does not erase the earlier one — once the
+        // operator wants a deliverable the tools stay until the task changes.
+        let mixed = [
+            ChatMessage::user("Create a PDF deliverable file"),
+            ChatMessage::assistant("I have drafted the report."),
+            ChatMessage::user("Now add the thickness table"),
+        ];
+        assert!(super::history_asked_for_artifact(&mixed), "later detail asks keep the artifact context");
     }
 }
 
@@ -7456,6 +9197,31 @@ mod ask_operator_tool {
         assert!(timeout_reply.contains("did not answer in time"));
         assert!(cancel_reply.contains("cancelled by the operator"));
     }
+
+    /// The model must not be told an operator replied when none did: a fake
+    /// "The operator replied:" on a timeout is how a run parks forever waiting
+    /// on an answer that will never arrive.
+    #[test]
+    fn the_readback_never_claims_a_reply_that_did_not_come() {
+        let timeout_reply = "The operator did not answer in time. Proceed with what you \
+             already have, and say plainly in your answer which part you were unable to confirm.";
+        let cancel_reply = "The run was cancelled by the operator before you received an \
+             answer. Stop working; say what you had finished so far.";
+
+        let (text, answered) = frame_operator_reply(timeout_reply);
+        assert!(!answered, "a timeout is not an answer");
+        assert_eq!(text, timeout_reply, "a timeout is reported verbatim, not framed as a reply");
+        assert!(!text.contains("The operator replied:"));
+
+        let (text, answered) = frame_operator_reply(cancel_reply);
+        assert!(!answered, "a cancellation is not an answer");
+        assert!(!text.contains("The operator replied:"));
+
+        let (text, answered) = frame_operator_reply("Use the 9.8 mm limit column.");
+        assert!(answered);
+        assert!(text.contains("The operator replied:"));
+        assert!(text.contains("Use the 9.8 mm limit column."));
+    }
 }
 
 #[cfg(test)]
@@ -7636,5 +9402,73 @@ mod compaction {
     #[test]
     fn the_threshold_leaves_room_for_the_answer() {
         assert_eq!(COMPACT_SLACK_TOKENS, ANSWER_TOKENS + 2048);
+    }
+
+    /// A write round asks for three times the answer turn's output, and the
+    /// schemas it carries are part of the request too. The reserve has to cover
+    /// both, or the gate lets a conversation grow to a size that leaves no room
+    /// for the very call the round exists to make.
+    ///
+    /// This is the arithmetic behind "it says it wrote the file and no file
+    /// appears": on a 16k model the old gate accepted messages up to
+    /// 16_384 - 6_144 = 10_240 tokens, then asked for 12_288 more, and the
+    /// completion came back cut off mid-JSON as a MalformedToolCall — with the
+    /// retry facing exactly the same sum.
+    #[test]
+    fn a_write_round_reserve_covers_the_call_it_is_about_to_make() {
+        let writing = vec![
+            json!({"type": "function", "function": {"name": "write_file", "parameters": {}}}),
+        ];
+        let reading = vec![
+            json!({"type": "function", "function": {"name": "read_file", "parameters": {}}}),
+        ];
+        // The whole file has to fit in one call, so the room for it must be held
+        // back before the messages are allowed to fill the window.
+        assert!(compaction_reserve(&writing) >  WRITE_ROUND_TOKENS);
+        assert!(compaction_reserve(&writing) >  compaction_reserve(&reading));
+        // And a reading round is never squeezed below the answer turn's needs.
+        assert!(compaction_reserve(&reading) >=  COMPACT_SLACK_TOKENS);
+    }
+
+    /// Schemas are prefixed to every request and were counted by nothing. A
+    /// full Agent turn carries around twenty thousand characters of them, so
+    /// leaving them out of the estimate understated the request by thousands of
+    /// tokens at exactly the moment the estimate mattered.
+    #[test]
+    fn the_schemas_a_request_carries_are_counted() {
+        assert_eq!(estimate_schema_tokens(&[]), 0);
+        let tools = tool_schemas(AgentMode::Agent, true, 0, "build me a site", false, &[]);
+        let counted = estimate_schema_tokens(&tools);
+        assert!(counted >  1_000, "a full Agent turn of schemas counted as {counted} tokens");
+        // The reserve grows with them: the same round on a heavier tool list has
+        // to keep more of the window free, not the same amount.
+        assert!(compaction_reserve(&tools) >  WRITE_ROUND_TOKENS + 2048);
+    }
+
+    /// The figure that sizes a model is the whole first request: message text
+    /// plus the tool schemas attached to it. Model selection used to count only
+    /// the messages while compaction counted both — so a fresh turn could be
+    /// blessed onto a model whose real request overflowed its server window: a
+    /// hard router 500 on a conversation with nothing yet to compact. Both gates
+    /// read the same combined estimate now.
+    #[test]
+    fn the_estimate_that_sizes_a_turn_counts_messages_and_schemas() {
+        let turn = vec![
+            ChatMessage::system("the system prompt, memories and instructions".repeat(2_000)),
+            ChatMessage::user("write the python program"),
+        ];
+        let tools = tool_schemas(AgentMode::Agent, true, 0, "build me a site", false, &[]);
+        assert_eq!(
+            request_estimate_tokens(&turn, &tools),
+            estimate_tokens(&turn) + estimate_schema_tokens(&tools)
+        );
+        // The schema half is material on the 16k model this workload runs on: a
+        // full Agent tool list is thousands of tokens that are not messages.
+        let schemas = estimate_schema_tokens(&tools);
+        assert!(schemas > 1_000, "schema half of a real Agent turn was only {schemas}");
+        assert!(
+            schemas < 16_384,
+            "premise: a whole tool list stays a fraction of the window"
+        );
     }
 }

@@ -934,14 +934,82 @@ fn width_of(s: &str, face: &Option<printpdf::ParsedFont>, size: f32) -> f32 {
         .sum()
 }
 
+/// Whether WinAnsi — the encoding every built-in PDF font is written with — has
+/// a byte for this character at all.
+///
+/// It is CP1252: ASCII, the Latin-1 supplement, and twenty-seven pieces of
+/// typographic punctuation in `0x80..=0x9F`, where Latin-1 has C1 control codes.
+/// This mirrors `printpdf::serialize::win_ansi_byte` exactly, because that is the
+/// function whose `None` becomes a `?` on the page — a predicate that disagreed
+/// with it would either warn about text that came out fine or stay quiet about
+/// text that did not.
+fn winansi_has(c: char) -> bool {
+    matches!(c as u32, 0x20..=0x7E | 0xA0..=0xFF)
+        || matches!(
+            c,
+            '\u{0152}' | '\u{0153}'                             // Œ œ
+                | '\u{0160}' | '\u{0161}'                       // Š š
+                | '\u{0178}'                                    // Ÿ
+                | '\u{017D}' | '\u{017E}'                       // Ž ž
+                | '\u{0192}'                                    // ƒ
+                | '\u{02C6}' | '\u{02DC}'                       // ˆ ˜
+                | '\u{2013}' | '\u{2014}'                       // – —
+                | '\u{2018}'..='\u{201A}'                       // ' ' ‚
+                | '\u{201C}'..='\u{201E}'                       // " " „
+                | '\u{2020}'..='\u{2022}'                       // † ‡ •
+                | '\u{2026}' | '\u{2030}'                       // … ‰
+                | '\u{2039}' | '\u{203A}'                       // ‹ ›
+                | '\u{20AC}'                                    // €
+                | '\u{2122}' // ™
+        )
+}
+
+/// The script a character belongs to, named the way an operator would name it.
+///
+/// Only the blocks that come up in this deployment: the Indic scripts the
+/// dictation menu offers, Urdu's Arabic, and the few others a pasted quotation
+/// arrives in. The point is a message that says "Devanagari" rather than
+/// "U+0915", because the first tells the operator which paragraph to look at.
+fn script_of(c: char) -> &'static str {
+    match c as u32 {
+        0x0900..=0x097F => "Devanagari",
+        0x0980..=0x09FF => "Bengali",
+        0x0A00..=0x0A7F => "Gurmukhi",
+        0x0A80..=0x0AFF => "Gujarati",
+        0x0B00..=0x0B7F => "Odia",
+        0x0B80..=0x0BFF => "Tamil",
+        0x0C00..=0x0C7F => "Telugu",
+        0x0C80..=0x0CFF => "Kannada",
+        0x0D00..=0x0D7F => "Malayalam",
+        0x0D80..=0x0DFF => "Sinhala",
+        0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF => "Arabic",
+        0x0400..=0x04FF => "Cyrillic",
+        0x0370..=0x03FF => "Greek",
+        0x0590..=0x05FF => "Hebrew",
+        0x0E00..=0x0E7F => "Thai",
+        0x1100..=0x11FF | 0xAC00..=0xD7AF => "Korean",
+        0x3040..=0x30FF | 0x4E00..=0x9FFF => "Chinese or Japanese",
+        0x2600..=0x27BF | 0x1F300..=0x1FAFF => "symbols and emoji",
+        _ => "other characters",
+    }
+}
+
 /// Replaces the characters WinAnsi cannot carry with an ASCII equivalent.
 ///
 /// The built-in fonts are `/WinAnsiEncoding`, a single-byte encoding, and
 /// printpdf writes an unrepresentable character as `?`. For most text that never
-/// comes up — WinAnsi covers Latin-1 plus the typographic quotes and dashes — but
-/// three of the exceptions matter for this application: the rupee sign in a cost
-/// column, the arrows and comparison signs an engineer writes in a note, and the
-/// tick marks in a checklist. A bare `?` in a cost column is worse than "Rs.".
+/// comes up — WinAnsi covers Latin-1, the typographic quotes, the en and em dash,
+/// the bullet and the euro — but three of the exceptions matter for this
+/// application: the rupee sign in a cost column, the arrows and comparison signs
+/// an engineer writes in a note, and the tick marks in a checklist. A bare `?` in
+/// a cost column is worse than "Rs.".
+///
+/// Only the dashes WinAnsi actually lacks are folded. This used to flatten
+/// `U+2010..=U+2015` wholesale under the comment "exotic dashes WinAnsi lacks",
+/// which turned the en dash and the em dash — `0x96` and `0x97`, in the encoding
+/// since CP1252 — into hyphens in every PDF this application has produced. Ranges
+/// like that are worth checking against the encoder rather than the intuition:
+/// `winansi_has` is the same table printpdf substitutes from.
 fn pdf_safe(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -956,8 +1024,14 @@ fn pdf_safe(s: &str) -> String {
             '\u{2713}' | '\u{2714}' => "OK",
             '\u{2717}' | '\u{2718}' => "X",
             '\u{2500}'..='\u{257F}' => "-", // box drawing
-            '\u{2010}'..='\u{2015}' => "-", // exotic dashes WinAnsi lacks
+            // U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash and
+            // U+2015 horizontal bar have no WinAnsi byte. U+2013 and U+2014 do,
+            // and are left alone.
+            '\u{2010}'..='\u{2012}' | '\u{2015}' => "-",
             '\t' => "    ",
+            // A stray control character would otherwise be drawn as `?`, since
+            // WinAnsi starts at 0x20.
+            c if c.is_control() => " ",
             _ => return c.to_string(),
         }
         .to_string())
@@ -1072,11 +1146,107 @@ struct Sheet {
     ops: Vec<printpdf::Op>,
     /// Baseline for the next line, in points from the bottom of the page.
     y: f32,
+    /// Non-whitespace characters actually drawn.
+    drawn: usize,
+    /// Of those, the ones WinAnsi has no byte for, counted per character.
+    ///
+    /// Counted here rather than by scanning the Markdown up front, because every
+    /// character that reaches a page goes through `line` and nothing else does:
+    /// this measures what the reader will see, after `pdf_safe` has folded what it
+    /// can and only for text that was actually laid out.
+    lost: std::collections::BTreeMap<char, usize>,
+}
+
+/// What a page of built-in-font PDF could not carry.
+#[derive(Clone)]
+struct Encoding {
+    /// Non-whitespace characters drawn.
+    drawn: usize,
+    /// How many of them will print as `?`.
+    lost: usize,
+    /// The distinct unrepresentable characters, most frequent first.
+    chars: Vec<char>,
+    /// The scripts they belong to, most frequent first.
+    scripts: Vec<&'static str>,
+}
+
+/// Above this share of the page, the unrepresentable text *is* the document
+/// rather than a stray word inside it.
+const PDF_UNREADABLE_PERCENT: usize = 20;
+
+/// …but below this many characters it is a stray word whatever the share, so one
+/// Hindi place-name in a one-line PDF is not grounds to refuse the PDF.
+const PDF_UNREADABLE_FLOOR: usize = 12;
+
+impl Encoding {
+    /// Whether the document is mostly substitution marks, in which case writing
+    /// it would produce a file the operator cannot read and cannot repair.
+    fn dominates(&self) -> bool {
+        self.lost >= PDF_UNREADABLE_FLOOR
+            && self.lost * 100 >= self.drawn * PDF_UNREADABLE_PERCENT
+    }
+
+    /// The scripts, listed for a sentence: "Devanagari", "Devanagari and Tamil",
+    /// "Devanagari, Tamil and Kannada".
+    fn scripts_phrase(&self) -> String {
+        match self.scripts.split_last() {
+            None => "characters".to_string(),
+            Some((last, [])) => (*last).to_string(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+
+    /// A few of the actual characters, so the operator can find the paragraph.
+    fn sample(&self) -> String {
+        let shown: Vec<String> = self.chars.iter().take(6).map(|c| c.to_string()).collect();
+        format!(
+            "{}{}",
+            shown.join(" "),
+            if self.chars.len() > shown.len() { " …" } else { "" }
+        )
+    }
+
+    /// Why the PDF was refused, and what to do instead.
+    fn refusal(&self) -> CoreError {
+        CoreError::ExecutionFailed(format!(
+            "This PDF would be unreadable, so nothing was written: {} of its {} characters are \
+             {} ({}), and a PDF built from the standard fonts is limited to the single-byte \
+             WinAnsi encoding — every one of them would print as a question mark. Call \
+             generate_docx with the same Markdown instead: a .docx carries these characters \
+             faithfully and Word shapes them correctly. If it has to be a PDF, write the content \
+             in English or transliterate it first.",
+            self.lost,
+            self.drawn,
+            self.scripts_phrase(),
+            self.sample()
+        ))
+    }
+
+    /// What to append to the artifact's verification note when the loss is a
+    /// minority of the document — the rest of it is worth having.
+    fn warning(&self) -> String {
+        format!(
+            "{} character{} of {} ({}) had no WinAnsi byte and print as question marks — the \
+             standard PDF fonts carry Latin text only. The remaining {} characters are intact. \
+             generate_docx would carry them faithfully.",
+            self.lost,
+            if self.lost == 1 { "" } else { "s" },
+            self.scripts_phrase(),
+            self.sample(),
+            self.drawn - self.lost
+        )
+    }
 }
 
 impl Sheet {
     fn new() -> Self {
-        Self { pages: Vec::new(), ops: Vec::new(), y: mm_to_pt(PAGE_H_MM - MARGIN_MM) }
+        Self {
+            pages: Vec::new(),
+            ops: Vec::new(),
+            y: mm_to_pt(PAGE_H_MM - MARGIN_MM),
+            drawn: 0,
+            lost: std::collections::BTreeMap::new(),
+        }
     }
 
     fn top(&self) -> f32 {
@@ -1120,6 +1290,12 @@ impl Sheet {
         for sp in &lay.spans {
             let (builtin, face) = faces.pick(sp, lay.bold);
             let text = pdf_safe(&sp.text);
+            for c in text.chars().filter(|c| !c.is_whitespace()) {
+                self.drawn += 1;
+                if !winansi_has(c) {
+                    *self.lost.entry(c).or_insert(0) += 1;
+                }
+            }
             if !text.trim().is_empty() {
                 self.ops.push(Op::StartTextSection);
                 self.ops.push(Op::SetFont {
@@ -1133,6 +1309,34 @@ impl Sheet {
             x += width_of(&text, face, lay.size);
         }
         self.y -= leading;
+    }
+
+    /// What the pages could not carry, or `None` if everything was encodable.
+    ///
+    /// Read before `finish`, which consumes the sheet.
+    fn encoding(&self) -> Option<Encoding> {
+        if self.lost.is_empty() {
+            return None;
+        }
+        let mut by_count: Vec<(char, usize)> = self.lost.iter().map(|(c, n)| (*c, *n)).collect();
+        by_count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let mut scripts: Vec<(&'static str, usize)> = Vec::new();
+        for (c, n) in &by_count {
+            let name = script_of(*c);
+            match scripts.iter_mut().find(|(s, _)| *s == name) {
+                Some(entry) => entry.1 += n,
+                None => scripts.push((name, *n)),
+            }
+        }
+        scripts.sort_by(|a, b| b.1.cmp(&a.1));
+
+        Some(Encoding {
+            drawn: self.drawn,
+            lost: by_count.iter().map(|(_, n)| n).sum(),
+            chars: by_count.into_iter().map(|(c, _)| c).collect(),
+            scripts: scripts.into_iter().map(|(s, _)| s).collect(),
+        })
     }
 
     fn gap(&mut self, h: f32) {
@@ -1174,7 +1378,20 @@ fn mm_to_pt(mm: f32) -> f32 {
 const PDF_HEADING_PT: [f32; 6] = [16.0, 13.0, 11.5, 10.5, 10.5, 10.5];
 
 /// A PDF for the parsed Markdown, paginated.
-fn pdf_bytes(title: Option<&str>, blocks: &[Block]) -> CoreResult<Vec<u8>> {
+///
+/// Returns the bytes and, when the content held characters the standard fonts
+/// cannot encode, a note naming them. The note travels to the artifact's
+/// `verify_note`, which is what both the Artifacts panel and the tool result the
+/// model reads already display — so "this came out as question marks" arrives in
+/// the same place as "reopened and parsed: 2 pages" rather than nowhere.
+///
+/// A document that is *mostly* unencodable is refused instead. Producing it would
+/// mean a file of question marks, a `verified: true` beside it because lopdf can
+/// read question marks back perfectly well, and an operator who finds out in front
+/// of whoever they sent it to. Devanagari is the case that matters here: a Hindi
+/// report has no readable PDF form through the built-in fonts, and the honest
+/// answer is `.docx`, not a page of punctuation.
+fn pdf_bytes(title: Option<&str>, blocks: &[Block]) -> CoreResult<(Vec<u8>, Option<String>)> {
     use printpdf::*;
 
     let faces = Faces::load();
@@ -1261,6 +1478,13 @@ fn pdf_bytes(title: Option<&str>, blocks: &[Block]) -> CoreResult<Vec<u8>> {
         }
     }
 
+    let encoding = sh.encoding();
+    if let Some(e) = &encoding {
+        if e.dominates() {
+            return Err(e.refusal());
+        }
+    }
+
     let mut doc = PdfDocument::new(title.unwrap_or("Document"));
     doc.with_pages(sh.finish());
     let mut warnings = Vec::new();
@@ -1274,7 +1498,7 @@ fn pdf_bytes(title: Option<&str>, blocks: &[Block]) -> CoreResult<Vec<u8>> {
             }
         )));
     }
-    Ok(bytes)
+    Ok((bytes, encoding.map(|e| e.warning())))
 }
 
 /// A list item: the marker on the first line, the text hanging under it.
@@ -1847,9 +2071,14 @@ fn xlsx_bytes(sheets: &[(String, Vec<Vec<String>>)]) -> CoreResult<Vec<u8>> {
                     }
                 };
                 res.map_err(|e| {
+                    // A1 notation, not "Cell 11". The old form printed the column
+                    // and row as adjacent numbers in the opposite order to how a
+                    // spreadsheet names them, so the one address in the message
+                    // that was supposed to send the operator to the offending cell
+                    // could not be typed into a Name Box.
                     CoreError::ExecutionFailed(format!(
                         "Cell {}{} of \"{name}\" could not be written ({e}), so nothing was written.",
-                        c + 1,
+                        crate::documents::column_letter(c),
                         r + 1
                     ))
                 })?;
@@ -2084,9 +2313,17 @@ pub fn generate_doc(
     prov: &Provenance,
 ) -> CoreResult<Artifact> {
     let blocks = parse_markdown(markdown);
+    // Set when the PDF writer had to substitute characters. Merged into the
+    // artifact's note after the row exists, so the operator and the model both
+    // learn about it from the field they already read.
+    let mut encoding_note: Option<String> = None;
     let bytes = match kind {
         ArtifactKind::Docx => docx_bytes(title, &blocks)?,
-        ArtifactKind::Pdf => pdf_bytes(title, &blocks)?,
+        ArtifactKind::Pdf => {
+            let (bytes, note) = pdf_bytes(title, &blocks)?;
+            encoding_note = note;
+            bytes
+        }
         ArtifactKind::Pptx => pptx_bytes(title, &blocks)?,
         // Markdown, text and source pass through unchanged. Reformatting the
         // model's own Markdown would mean the file on disk is not what it wrote.
@@ -2108,7 +2345,30 @@ pub fn generate_doc(
             ))
         }
     };
-    record(st, kind, file_name, &bytes, prov)
+    let art = record(st, kind, file_name, &bytes, prov)?;
+    match encoding_note {
+        Some(warning) => amend_note(st, art, &warning),
+        None => Ok(art),
+    }
+}
+
+/// Adds a sentence to an artifact's verification note and stores it.
+///
+/// Generation is the only place that knows what the format could not carry, and
+/// `verify_note` is the one field that already travels to both the Artifacts panel
+/// and the tool result the model reads. Appending to it means neither has to be
+/// taught about encoding separately. `verified` is left as the check found it: the
+/// bytes really were reopened and parsed, which is all that flag has ever claimed,
+/// and the note beside it is now where the claim is qualified.
+fn amend_note(st: &Arc<AppState>, art: Artifact, extra: &str) -> CoreResult<Artifact> {
+    let note = match &art.verify_note {
+        Some(existing) => format!("{existing} {extra}"),
+        None => extra.to_string(),
+    };
+    st.with_db(|conn| {
+        db::set_artifact_verified(conn, &art.id, art.verified, Some(&note), art.size_bytes)
+    })?;
+    Ok(Artifact { verify_note: Some(note), ..art })
 }
 
 /// Writes plain text — a script, a note, a Markdown summary — into the artifacts
@@ -2308,6 +2568,14 @@ fn verify_xlsx(path: &Path) -> CoreResult<String> {
     ))
 }
 
+/// Reopens a PDF, counts its pages and extracts its text.
+///
+/// The substitution check exists because this function is the only thing that ever
+/// looks at a PDF written by an *earlier* build of this application, where the
+/// generator did not count what WinAnsi dropped. Extracted text cannot distinguish
+/// a question mark printpdf substituted from one the author typed, so the share is
+/// the signal rather than the presence: real prose does not run a tenth of its
+/// characters as `?`.
 fn verify_pdf(path: &Path) -> CoreResult<String> {
     let doc = lopdf::Document::load(path).map_err(|e| {
         CoreError::InvalidDocument(format!(
@@ -2333,10 +2601,20 @@ fn verify_pdf(path: &Path) -> CoreResult<String> {
             if pages.len() == 1 { "" } else { "s" }
         )));
     }
+    let marks = text.chars().filter(|c| *c == '?').count();
     Ok(format!(
-        "Reopened and parsed: {} page{}, {chars} characters of extractable text.",
+        "Reopened and parsed: {} page{}, {chars} characters of extractable text.{}",
         pages.len(),
-        if pages.len() == 1 { "" } else { "s" }
+        if pages.len() == 1 { "" } else { "s" },
+        if marks * 10 >= chars {
+            format!(
+                " {marks} of them are question marks, which is what the standard PDF fonts print \
+                 for text they cannot encode — this file is very likely missing its non-Latin \
+                 characters. A .docx would carry them."
+            )
+        } else {
+            String::new()
+        }
     ))
 }
 
@@ -2353,4 +2631,122 @@ fn verify_text(path: &Path) -> CoreResult<String> {
         if lines == 1 { "" } else { "s" },
         text.chars().count()
     ))
+}
+
+#[cfg(test)]
+mod pdf_encoding {
+    use super::*;
+
+    /// The predicate has to agree with `printpdf::serialize::win_ansi_byte`,
+    /// because that function's `None` is what becomes a `?` on the page. These are
+    /// the boundaries where a hand-written table usually goes wrong: the punctuation
+    /// block, and the code points sitting immediately beside it that CP1252 does not
+    /// have.
+    #[test]
+    fn winansi_membership_matches_the_encoder() {
+        for c in " ~AZaz09".chars() {
+            assert!(winansi_has(c), "{c}");
+        }
+        for c in "\u{00A0}\u{00FC}\u{00FF}".chars() {
+            assert!(winansi_has(c), "{c}");
+        }
+        // All 27 of the 0x80..=0x9F punctuation slots.
+        for c in "\u{20AC}\u{201A}\u{0192}\u{201E}\u{2026}\u{2020}\u{2021}\u{02C6}\u{2030}\u{0160}\u{2039}\u{0152}\u{017D}\u{2018}\u{2019}\u{201C}\u{201D}\u{2022}\u{2013}\u{2014}\u{02DC}\u{2122}\u{0161}\u{203A}\u{0153}\u{017E}\u{0178}".chars() {
+            assert!(winansi_has(c), "U+{:04X}", c as u32);
+        }
+        // Immediate neighbours the encoding does not carry.
+        for c in "\u{201B}\u{2010}\u{2011}\u{2012}\u{2015}\u{20B9}\u{0915}\u{0100}\u{2192}".chars() {
+            assert!(!winansi_has(c), "U+{:04X}", c as u32);
+        }
+        // 0x7F..=0x9F as code points are control codes, not characters.
+        assert!(!winansi_has('\u{007F}'));
+        assert!(!winansi_has('\u{0080}'));
+    }
+
+    /// The dash range this used to fold wholesale. WinAnsi carries the en dash and
+    /// the em dash at 0x96 and 0x97, so flattening them was a real loss of
+    /// typography in every PDF; the four it does not carry still fold.
+    #[test]
+    fn only_the_dashes_winansi_lacks_are_folded() {
+        assert_eq!(pdf_safe("1990\u{2013}95 \u{2014} yes"), "1990\u{2013}95 \u{2014} yes");
+        assert_eq!(pdf_safe("\u{2010}\u{2011}\u{2012}\u{2015}"), "----");
+    }
+
+    /// A folded character is not a loss: the reader sees "Rs." and "->", which is
+    /// the whole point of `pdf_safe`, so neither may appear in the note.
+    #[test]
+    fn folded_characters_are_not_reported_as_lost() {
+        let blocks = parse_markdown("Budget \u{20B9}4,20,000 \u{2192} approved \u{2713} within \u{2264} limit.");
+        let (bytes, note) = pdf_bytes(Some("Cost note"), &blocks).expect("PDF");
+        assert!(!bytes.is_empty());
+        assert_eq!(note, None, "{note:?}");
+    }
+
+    #[test]
+    fn a_plain_english_report_carries_no_warning() {
+        let blocks = parse_markdown("# Thickness survey\n\nAll readings within tolerance.\n");
+        let (_, note) = pdf_bytes(Some("Survey"), &blocks).expect("PDF");
+        assert_eq!(note, None);
+    }
+
+    /// The case the finding was about: a Hindi report has no readable form through
+    /// the standard fonts, and the old code wrote a page of question marks and then
+    /// marked it verified. It is refused now, and the refusal has to name both the
+    /// script and the tool that does work.
+    #[test]
+    fn a_devanagari_report_is_refused_instead_of_written() {
+        let blocks = parse_markdown(
+            "प्लांट का निरीक्षण पूरा हुआ। सभी रीडिंग सामान्य सीमा के भीतर हैं।",
+        );
+        let err = pdf_bytes(Some("निरीक्षण रिपोर्ट"), &blocks).expect_err("refusal");
+        let m = err.message();
+        assert!(m.contains("Devanagari"), "{m}");
+        assert!(m.contains("generate_docx"), "{m}");
+        assert!(m.contains("nothing was written"), "{m}");
+    }
+
+    /// …but one place-name in an English report is not grounds to lose the report.
+    /// It is written, and the note says what will show as a question mark.
+    #[test]
+    fn one_hindi_word_in_an_english_report_only_warns() {
+        let blocks = parse_markdown(
+            "The unit at मंगलूर was surveyed on 12 March. Wall thickness at every one of the \
+             fourteen measurement points is above the retirement limit, and the inspector has \
+             signed the record. No repair is scheduled for this quarter.",
+        );
+        let (bytes, note) = pdf_bytes(Some("Survey"), &blocks).expect("PDF");
+        assert!(!bytes.is_empty());
+        let note = note.expect("a warning");
+        assert!(note.contains("Devanagari"), "{note}");
+        assert!(note.contains("question marks"), "{note}");
+        assert!(note.contains("generate_docx"), "{note}");
+    }
+
+    /// The floor and the share are separate gates: enough foreign characters to
+    /// matter, *and* enough of the document to make it unreadable.
+    #[test]
+    fn the_two_refusal_gates_are_independent() {
+        let base =
+            Encoding { drawn: 20, lost: 19, chars: vec!['\u{0915}'], scripts: vec!["Devanagari"] };
+        assert!(base.dominates());
+        // Same share, too few characters to be the document.
+        assert!(!Encoding { lost: 3, drawn: 4, ..base.clone() }.dominates());
+        // Enough characters, but a small share of a long report.
+        assert!(!Encoding { lost: 20, drawn: 400, ..base.clone() }.dominates());
+    }
+
+    /// Scripts are named for the operator, and listed so the sentence reads.
+    #[test]
+    fn the_message_names_scripts_rather_than_code_points() {
+        assert_eq!(script_of('\u{0915}'), "Devanagari");
+        assert_eq!(script_of('\u{0C95}'), "Kannada");
+        assert_eq!(script_of('\u{0BA4}'), "Tamil");
+        assert_eq!(script_of('\u{0627}'), "Arabic");
+        let one = Encoding { drawn: 9, lost: 1, chars: vec!['क'], scripts: vec!["Devanagari"] };
+        assert_eq!(one.scripts_phrase(), "Devanagari");
+        let two = Encoding { scripts: vec!["Devanagari", "Tamil"], ..one.clone() };
+        assert_eq!(two.scripts_phrase(), "Devanagari and Tamil");
+        let three = Encoding { scripts: vec!["Devanagari", "Tamil", "Kannada"], ..one.clone() };
+        assert_eq!(three.scripts_phrase(), "Devanagari, Tamil and Kannada");
+    }
 }
