@@ -7947,6 +7947,15 @@ pub async fn start(st: Arc<AppState>, input: StartRunInput) -> CoreResult<RunSta
         None => None,
     };
 
+    // §11 — the replicated-store gate. Refused before a run id exists, so a
+    // refused start is a clean denial rather than a run that dies a moment
+    // later. Every refusal, and every audited override that lets the turn
+    // through, is recorded in the append-only store_gate table.
+    match crate::sovereign::agent_gate(&st, Some(input.session_id.as_str()), input.workspace_id.as_deref()).await? {
+        crate::sovereign::GateVerdict::Allowed | crate::sovereign::GateVerdict::Overridden => {}
+        crate::sovereign::GateVerdict::Refused { message } => return Err(CoreError::Denied(message)),
+    }
+
     let run_id = new_id("run");
     let handle = st.register_run(&run_id);
 

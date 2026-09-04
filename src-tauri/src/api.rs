@@ -58,7 +58,7 @@ pub const COMMANDS: &[&str] = &[
     "harness_info", "memory_list", "memory_add", "memory_update", "memory_remove",
     "instructions_get", "instructions_set",
     "sandbox_policy", "sandbox_run", "sandbox_kill", "sandbox_history",
-    "audit_list",
+    "audit_list", "store_gate_list",
     "turn_start", "agent_start", "agent_cancel", "permission_respond", "change_apply", "change_discard",
     "session_list", "session_history", "session_delete", "session_memory",
     "settings_get", "settings_set",
@@ -363,6 +363,7 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
 
         /* ---- §13 audit ---- */
         "audit_list" => ok(audit::list(st, opt::<u32>(args, "limit")?.unwrap_or(200))?),
+        "store_gate_list" => ok(audit::gate_list(st, opt::<u32>(args, "limit")?.unwrap_or(50))?),
 
         /* ---- §6 agent ---- */
         "turn_start" => ok(agent::start_turn(st.clone(), arg::<StartTurnInput>(args, "input")?).await?),

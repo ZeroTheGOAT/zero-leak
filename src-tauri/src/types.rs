@@ -847,6 +847,14 @@ pub struct AppSettings {
     pub private_server_url: String,
     pub private_server_name: String,
     pub block_public_internet: bool,
+    /// §11 — override for the replicated-store lock. Default off: when an
+    /// app-owned store folder replicates off this machine, agent work is
+    /// refused until the folder is local again. Turning this on lets work
+    /// proceed anyway; every such start is recorded to the append-only
+    /// `store_gate` table with the operator's name on it, which is the point —
+    /// the override exists to be audited, not to be quiet.
+    #[serde(default)]
+    pub allow_replicated_store: bool,
 
     /* Optional integrations */
     pub web_search_mode: WebSearchMode,
@@ -1308,6 +1316,15 @@ pub struct SyncExposure {
     /// the verdict were bad; a bare path leaves them hunting for the screen.
     pub label: String,
     pub path: String,
+    /// True when this is one of the application's own store folders (harness
+    /// home, database and audit log, models, knowledge, sandbox, artifacts,
+    /// memory) as opposed to a project folder the operator added and approved.
+    /// The §11 lock refuses agent work when an *owned* folder replicates — that
+    /// is the store itself leaving the machine. A replicated operator project
+    /// folder is shown on the panel in the same red but is not, by itself, a
+    /// store-wide lock.
+    #[serde(default)]
+    pub owned: bool,
     /// True when a registered sync root contains the path, or the files carry
     /// cloud attributes. A running sync client alone does not set this: it says
     /// something is being synced somewhere, not that this folder is.
@@ -1363,6 +1380,39 @@ pub struct ExposureReport {
     /// One line for the head of the report.
     pub summary: String,
     pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreGateDecisionKind {
+    /// The start was refused because an app-owned store folder replicated.
+    Refused,
+    /// The start was allowed because the operator set the audited override.
+    Overridden,
+}
+
+/// One §11 gate decision at the start of an agent turn.
+///
+/// When an app-owned store folder replicates off this machine, agent work is
+/// refused and the refusal is recorded here; when the operator has set the
+/// audited override, the start is recorded here instead. Append-only — there is
+/// no update or delete path in the codebase, because the one thing a record
+/// table must never do is forget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreGateDecision {
+    pub id: String,
+    pub at: i64,
+    /// The operator account that attempted (or overrode) the start.
+    pub operator: String,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub decision: StoreGateDecisionKind,
+    /// Labels of the app-owned store folders that were replicating.
+    pub folders: Vec<String>,
+    /// One line capturing what the report found, for a reader who never opens
+    /// the Sovereignty panel.
+    pub summary: String,
 }
 
 #[cfg(test)]

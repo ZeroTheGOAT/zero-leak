@@ -10,7 +10,7 @@
 
 use crate::error::CoreResult;
 use crate::state::AppState;
-use crate::types::ToolCallRecord;
+use crate::types::{StoreGateDecision, ToolCallRecord};
 
 /// The most recent tool calls, newest first.
 ///
@@ -18,4 +18,12 @@ use crate::types::ToolCallRecord;
 /// asked of this screen is almost always "what just happened".
 pub fn list(st: &AppState, limit: u32) -> CoreResult<Vec<ToolCallRecord>> {
     st.with_db(|conn| crate::db::audit_page(conn, limit, 0))
+}
+
+/// The most recent §11 store-gate decisions — refusals and audited overrides.
+///
+/// Read side only, like `list`: the table is append-only by construction and
+/// this query filters nothing, so what the panel shows is what was recorded.
+pub fn gate_list(st: &AppState, limit: u32) -> CoreResult<Vec<StoreGateDecision>> {
+    st.with_db(|conn| crate::db::store_gate_page(conn, limit))
 }

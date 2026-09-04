@@ -53,6 +53,7 @@ import type {
   ModelEntry,
   McpServerConfig,
   SettingsPage,
+  StoreGateDecision,
   SyncExposure,
 } from '../../types';
 import {
@@ -97,6 +98,7 @@ const PAGES: NavPage[] = [
   ] },
   { id: 'sovereignty', label: 'Sovereignty', icon: Globe2, description: 'Evidence that this workstation keeps its data on itself.', sections: [
     { id: 'replication', label: 'Replication' },
+    { id: 'lock', label: 'Store lock' },
     { id: 'egress', label: 'Egress' },
   ] },
   { id: 'tools', label: 'Tools', icon: Wrench, sections: [
@@ -186,7 +188,14 @@ const ExposureRow: React.FC<{ row: SyncExposure }> = ({ row }) => {
     <div className="border-b nerve-border p-3.5 last:border-b-0 grid gap-2">
       <div className="flex items-start justify-between gap-5">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-[var(--card-foreground)]">{row.label}</p>
+          <p className="flex flex-wrap items-center gap-x-2 text-sm font-medium text-[var(--card-foreground)]">
+            {row.label}
+            {row.owned && (
+              <span className="rounded-full border border-[color-mix(in_oklab,var(--border)_70%,transparent)] bg-[var(--muted)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                Store folder
+              </span>
+            )}
+          </p>
           <p className="mt-0.5 break-all font-mono text-xs text-[var(--muted-foreground)]">{row.path}</p>
         </div>
         <span className={`flex flex-none items-center gap-1.5 text-xs ${verdict.tone}`}>
@@ -201,6 +210,38 @@ const ExposureRow: React.FC<{ row: SyncExposure }> = ({ row }) => {
           {row.pinMarkedFiles} pin-marked · {row.reparsePoints} reparse points
         </p>
       )}
+    </div>
+  );
+};
+
+/**
+ * §13 — one row of the store-gate ledger: a §11 refusal, or the audited
+ * override that lifted it. Append-only by construction; the application has no
+ * delete path for these rows, and this view renders them verbatim.
+ */
+const GateDecisionRow: React.FC<{ entry: StoreGateDecision }> = ({ entry }) => {
+  const overridden = entry.decision === 'overridden';
+  return (
+    <div className="border-b nerve-border p-3.5 last:border-b-0 grid gap-2">
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-x-2 text-sm font-medium text-[var(--card-foreground)]">
+            {overridden ? 'Agent start overridden' : 'Agent start refused'}
+            <span className="font-mono text-xs font-normal text-[var(--muted-foreground)]">{entry.operator}</span>
+          </p>
+          <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{new Date(entry.at).toLocaleString()}</p>
+        </div>
+        <span className={`flex flex-none items-center gap-1.5 text-xs ${overridden ? 'text-[var(--warning)]' : 'text-[var(--destructive)]'}`}>
+          {overridden ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
+          {overridden ? 'Overridden' : 'Refused'}
+        </span>
+      </div>
+      {entry.folders.length > 0 && (
+        <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
+          Replicating while gated: {entry.folders.join(' · ')}
+        </p>
+      )}
+      {entry.summary && <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{entry.summary}</p>}
     </div>
   );
 };
@@ -541,7 +582,27 @@ export const SettingsView: React.FC = () => {
   }>({ kind: 'protect_path', name: '', pattern: '', note: '' });
   const [integrationStatus, setIntegrationStatus] = useState<Record<string, string>>({});
   const [localTranscriptionStatus, setLocalTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
+  const [gateHistory, setGateHistory] = useState<StoreGateDecision[] | null>(null);
+  const [gateHistoryError, setGateHistoryError] = useState<string | null>(null);
   const activePage = PAGES.find((item) => item.id === settingsPage) ?? PAGES[0];
+
+  const loadGateLedger = async () => {
+    setGateHistoryError(null);
+    try {
+      setGateHistory(await core.audit.gates(50));
+    } catch (reason) {
+      setGateHistory(null);
+      setGateHistoryError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  // Refetch the store-gate ledger each time the Sovereignty page opens, so a
+  // refusal or override recorded while the operator was elsewhere is present
+  // the moment they look.
+  useEffect(() => {
+    if (settingsPage === 'sovereignty') void loadGateLedger();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsPage]);
 
   useEffect(() => {
     let current = true;
@@ -938,8 +999,15 @@ export const SettingsView: React.FC = () => {
           <Row label="Canonical database" description="state/workbench.db is authoritative; Markdown and JSONL are inspectable mirrors."><HardDrive size={15} className="text-[var(--muted-foreground)]" /></Row>
         </Section>;
 
-      case 'sovereignty':
-        return <>
+      case 'sovereignty': {
+        // The set the §11 lock gates on: this application's own store folders
+        // that the report found genuinely replicating off the machine. Project
+        // folders the operator opened deliberately are shown, never locked.
+        const lockedStoreFolders = (exposure?.paths ?? []).filter((path) => path.owned && path.replicated);
+        const gateState: 'unchecked' | 'clear' | 'locked' =
+          exposure === null ? 'unchecked' : lockedStoreFolders.length > 0 ? 'locked' : 'clear';
+        return (
+        <>
           <Section
             id="replication"
             title="Folder replication"
@@ -975,6 +1043,51 @@ export const SettingsView: React.FC = () => {
             )}
           </Section>
           <Section
+            id="lock"
+            title="Store replication lock"
+            description="While one of this application's own store folders — the ones whose contents were never meant to leave the machine — is replicating off it, the agent refuses to start. The override does not silence the gate: every start under replication is still refused or lifted, and each lift is written below, append-only and stamped with the operator account."
+          >
+            <Row
+              label={gateState === 'locked' ? 'Store replication detected' : gateState === 'clear' ? 'Store folders are local' : 'Replication not yet measured'}
+              description={
+                gateState === 'unchecked'
+                  ? 'The core re-measures replication on every agent start regardless of this panel. Run the check above to see the folder evidence here.'
+                  : gateState === 'locked'
+                    ? `Agent starts are ${settings.allowReplicatedStore ? 'lifted under audit — every start is recorded as an override' : 'refused until the replicating folder is moved out of the synced root, or the audited override below is turned on'}: ${lockedStoreFolders.map((folder) => folder.label).join(', ')}.`
+                    : exposure?.anyReplicated
+                      ? 'Only project folders the operator opened deliberately are replicating. Those are shown in the report above, never locked: their contents were never this application\'s private store.'
+                      : 'No owned store folder is copying off this machine, so the gate has nothing to stop.'
+              }
+            >
+              <span className={`rounded-full px-2 py-1 text-xs ${gateState === 'locked' ? (settings.allowReplicatedStore ? 'bg-[var(--warning-soft)] text-[var(--warning)]' : 'bg-[var(--destructive-soft)] text-[var(--destructive)]') : gateState === 'clear' ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-[var(--warning-soft)] text-[var(--warning)]'}`}>
+                {gateState === 'locked' ? (settings.allowReplicatedStore ? 'Overridden' : 'Locked') : gateState === 'clear' ? 'Clear' : 'Not checked'}
+              </span>
+            </Row>
+            <Row
+              label="Audited override"
+              description={
+                settings.allowReplicatedStore
+                  ? 'On. Agent starts while a store folder replicates are permitted, and every such start is written to the ledger below as an overridden decision in your name — the opposite of a silent bypass.'
+                  : 'Off (recommended). Refusal is the safe answer: a folder that was never told to leave this machine is the strongest evidence it did not. Turn this on only to proceed while replication is present and auditable.'
+              }
+            >
+              <Toggle checked={settings.allowReplicatedStore} onChange={(value) => setApp('allowReplicatedStore', value)} />
+            </Row>
+            <Row
+              label="Decision ledger"
+              description={gateHistoryError ? `Could not read the ledger: ${gateHistoryError}` : gateHistory === null ? 'Loading the append-only store-gate table…' : `${gateHistory.length} recorded ${gateHistory.length === 1 ? 'decision' : 'decisions'}, newest first.`}
+            >
+              <button onClick={() => void loadGateLedger()} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Refresh</button>
+            </Row>
+            {gateHistoryError ? (
+              <Row label="Ledger unavailable" description="The store-gate table could not be read. Nothing is claimed about past decisions." />
+            ) : gateHistory === null ? null : gateHistory.length === 0 ? (
+              <Row label="No refusals or overrides on record" description="The gate has not had to stop an agent yet. When it does — or when this override lifts it — the decision lands here, and there is no delete path in the application." />
+            ) : (
+              gateHistory.map((entry) => <GateDecisionRow key={entry.id} entry={entry} />)
+            )}
+          </Section>
+          <Section
             id="attribution"
             title="Audit attribution"
             description="The operator account every tool call is stamped with from now on. Rows written before attribution are left unclaimed rather than backfilled with a guess — the audit table must never contain invented data."
@@ -1001,7 +1114,9 @@ export const SettingsView: React.FC = () => {
               <span className="font-mono text-xs text-[var(--muted-foreground)]">{sovereign.deviceRequests.toLocaleString()}</span>
             </Row>
           </Section>
-        </>;
+        </>
+        );
+      }
 
       case 'system':
       case 'about':

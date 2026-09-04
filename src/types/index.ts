@@ -874,6 +874,14 @@ export interface AppSettings {
   privateServerName: string;
   /** Hard block on all non-approved egress. */
   blockPublicInternet: boolean;
+  /**
+   * Audited override for the §11 store-replication lock. When false (default)
+   * the agent refuses to start while any owned store folder is replicating off
+   * this machine. When true, the gate is lifted — but every lift is recorded,
+   * append-only, to the store-gate ledger as an overridden decision. Not a
+   * silent bypass: it trades a lock for an auditable trail.
+   */
+  allowReplicatedStore: boolean;
 
   /* Optional integrations */
   webSearchMode: WebSearchMode;
@@ -972,6 +980,13 @@ export interface SyncExposure {
    * same finding as a folder that was read and found clean.
    */
   examined: boolean;
+  /**
+   * True when this is one of the app's own store folders — the set the §11 lock
+   * gates on. False for an operator's own project folder that merely happens to
+   * live inside a synced location: that is shown, never locked, because the
+   * operator chose it deliberately and its contents were never private.
+   */
+  owned: boolean;
   /** The reasoning, in full. Rendered verbatim. */
   detail: string;
 }
@@ -986,6 +1001,28 @@ export interface ExposureReport {
   anyReplicated: boolean;
   summary: string;
   checkedAt: number;
+}
+
+/** §13 — how a §11 store-gate refusal was resolved. */
+export type StoreGateDecisionKind = 'refused' | 'overridden';
+
+/**
+ * One append-only entry in the store-gate ledger: either the gate refused an
+ * agent start while an owned store folder was replicating, or the operator had
+ * set the audited override and the gate lifted the lock in its place. The row
+ * names the operator, so a trail of "overridden" rows is attributable.
+ */
+export interface StoreGateDecision {
+  id: string;
+  /** Unix epoch millis the decision was recorded. */
+  at: number;
+  operator: string;
+  sessionId: string | null;
+  workspaceId: string | null;
+  decision: StoreGateDecisionKind;
+  /** The owned store folders that were replicating when the gate ran. */
+  folders: string[];
+  summary: string;
 }
 
 /** §15 — a failure the UI must surface rather than swallow. */

@@ -60,6 +60,7 @@ import type {
   SandboxRun,
   Session,
   SovereignStatus,
+  StoreGateDecision,
   StoredMessage,
   TaskKind,
   ToolCallRecord,
@@ -264,6 +265,8 @@ export const devservers = {
 
 export const audit = {
   list: (limit = 200) => call<ToolCallRecord[]>('audit_list', { limit }),
+  /** §11 store-gate refusals and audited overrides, newest first. */
+  gates: (limit = 50) => call<StoreGateDecision[]>('store_gate_list', { limit }),
 };
 
 /* ------------------------------------------------------------------ */

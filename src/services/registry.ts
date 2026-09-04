@@ -352,6 +352,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   privateServerUrl: '',
   privateServerName: '',
   blockPublicInternet: true,
+  allowReplicatedStore: false,
 
   webSearchMode: 'disabled',
   webSearchProvider: 'brave',

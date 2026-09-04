@@ -437,6 +437,9 @@ pub fn default_settings() -> AppSettings {
         private_server_url: String::new(),
         private_server_name: String::new(),
         block_public_internet: true,
+        // The store starts locked. It only unlocks on an explicit, audited
+        // operator choice in Settings > Sovereignty.
+        allow_replicated_store: false,
 
         web_search_mode: WebSearchMode::Disabled,
         web_search_provider: WebSearchProvider::Brave,

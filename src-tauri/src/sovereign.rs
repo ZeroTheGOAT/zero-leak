@@ -459,7 +459,13 @@ fn unopenable(e: &std::io::Error) -> (bool, String) {
 }
 
 /// The exposure of one path, given facts already gathered.
-fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
+///
+/// `owned` marks an application store folder (harness, database, models,
+/// knowledge, sandbox, artifacts, memory) as opposed to a project folder the
+/// operator added. It decides nothing here — the report just records it — but
+/// the §11 gate refuses agent work on a replicated *owned* folder, so a folder
+/// is tagged while it is measured rather than inferred from its label later.
+fn exposure_with(owned: bool, label: &str, path: &str, facts: &Facts) -> SyncExposure {
     let canonical = std::fs::canonicalize(path);
     let display = match &canonical {
         Ok(p) => tidy(p),
@@ -481,6 +487,7 @@ fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
             return SyncExposure {
                 label: label.to_string(),
                 path: display,
+                owned,
                 replicated: false,
                 client_running,
                 registered_root: None,
@@ -574,6 +581,7 @@ fn exposure_with(label: &str, path: &str, facts: &Facts) -> SyncExposure {
     SyncExposure {
         label: label.to_string(),
         path: display,
+        owned,
         replicated,
         client_running,
         registered_root,
@@ -661,15 +669,16 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
 
     // Insertion order preserved by hand: a BTreeMap keyed on the path would sort
     // the report alphabetically by folder, which is not the order the operator
-    // thinks about these in.
-    let mut targets: Vec<(String, String)> = vec![
-        ("Harness home".into(), crate::registry::sovereign_root().to_string_lossy().to_string()),
-        ("Database and audit log".into(), crate::db::state_dir().to_string_lossy().to_string()),
-        ("Models directory".into(), s.models_directory.clone()),
-        ("Knowledge folder".into(), s.knowledge_root.clone()),
-        ("Sandbox folder".into(), s.sandbox_root.clone()),
-        ("Generated artifacts".into(), s.artifact_root.clone()),
-        ("Memory mirrors".into(), s.memory_root.clone()),
+    // thinks about these in. Each target carries whether it is one of the
+    // application's own store folders (`owned`) — the set the §11 lock gates on.
+    let mut targets: Vec<(String, String, bool)> = vec![
+        ("Harness home".into(), crate::registry::sovereign_root().to_string_lossy().to_string(), true),
+        ("Database and audit log".into(), crate::db::state_dir().to_string_lossy().to_string(), true),
+        ("Models directory".into(), s.models_directory.clone(), true),
+        ("Knowledge folder".into(), s.knowledge_root.clone(), true),
+        ("Sandbox folder".into(), s.sandbox_root.clone(), true),
+        ("Generated artifacts".into(), s.artifact_root.clone(), true),
+        ("Memory mirrors".into(), s.memory_root.clone(), true),
     ];
     for ws in &workspaces {
         let state = if ws.approved { "approved" } else { "not approved" };
@@ -678,15 +687,17 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
             targets.push((
                 format!("Project \"{}\" folder {} ({role}, {state})", ws.name, index + 1),
                 folder.path.clone(),
+                false,
             ));
         }
     }
 
     // Merge duplicates on the resolved path where it resolves, on the text where
-    // it does not.
+    // it does not. A path is owned if any target that resolved to it was owned:
+    // a store folder sharing a path with a project folder is still the store.
     let mut order: Vec<String> = Vec::new();
-    let mut merged: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for (label, path) in targets {
+    let mut merged: BTreeMap<String, (String, String, bool)> = BTreeMap::new();
+    for (label, path, owned) in targets {
         if path.trim().is_empty() {
             continue;
         }
@@ -694,7 +705,8 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
             .map(|p| tidy(&p).to_lowercase())
             .unwrap_or_else(|_| path.trim_end_matches(['\\', '/']).to_lowercase());
         match merged.get_mut(&key) {
-            Some((existing, _)) => {
+            Some((existing, _, is_owned)) => {
+                *is_owned = *is_owned || owned;
                 if !existing.contains(&label) {
                     existing.push_str(" · ");
                     existing.push_str(&label);
@@ -702,11 +714,11 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
             }
             None => {
                 order.push(key.clone());
-                merged.insert(key, (label, path));
+                merged.insert(key, (label, path, owned));
             }
         }
     }
-    let work: Vec<(String, String)> = order
+    let work: Vec<(String, String, bool)> = order
         .into_iter()
         .filter_map(|k| merged.remove(&k))
         .collect();
@@ -718,7 +730,7 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
         let facts = Facts::gather();
         let rows: Vec<SyncExposure> = work
             .iter()
-            .map(|(label, path)| exposure_with(label, path, &facts))
+            .map(|(label, path, owned)| exposure_with(*owned, label, path, &facts))
             .collect();
         let roots = facts
             .roots
@@ -795,6 +807,101 @@ pub async fn exposure_report(st: &Arc<AppState>) -> CoreResult<ExposureReport> {
         checked_at: now_ms(),
     })
 }
+
+/* ------------------------------------------------------------------ */
+/* §11  The gate: refusing agent work on a replicated store            */
+/* ------------------------------------------------------------------ */
+
+/// What the §11 gate decided about an agent-work start.
+#[derive(Debug)]
+pub enum GateVerdict {
+    /// No app-owned store folder replicates; work may begin.
+    Allowed,
+    /// An app-owned store folder replicates, but the operator has set the
+    /// audited override. The start was recorded to the store_gate table and
+    /// work proceeds.
+    Overridden,
+    /// An app-owned store folder replicates and the store is locked. The
+    /// refusal was recorded. `message` is the human verdict to refuse with.
+    Refused { message: String },
+}
+
+/// The §11 gate, run once at the start of every agent turn.
+///
+/// When an app-owned store folder replicates off this machine, the store is
+/// locked: no new agent work starts until the folder is local again, and the
+/// refusal is one append-only row in `store_gate` named to the operator who was
+/// at the keyboard. If the operator has set `allow_replicated_store`, the start
+/// is recorded as an override instead and work proceeds — the override exists
+/// to be audited, not to be quiet.
+///
+/// Unexamined folders warn rather than lock. "Could not look" is not the same
+/// finding as "replicates", and the report already says so in plain terms; this
+/// function just publishes the fresh report so the Sovereignty panel and any
+/// watcher see the caveat, then lets the turn through.
+pub async fn agent_gate(
+    st: &Arc<AppState>,
+    session_id: Option<&str>,
+    workspace_id: Option<&str>,
+) -> CoreResult<GateVerdict> {
+    // Measured fresh every start, not read from a cache. The gate is the one
+    // place a stale "all local" would do real harm, and an agent turn is a
+    // human-paced event, so the cost of the scan is acceptable where it guards
+    // the confidentiality claim itself.
+    let report = exposure_report(st).await?;
+
+    let replicating: Vec<&SyncExposure> =
+        report.paths.iter().filter(|p| p.owned && p.replicated).collect();
+
+    // Publish the fresh picture either way, so a start that happens before the
+    // operator ever opens the Sovereignty page does not leave that panel stale.
+    st.emit("core://exposure", report.clone());
+
+    if replicating.is_empty() {
+        return Ok(GateVerdict::Allowed);
+    }
+
+    let folders: Vec<String> = replicating.iter().map(|p| p.label.clone()).collect();
+    let override_set = st.settings().allow_replicated_store;
+
+    let decision = StoreGateDecision {
+        id: crate::state::new_id("sg"),
+        at: now_ms(),
+        operator: st.operator.clone(),
+        session_id: session_id.map(str::to_string),
+        workspace_id: workspace_id.map(str::to_string),
+        decision: if override_set {
+            StoreGateDecisionKind::Overridden
+        } else {
+            StoreGateDecisionKind::Refused
+        },
+        folders,
+        summary: report.summary.clone(),
+    };
+    let _ = st.with_db(|conn| crate::db::record_store_gate(conn, &decision));
+
+    if override_set {
+        return Ok(GateVerdict::Overridden);
+    }
+
+    Ok(GateVerdict::Refused { message: refusal_message(&report, &decision.folders) })
+}
+
+fn refusal_message(report: &ExposureReport, folders: &[String]) -> String {
+    let names = if folders.len() == 1 {
+        folders[0].clone()
+    } else {
+        format!("{} of them", folders.len())
+    };
+    format!(
+        "Refused to start agent work: the application store is replicated off this machine — \
+         {names}. Nothing was run; confidential work must not leave this workstation. Move \
+         those folders out of the synced root, or set the audited override in \
+         Settings > Sovereignty to proceed anyway — every overridden start is recorded to \
+         your name.\n{summary}",
+        summary = report.summary,
+    )
+}
 #[cfg(test)]
 mod exposure {
     use super::*;
@@ -817,7 +924,7 @@ mod exposure {
         std::fs::create_dir_all(&dir).expect("temp tree");
         std::fs::write(dir.join("inspection.txt"), b"weld log").expect("temp file");
 
-        let e = exposure_with("Test folder", &dir.to_string_lossy(), &clean_machine());
+        let e = exposure_with(false, "Test folder", &dir.to_string_lossy(), &clean_machine());
 
         assert!(!e.replicated, "a folder named OneDrive with no sync evidence must read as local");
         assert_eq!(e.registered_root, None);
@@ -850,7 +957,7 @@ mod exposure {
             }],
         };
 
-        let e = exposure_with("Test folder", &dir.to_string_lossy(), &facts);
+        let e = exposure_with(false, "Test folder", &dir.to_string_lossy(), &facts);
 
         assert!(e.replicated, "a folder under a registered sync root is replicated");
         assert!(e.registered_root.is_some());
@@ -867,7 +974,7 @@ mod exposure {
         std::fs::create_dir_all(&dir).expect("temp tree");
 
         let facts = Facts { clients: vec!["OneDrive".into()], roots: Vec::new() };
-        let e = exposure_with("Test folder", &dir.to_string_lossy(), &facts);
+        let e = exposure_with(false, "Test folder", &dir.to_string_lossy(), &facts);
 
         assert!(!e.replicated, "a running client must not by itself mark a folder replicated");
         assert_eq!(e.client_running.as_deref(), Some("OneDrive"));
@@ -882,7 +989,7 @@ mod exposure {
         let dir = std::env::temp_dir().join("sovereign-test-absent-folder-9f2a");
         let _ = std::fs::remove_dir_all(&dir);
 
-        let e = exposure_with("Knowledge folder", &dir.to_string_lossy(), &clean_machine());
+        let e = exposure_with(false, "Knowledge folder", &dir.to_string_lossy(), &clean_machine());
 
         assert!(!e.replicated);
         assert!(e.examined, "a missing folder holds nothing, which is a finding");

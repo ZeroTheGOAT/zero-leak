@@ -380,6 +380,27 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE audit ADD COLUMN operator TEXT;
     "#,
+    // ---- 10: append-only log of replicated-store gate decisions ----------
+    //
+    // §11 refuses agent work when an app-owned store folder replicates off the
+    // machine, and the operator's override exists to be audited, not hidden:
+    // every refusal and every overridden start is one row here, named to the
+    // operator who was at the keyboard. Append-only by construction — nothing
+    // in the codebase updates or deletes these rows, because a record table
+    // that can forget is not a record.
+    r#"
+    CREATE TABLE store_gate (
+        id           TEXT PRIMARY KEY,
+        at           INTEGER NOT NULL,
+        operator     TEXT NOT NULL,
+        session_id   TEXT,
+        workspace_id TEXT,
+        decision     TEXT NOT NULL CHECK (decision IN ('refused', 'overridden')),
+        folders      TEXT NOT NULL,
+        summary      TEXT NOT NULL
+    );
+    CREATE INDEX store_gate_time ON store_gate(at DESC);
+    "#,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1650,6 +1671,64 @@ pub fn audit_page(conn: &Connection, limit: u32, offset: u32) -> CoreResult<Vec<
 }
 
 /* ------------------------------------------------------------------ */
+/* §11  Store-gate decisions (append-only)                             */
+/* ------------------------------------------------------------------ */
+
+/// Records one §11 gate decision — a refusal, or an audited override — at the
+/// start of an agent turn. Append-only: there is no update or delete path for
+/// these rows anywhere in the codebase.
+pub fn record_store_gate(conn: &Connection, rec: &StoreGateDecision) -> CoreResult<()> {
+    let decision = match rec.decision {
+        StoreGateDecisionKind::Refused => "refused",
+        StoreGateDecisionKind::Overridden => "overridden",
+    };
+    conn.execute(
+        "INSERT INTO store_gate (id, at, operator, session_id, workspace_id, decision, folders, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            rec.id,
+            rec.at,
+            rec.operator,
+            rec.session_id,
+            rec.workspace_id,
+            decision,
+            serde_json::to_string(&rec.folders)?,
+            rec.summary,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The gate history, newest first. Bounded like the audit log: the Sovereignty
+/// panel is a working view, not the archive.
+pub fn store_gate_page(conn: &Connection, limit: u32) -> CoreResult<Vec<StoreGateDecision>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, at, operator, session_id, workspace_id, decision, folders, summary
+         FROM store_gate ORDER BY at DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            let decision: String = r.get(5)?;
+            let folders_raw: String = r.get(6)?;
+            Ok(StoreGateDecision {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                operator: r.get(2)?,
+                session_id: r.get(3)?,
+                workspace_id: r.get(4)?,
+                decision: match decision.as_str() {
+                    "overridden" => StoreGateDecisionKind::Overridden,
+                    _ => StoreGateDecisionKind::Refused,
+                },
+                folders: serde_json::from_str(&folders_raw).unwrap_or_default(),
+                summary: r.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/* ------------------------------------------------------------------ */
 /* §11  Egress counters                                                */
 /* ------------------------------------------------------------------ */
 
@@ -2684,6 +2763,44 @@ mod audit_trail {
 
         let page = audit_page(&c, 50, 0).expect("the page reads back");
         assert_eq!(page[0].operator, None);
+    }
+
+    #[test]
+    fn a_refusal_and_an_override_each_round_trip_newest_first() {
+        let c = store();
+        let refused = StoreGateDecision {
+            id: "sg_1".into(),
+            at: 10,
+            operator: "MRPL\\operator".into(),
+            session_id: Some("sess_1".into()),
+            workspace_id: Some("ws1".into()),
+            decision: StoreGateDecisionKind::Refused,
+            folders: vec!["Models directory".into(), "Knowledge folder".into()],
+            summary: "2 of 7 folders replicate off this machine.".into(),
+        };
+        let overridden = StoreGateDecision {
+            id: "sg_2".into(),
+            at: 20,
+            operator: "MRPL\\operator".into(),
+            session_id: None,
+            workspace_id: None,
+            decision: StoreGateDecisionKind::Overridden,
+            folders: vec!["Models directory".into()],
+            summary: "1 of 7 folders replicate off this machine.".into(),
+        };
+        record_store_gate(&c, &refused).expect("the refusal is recorded");
+        record_store_gate(&c, &overridden).expect("the override is recorded");
+
+        let page = store_gate_page(&c, 50).expect("the gate log reads back");
+        assert_eq!(page.len(), 2);
+        // Newest first, with the decision and the replicated folder labels intact.
+        assert_eq!(page[0].id, "sg_2");
+        assert_eq!(page[0].decision, StoreGateDecisionKind::Overridden);
+        assert_eq!(page[1].id, "sg_1");
+        assert_eq!(page[1].decision, StoreGateDecisionKind::Refused);
+        assert_eq!(page[1].operator, "MRPL\\operator");
+        assert_eq!(page[1].folders, vec!["Models directory", "Knowledge folder"]);
+        assert_eq!(page[1].summary, "2 of 7 folders replicate off this machine.");
     }
 }
 
