@@ -55,6 +55,8 @@ import type {
   SettingsPage,
   StoreGateDecision,
   SyncExposure,
+  VaultEvent,
+  VaultStatus,
 } from '../../types';
 import {
   readAppearance,
@@ -99,6 +101,7 @@ const PAGES: NavPage[] = [
   { id: 'sovereignty', label: 'Sovereignty', icon: Globe2, description: 'Evidence that this workstation keeps its data on itself.', sections: [
     { id: 'replication', label: 'Replication' },
     { id: 'lock', label: 'Store lock' },
+    { id: 'at-rest', label: 'At-rest' },
     { id: 'egress', label: 'Egress' },
   ] },
   { id: 'tools', label: 'Tools', icon: Wrench, sections: [
@@ -242,6 +245,37 @@ const GateDecisionRow: React.FC<{ entry: StoreGateDecision }> = ({ entry }) => {
         </p>
       )}
       {entry.summary && <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{entry.summary}</p>}
+    </div>
+  );
+};
+
+/**
+ * §16 — one row of the at-rest vault ledger: an enable, a disable, or a disable
+ * refused for a wrong passphrase. Append-only by construction; rendered verbatim.
+ */
+const VaultEventRow: React.FC<{ entry: VaultEvent }> = ({ entry }) => {
+  const meta =
+    entry.action === 'enabled'
+      ? { title: 'At-rest vault enabled', text: 'Enabled', cls: 'text-[var(--success)]', Icon: ShieldCheck }
+      : entry.action === 'disabled'
+        ? { title: 'At-rest vault disabled', text: 'Disabled', cls: 'text-[var(--muted-foreground)]', Icon: ShieldCheck }
+        : { title: 'Disable refused', text: 'Denied', cls: 'text-[var(--destructive)]', Icon: ShieldAlert };
+  return (
+    <div className="grid gap-2 border-b nerve-border p-3.5 last:border-b-0">
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-x-2 text-sm font-medium text-[var(--card-foreground)]">
+            {meta.title}
+            <span className="font-mono text-xs font-normal text-[var(--muted-foreground)]">{entry.operator}</span>
+          </p>
+          <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{new Date(entry.at).toLocaleString()}</p>
+        </div>
+        <span className={`flex flex-none items-center gap-1.5 text-xs ${meta.cls}`}>
+          <meta.Icon size={14} />
+          {meta.text}
+        </span>
+      </div>
+      {entry.detail && <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{entry.detail}</p>}
     </div>
   );
 };
@@ -529,6 +563,86 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
   );
 };
 
+/**
+ * §16 — passphrase prompt for enabling or disabling the at-rest vault.
+ *
+ * Enabling asks for the passphrase twice and enforces the ten-character floor
+ * here and in the core; disabling asks once and shows the core's refusal if the
+ * passphrase does not verify. The passphrase is sent to the core, used once to
+ * seal or restore, and is not stored or retained by either side.
+ */
+const VaultDialog: React.FC<{
+  mode: 'enable' | 'disable';
+  onClose: () => void;
+  onDone: () => void;
+}> = ({ mode, onClose, onDone }) => {
+  const [passphrase, setPassphrase] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError('');
+    if (passphrase.length < 10) {
+      setError('The vault passphrase must be at least 10 characters.');
+      return;
+    }
+    if (mode === 'enable' && passphrase !== confirm) {
+      setError('The two passphrases do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (mode === 'enable') await core.vault.enable(passphrase);
+      else await core.vault.disable(passphrase);
+      setPassphrase('');
+      setConfirm('');
+      onDone();
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form onSubmit={submit} className="w-full max-w-md rounded-xl border nerve-border bg-[var(--popover)] p-5 text-[var(--popover-foreground)] shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-base font-semibold">{mode === 'enable' ? 'Enable at-rest protection' : 'Disable at-rest protection'}</h2>
+            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+              {mode === 'enable'
+                ? 'Every existing confidential mirror is sealed to ciphertext and, from then on, none are written in clear text. This passphrase is the only key to those files and is never stored — choose one of at least 10 characters and keep it somewhere safe.'
+                : 'Sealed mirrors are decrypted back to plain text and mirror writing resumes. Enter the passphrase that armed the vault; a passphrase that does not verify is recorded in the ledger, not ignored.'}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="grid size-8 place-items-center rounded-md hover:bg-[var(--accent)]"><X size={15} /></button>
+        </div>
+        <div className="mt-4 grid gap-3">
+          <label className="grid gap-1 text-xs">{mode === 'enable' ? 'New passphrase' : 'Passphrase'}
+            <Input type="password" autoFocus value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={mode === 'enable' ? 'At least 10 characters' : ''} />
+          </label>
+          {mode === 'enable' && (
+            <label className="grid gap-1 text-xs">Confirm passphrase
+              <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Repeat the passphrase" />
+            </label>
+          )}
+        </div>
+        {error && <p className="mt-3 rounded-md bg-[var(--destructive-soft)] px-3 py-2 text-xs text-[var(--destructive)]">{error}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Cancel</button>
+          <button disabled={busy} className={`h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50 ${mode === 'enable' ? 'servergen-primary' : 'border nerve-border hover:bg-[var(--accent)]'}`}>
+            {busy ? (mode === 'enable' ? 'Sealing…' : 'Restoring…') : mode === 'enable' ? 'Enable vault' : 'Disable vault'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
 const TOOL_GROUPS = [
   ['file-inspection', 'File inspection', 'Read, list, find, and search files inside approved workspaces.', 'read · list · find · search'],
   ['file-editing', 'File editing', 'Create and patch files with reviewable diffs and approvals.', 'write · edit · create directory'],
@@ -584,6 +698,10 @@ export const SettingsView: React.FC = () => {
   const [localTranscriptionStatus, setLocalTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
   const [gateHistory, setGateHistory] = useState<StoreGateDecision[] | null>(null);
   const [gateHistoryError, setGateHistoryError] = useState<string | null>(null);
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
+  const [vaultHistory, setVaultHistory] = useState<VaultEvent[] | null>(null);
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [vaultDialog, setVaultDialog] = useState<'enable' | 'disable' | null>(null);
   const activePage = PAGES.find((item) => item.id === settingsPage) ?? PAGES[0];
 
   const loadGateLedger = async () => {
@@ -596,11 +714,27 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  // Refetch the store-gate ledger each time the Sovereignty page opens, so a
-  // refusal or override recorded while the operator was elsewhere is present
-  // the moment they look.
+  const loadVault = async () => {
+    setVaultError(null);
+    try {
+      const [status, events] = await Promise.all([core.vault.status(), core.vault.events(50)]);
+      setVaultStatus(status);
+      setVaultHistory(events);
+    } catch (reason) {
+      setVaultStatus(null);
+      setVaultHistory(null);
+      setVaultError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  // Refetch the store-gate ledger and the at-rest vault state each time the
+  // Sovereignty page opens, so a refusal, override, enable or disable recorded
+  // while the operator was elsewhere is present the moment they look.
   useEffect(() => {
-    if (settingsPage === 'sovereignty') void loadGateLedger();
+    if (settingsPage === 'sovereignty') {
+      void loadGateLedger();
+      void loadVault();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsPage]);
 
@@ -1088,6 +1222,60 @@ export const SettingsView: React.FC = () => {
             )}
           </Section>
           <Section
+            id="at-rest"
+            title="At-rest protection"
+            description="While enabled, the confidential mirrors this application writes — memory Markdown and each session's transcript — are sealed as AES-256-GCM ciphertext, and none are written in clear text. The key is derived from a passphrase you enter and is never stored or held in memory between operations. Full-volume encryption of the database and your own documents is the operating system's job (BitLocker); this vault covers the copies this application makes of its own store and does not claim more."
+          >
+            {vaultError ? (
+              <Row label="Vault state" description={vaultError}>
+                <span className="text-xs text-[var(--destructive)]">Unavailable</span>
+              </Row>
+            ) : vaultStatus === null ? (
+              <Row label="Vault state" description="Reading the vault state from the core — it is read from the state file, never guessed." />
+            ) : vaultStatus.enabled ? (
+              <>
+                <Row
+                  label="Status"
+                  description={vaultStatus.enabledAt ? `Enabled ${new Date(vaultStatus.enabledAt).toLocaleString()} by ${vaultStatus.operator ?? 'the operator'}.` : `Enabled by ${vaultStatus.operator ?? 'the operator'}.`}
+                >
+                  <span className="rounded-full bg-[var(--success-soft)] px-2 py-1 text-xs text-[var(--success)]">Enabled</span>
+                </Row>
+                <Row label="Sealed mirrors" description="Confidential memory and transcript files currently stored as ciphertext. Plain-text mirror writing is paused until the vault is disabled.">
+                  <span className="font-mono text-xs text-[var(--muted-foreground)]">{vaultStatus.sealedFiles} sealed</span>
+                </Row>
+                {vaultStatus.plaintextFiles > 0 && (
+                  <Row label="Plaintext mirrors remain" description={`${vaultStatus.plaintextFiles} confidential mirror(s) could not be sealed and are still in clear text. Disabling and re-enabling retries the seal.`}>
+                    <span className="text-xs text-[var(--warning)]">{vaultStatus.plaintextFiles} in the clear</span>
+                  </Row>
+                )}
+                <Row label="Restore and resume" description="Disables the vault: sealed mirrors are decrypted back to plain text with your passphrase and mirror writing resumes. Every disable is recorded in the ledger below.">
+                  <button onClick={() => setVaultDialog('disable')} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Disable vault</button>
+                </Row>
+              </>
+            ) : (
+              <>
+                <Row label="Status" description="Confidential mirrors are currently written in clear text alongside the database.">
+                  <span className="rounded-full bg-[var(--muted)] px-2 py-1 text-xs text-[var(--muted-foreground)]">Disabled</span>
+                </Row>
+                <Row label="Seal confidential mirrors" description="Seals every existing memory and transcript mirror to ciphertext and pauses further plain-text writes until the vault is disabled. Choose a passphrase of at least 10 characters — it is never stored.">
+                  <button onClick={() => setVaultDialog('enable')} className="servergen-primary h-8 rounded-md px-3 text-sm font-medium">Enable vault</button>
+                </Row>
+              </>
+            )}
+            {vaultStatus !== null && vaultHistory !== null && (
+              <>
+                <div className="border-b nerve-border px-3.5 pt-3.5 pb-1 last:border-b-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Vault ledger</p>
+                </div>
+                {vaultHistory.length === 0 ? (
+                  <Row label="No vault events on record" description="Nothing has enabled the vault yet — or a disable has already restored and the row above is the pair. Every enable, disable and refused disable lands here, and there is no delete path in the application." />
+                ) : (
+                  vaultHistory.map((entry) => <VaultEventRow key={entry.id} entry={entry} />)
+                )}
+              </>
+            )}
+          </Section>
+          <Section
             id="attribution"
             title="Audit attribution"
             description="The operator account every tool call is stamped with from now on. Rows written before attribution are left unclaimed rather than backfilled with a guess — the audit table must never contain invented data."
@@ -1195,6 +1383,7 @@ export const SettingsView: React.FC = () => {
         </div>
       </main>
       {addModelOpen && <AddModelDialog onClose={() => setAddModelOpen(false)} onAdd={addCatalogueModel} />}
+      {vaultDialog && <VaultDialog mode={vaultDialog} onClose={() => setVaultDialog(null)} onDone={() => void loadVault()} />}
     </div>
   );
 };

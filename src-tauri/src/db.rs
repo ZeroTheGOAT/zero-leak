@@ -401,6 +401,24 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX store_gate_time ON store_gate(at DESC);
     "#,
+    // ---- 11: append-only log of at-rest vault lifecycle ------------------
+    //
+    // §16 enables and disables an at-rest passphrase vault that seals the
+    // application's confidential mirrors. Enabling and (with the correct
+    // passphrase) disabling are recorded here, and so is a disable attempted
+    // with the wrong passphrase — the one row an auditor most wants to see.
+    // Append-only, like store_gate: a record table that can forget is not a
+    // record.
+    r#"
+    CREATE TABLE vault_event (
+        id       TEXT PRIMARY KEY,
+        at       INTEGER NOT NULL,
+        operator TEXT NOT NULL,
+        action   TEXT NOT NULL CHECK (action IN ('enabled', 'disabled', 'denied')),
+        detail   TEXT NOT NULL
+    );
+    CREATE INDEX vault_event_time ON vault_event(at DESC);
+    "#,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1722,6 +1740,53 @@ pub fn store_gate_page(conn: &Connection, limit: u32) -> CoreResult<Vec<StoreGat
                 },
                 folders: serde_json::from_str(&folders_raw).unwrap_or_default(),
                 summary: r.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/* ------------------------------------------------------------------ */
+/* §16  Vault lifecycle events (append-only)                           */
+/* ------------------------------------------------------------------ */
+
+/// Records one §16 at-rest vault lifecycle event — an enable, a disable, or a
+/// disable refused for a wrong passphrase. Append-only: there is no update or
+/// delete path for these rows anywhere in the codebase.
+pub fn record_vault_event(conn: &Connection, rec: &VaultEvent) -> CoreResult<()> {
+    let action = match rec.action {
+        VaultAction::Enabled => "enabled",
+        VaultAction::Disabled => "disabled",
+        VaultAction::Denied => "denied",
+    };
+    conn.execute(
+        "INSERT INTO vault_event (id, at, operator, action, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![rec.id, rec.at, rec.operator, action, rec.detail],
+    )?;
+    Ok(())
+}
+
+/// The vault lifecycle history, newest first. Bounded like the other ledgers:
+/// the Sovereignty panel is a working view, not the archive.
+pub fn vault_event_page(conn: &Connection, limit: u32) -> CoreResult<Vec<VaultEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, at, operator, action, detail
+         FROM vault_event ORDER BY at DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            let action: String = r.get(3)?;
+            Ok(VaultEvent {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                operator: r.get(2)?,
+                action: match action.as_str() {
+                    "enabled" => VaultAction::Enabled,
+                    "disabled" => VaultAction::Disabled,
+                    _ => VaultAction::Denied,
+                },
+                detail: r.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

@@ -59,6 +59,7 @@ pub const COMMANDS: &[&str] = &[
     "instructions_get", "instructions_set",
     "sandbox_policy", "sandbox_run", "sandbox_kill", "sandbox_history",
     "audit_list", "store_gate_list",
+    "vault_status", "vault_event_list", "vault_enable", "vault_disable",
     "turn_start", "agent_start", "agent_cancel", "permission_respond", "change_apply", "change_discard",
     "session_list", "session_history", "session_delete", "session_memory",
     "settings_get", "settings_set",
@@ -364,6 +365,27 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         /* ---- §13 audit ---- */
         "audit_list" => ok(audit::list(st, opt::<u32>(args, "limit")?.unwrap_or(200))?),
         "store_gate_list" => ok(audit::gate_list(st, opt::<u32>(args, "limit")?.unwrap_or(50))?),
+
+        /* ---- §16 at-rest vault ---- */
+        // Read-only: the vault's observable state (never derived from a
+        // passphrase) and its append-only lifecycle ledger.
+        "vault_status" => ok(crate::vault::status(st)?),
+        "vault_event_list" => ok(st.with_db(|c| {
+            crate::db::vault_event_page(c, opt::<u32>(args, "limit")?.unwrap_or(50))
+        })?),
+        "vault_enable" => {
+            let passphrase = arg::<String>(args, "passphrase")?;
+            ok(crate::vault::enable(st, &passphrase)?)
+        }
+        "vault_disable" => {
+            let passphrase = arg::<String>(args, "passphrase")?;
+            let status = crate::vault::disable(st, &passphrase)?;
+            // The vault is off and mirrors are back in plaintext; rebuild the
+            // full set from the database so anything captured while it was
+            // sealed appears now rather than on the next scheduled sync.
+            crate::harness::sync_memory_files(st)?;
+            ok(status)
+        }
 
         /* ---- §6 agent ---- */
         "turn_start" => ok(agent::start_turn(st.clone(), arg::<StartTurnInput>(args, "input")?).await?),

@@ -1415,6 +1415,63 @@ pub struct StoreGateDecision {
     pub summary: String,
 }
 
+/* ------------------------------------------------------------------ */
+/* §16  At-rest passphrase vault                                       */
+/* ------------------------------------------------------------------ */
+
+/// What kind of §16 at-rest vault lifecycle event this row records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultAction {
+    /// The vault was enabled: a passphrase was set and every existing
+    /// confidential mirror was sealed to ciphertext.
+    Enabled,
+    /// The vault was disabled with the correct passphrase: the sealed mirrors
+    /// were restored to plaintext and appends/mirroring resumed.
+    Disabled,
+    /// A disable was attempted with a passphrase that did not verify. Logged,
+    /// not merely refused — a wrong passphrase on an at-rest vault is exactly
+    /// the kind of line an auditor wants to see.
+    Denied,
+}
+
+/// One append-only entry in the at-rest vault lifecycle ledger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultEvent {
+    pub id: String,
+    pub at: i64,
+    /// The operator account that performed (or attempted) the action.
+    pub operator: String,
+    pub action: VaultAction,
+    /// One line of context — how many files were sealed or restored, or why a
+    /// disable was refused.
+    pub detail: String,
+}
+
+/// The §16 at-rest vault's observable state, for the Sovereignty panel.
+///
+/// Everything here is read from the state file and the payload folders — never
+/// from the passphrase, which is not stored anywhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStatus {
+    /// True while the state file exists — i.e. while the operator has chosen to
+    /// keep this application's confidential mirrors sealed.
+    pub enabled: bool,
+    /// When the vault was enabled, if it is.
+    pub enabled_at: Option<i64>,
+    /// Who enabled it.
+    pub operator: Option<String>,
+    /// How many confidential mirror files are currently sealed (`.vault`
+    /// envelopes present in the payload set).
+    pub sealed_files: u64,
+    /// How many confidential mirror files are still in clear text. Zero while
+    /// the vault is enabled; non-zero means an enable was interrupted or a file
+    /// appeared after it, and is reported rather than hidden.
+    pub plaintext_files: u64,
+}
+
 #[cfg(test)]
 mod turn_wire_tests {
     use super::*;

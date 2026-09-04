@@ -64,6 +64,8 @@ import type {
   StoredMessage,
   TaskKind,
   ToolCallRecord,
+  VaultEvent,
+  VaultStatus,
   Workspace,
   WorkspaceUpdate,
 } from '../types';
@@ -267,6 +269,21 @@ export const audit = {
   list: (limit = 200) => call<ToolCallRecord[]>('audit_list', { limit }),
   /** §11 store-gate refusals and audited overrides, newest first. */
   gates: (limit = 50) => call<StoreGateDecision[]>('store_gate_list', { limit }),
+};
+
+/* ------------------------------------------------------------------ */
+/* §16  At-rest vault                                                 */
+/* ------------------------------------------------------------------ */
+
+export const vault = {
+  /** The vault's observable state — never derived from a passphrase. */
+  status: () => call<VaultStatus>('vault_status'),
+  /** §16 vault lifecycle ledger, newest first. */
+  events: (limit = 50) => call<VaultEvent[]>('vault_event_list', { limit }),
+  /** Set a passphrase and seal every existing confidential mirror to ciphertext. */
+  enable: (passphrase: string) => call<VaultStatus>('vault_enable', { passphrase }),
+  /** Restore sealed mirrors to plaintext; requires the passphrase that armed it. */
+  disable: (passphrase: string) => call<VaultStatus>('vault_disable', { passphrase }),
 };
 
 /* ------------------------------------------------------------------ */

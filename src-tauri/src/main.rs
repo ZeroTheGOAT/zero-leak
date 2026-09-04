@@ -72,6 +72,7 @@ mod sovereign;
 mod state;
 mod transcription;
 mod types;
+mod vault;
 mod web;
 mod web_search;
 mod winproc;

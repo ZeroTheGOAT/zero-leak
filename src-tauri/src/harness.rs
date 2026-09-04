@@ -852,6 +852,14 @@ fn sync_scope_files(
 }
 
 pub fn sync_memory_files(st: &AppState) -> CoreResult<()> {
+    // §16 at-rest vault: while the vault is enabled, no plaintext mirror is
+    // written. The database is authoritative and every file this function would
+    // produce is a human-readable copy of it; the vault seals the copies that
+    // already exist, so writing fresh ones in clear text would defeat it. The
+    // next sync after a disable rebuilds the full set from the database.
+    if crate::vault::is_enabled() {
+        return Ok(());
+    }
     let root = PathBuf::from(st.settings().memory_root);
     fs::create_dir_all(root.join("projects"))?;
     let global = st.with_db(|c| crate::db::memories_by_scope(c, MemoryScope::Global, None))?;
@@ -908,7 +916,16 @@ pub fn remove_session_mirror(session_id: &str) -> CoreResult<()> {
 pub fn remove_project_mirrors(st: &AppState, workspace_id: &str) -> CoreResult<()> {
     let id = safe_id(workspace_id, "workspace")?;
     let memory_root = PathBuf::from(st.settings().memory_root).join("projects");
-    for path in [memory_root.join(format!("{id}.md")), memory_root.join(id)] {
+    // The sealed form of the top-level mirror is `<id>.md.vault`; a project
+    // removed while the vault is enabled leaves only that, so both the
+    // plaintext and the envelope must go. The directory form (`<id>/`, holding
+    // MEMORY.md, rollout_summaries/, …) is removed whole, sealed envelopes
+    // included.
+    for path in [
+        memory_root.join(format!("{id}.md")),
+        memory_root.join(format!("{id}.md.vault")),
+        memory_root.join(id),
+    ] {
         if path.is_dir() {
             fs::remove_dir_all(path)?;
         } else if path.exists() {
@@ -960,6 +977,13 @@ pub fn append_session_message(
             "workspaceId": workspace_id,
         }))?,
     )?;
+    // §16 at-rest vault: the transcript mirror is confidential and must not be
+    // appended to in clear text while the vault is enabled. The canonical row is
+    // in the database; this mirror is rebuilt from it by the sync that follows a
+    // disable. `metadata.json` above stays — it holds only ids.
+    if crate::vault::is_enabled() {
+        return Ok(());
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)

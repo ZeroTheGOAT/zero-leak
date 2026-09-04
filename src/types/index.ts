@@ -1025,6 +1025,44 @@ export interface StoreGateDecision {
   summary: string;
 }
 
+/** §16 — the at-rest vault lifecycle action a row records. */
+export type VaultActionKind = 'enabled' | 'disabled' | 'denied';
+
+/**
+ * One append-only entry in the at-rest vault ledger: a vault was enabled (and
+ * every existing confidential mirror sealed), disabled with the correct
+ * passphrase (mirrors restored), or a disable was attempted with a wrong
+ * passphrase. The row names the operator, so a trail of wrong-passphrase rows
+ * is attributable.
+ */
+export interface VaultEvent {
+  id: string;
+  /** Unix epoch millis the event was recorded. */
+  at: number;
+  operator: string;
+  action: VaultActionKind;
+  /** One line of context — files sealed/restored, or why a disable was refused. */
+  detail: string;
+}
+
+/**
+ * §16 — the at-rest vault's observable state. Everything here is read from the
+ * state file and the payload folders by the core — never derived from the
+ * passphrase, which the core does not retain between operations.
+ */
+export interface VaultStatus {
+  /** True while the vault is enabled (its state file exists). */
+  enabled: boolean;
+  /** When the vault was enabled, if it is. */
+  enabledAt: number | null;
+  /** The operator account that enabled it. */
+  operator: string | null;
+  /** Confidential mirrors currently sealed (`.vault` envelopes). */
+  sealedFiles: number;
+  /** Confidential mirrors still in clear text. Zero while enabled. */
+  plaintextFiles: number;
+}
+
 /** §15 — a failure the UI must surface rather than swallow. */
 export interface CoreFailure {
   id: string;
