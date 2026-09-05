@@ -742,6 +742,13 @@ export interface ChatMessage {
   sender: 'user' | 'agent' | 'system';
   content: string;
   createdAt: number;
+  /**
+   * The row id of a persisted message. User messages sent in this app session
+   * get it when the core confirms the row (`agent://user-stored`); rehydrated
+   * messages carry their store id directly. Editing is only offered on a user
+   * message that has one, because that is what truncation is addressed by.
+   */
+  rowId?: string;
   /** Structured actions the agent took. Replaces exposed chain-of-thought. */
   steps?: AgentStep[];
   /** Ordered text/action blocks for turns completed in this app session. */
@@ -785,6 +792,9 @@ export interface StoredMessage {
   elapsedMs?: number;
   tokensPerSec?: number;
   failure?: string;
+  /** The run that produced this `agent` row, when it was recorded by a build
+   *  that persisted it. Lets the transcript name a finished turn by its run. */
+  runId?: string;
   /** The run's final checklist, so a reopened chat replays its plan. */
   plan?: PlanItem[];
 }
@@ -806,6 +816,7 @@ export interface Session {
 /* ------------------------------------------------------------------ */
 
 export type PanelTabKind =
+  | 'workflows'
   | 'review'
   | 'terminal'
   | 'files'

@@ -2418,6 +2418,22 @@ pub fn generate_sheet(
     record(st, ArtifactKind::Xlsx, file_name, &bytes, prov)
 }
 
+/// Exercise the real local writers in memory, then reopen their ZIP packages.
+pub fn readiness_probe() -> CoreResult<String> {
+    let blocks = parse_markdown("# Readiness\n\nLocal exporter check.");
+    for (bytes, required) in [
+        (docx_bytes(Some("Readiness"), &blocks)?, "word/document.xml"),
+        (xlsx_bytes(&[("Check".into(), vec![vec!["Status".into()],vec!["Ready".into()]])])?, "xl/workbook.xml"),
+        (pptx_bytes(Some("Readiness"), &blocks)?, "ppt/presentation.xml"),
+    ] {
+        let names = zip_names(&bytes, "readiness sample")?;
+        if !names.iter().any(|n| n == required) {
+            return Err(CoreError::InvalidDocument(format!("Exporter sample is missing {required}")));
+        }
+    }
+    Ok("Word, Excel and PowerPoint writers generated in-memory samples; their package directories reopened successfully.".into())
+}
+
 /* ------------------------------------------------------------------ */
 /* Verification per format                                             */
 /* ------------------------------------------------------------------ */

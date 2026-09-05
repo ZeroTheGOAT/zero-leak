@@ -1,8 +1,9 @@
-//! Explicit, narrowly-scoped public web access.
+//! Legacy web integration, subject to the sovereign HTTP guard.
 //!
 //! The rest of the core still goes through `AppState::classify_url`, which
-//! refuses public hosts. This module is the sole exception and accepts only the
-//! endpoints selected in Settings. Direct mode combines independent, keyless
+//! refuses public hosts. This module must pass the same guard before sending;
+//! public requests are refused even when a legacy setting enabled an integration.
+//! The retained parser implementation combines independent, keyless
 //! sources; provider mode reads a key from a named environment
 //! variable. `fetch` reads one public page the operator or a search result
 //! pointed at, so a lookup whose engines fail can still read the source
@@ -278,6 +279,10 @@ async fn response_with_type(
     request: RequestBuilder,
     provider: &str,
 ) -> CoreResult<(Vec<u8>, String)> {
+    // Legacy web tools must pass the sovereign boundary too. Building a request
+    // performs no I/O; public hosts are refused before send or DNS resolution.
+    let prepared = request.try_clone().ok_or_else(|| CoreError::Denied("Cannot inspect this request safely.".into()))?.build()?;
+    st.classify_url(prepared.url().as_str())?;
     let response = request.header("User-Agent", USER_AGENT).send().await?;
     let status = response.status();
     let content_type = response

@@ -15,6 +15,7 @@ import type {
   Artifact,
   ChatActivityBlock,
   ChatMessage,
+  Citation,
   CoreFailure,
   DevServerStatus,
   ExposureReport,
@@ -217,6 +218,10 @@ const draftAttachmentKind = (path: string) =>
  */
 const rehydrate = (m: StoredMessage): ChatMessage => ({
   id: m.id,
+  // The store's id IS the row id here — the transcript was read back from the
+  // same rows an edit truncates by. That is what makes a reopened chat's own
+  // messages editable again.
+  rowId: m.id,
   sender: m.sender,
   content: m.content,
   createdAt: m.createdAt,
@@ -274,7 +279,17 @@ const EMPTY_KNOWLEDGE: KnowledgeIndexStats = {
 /* Context shape                                                      */
 /* ------------------------------------------------------------------ */
 
+interface QueuedMessage {
+  id: string;
+  text: string;
+  attachments: string[];
+  mode: AgentMode;
+}
+
 interface AppContextValue {
+  workflowDrafts: Record<string, { notes: string; files: string[] }>;
+  setWorkflowDrafts: React.Dispatch<React.SetStateAction<Record<string, { notes: string; files: string[] }>>>;
+  sourceCitation: Citation | null;
   /* Shell */
   view: ViewName;
   setView: (v: ViewName) => void;
@@ -388,11 +403,19 @@ interface AppContextValue {
     intoSession?: string,
     modeOverride?: AgentMode,
   ) => Promise<boolean>;
+  /** Edits a sent user message: truncates the conversation at it and resends
+   *  the corrected wording as a fresh turn (§6). Only offered on a message
+   *  whose store row the core has confirmed. */
+  commitEdit: (
+    messageId: string,
+    newText: string,
+    attachmentPaths?: string[],
+  ) => Promise<boolean>;
   /** Follow-ups typed while the open chat's turn was running, in send order.
    *  Each is delivered automatically when the run ahead of it completes. */
-  queuedMessages: string[];
+  queuedMessages: QueuedMessage[];
   /** Parks an instruction behind the open chat's running turn. */
-  queueMessage: (text: string, intoSession?: string) => void;
+  queueMessage: (text: string, attachments?: string[], modeOverride?: AgentMode, intoSession?: string) => void;
   /** Takes a parked instruction back out before it is sent. */
   removeQueued: (index: number, intoSession?: string) => void;
   cancelRun: () => Promise<void>;
@@ -438,7 +461,7 @@ interface AppContextValue {
   pickAttachments: () => Promise<string[]>;
   ingestFiles: () => Promise<void>;
   openDocument: (id: string) => Promise<void>;
-  openDocumentAt: (path: string) => Promise<void>;
+  openDocumentAt: (path: string, citation?: Citation) => Promise<void>;
   removeDocument: (id: string) => Promise<void>;
 
   /* Knowledge (§5) */
@@ -523,6 +546,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   /* Workspaces */
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workflowDrafts, setWorkflowDrafts] = useState<Record<string, { notes: string; files: string[] }>>({});
+  const [sourceCitation, setSourceCitation] = useState<Citation | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
 
@@ -584,6 +609,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    *  `turn_start` response crosses the desktop bridge. */
   const completedBeforeStartReply = useRef<Set<string>>(new Set());
   const startReplySeen = useRef<Set<string>>(new Set());
+  /**
+   * The local id of the chat's latest optimistic user bubble whose stored row
+   * has not yet been confirmed, keyed by session id. A chat runs one turn at a
+   * time, so there is at most one outstanding bubble per chat: `send` records
+   * it, and `agent://user-stored` clears it and stamps the store's row id onto
+   * that bubble. A bubble that never resolves (a turn that never started) has
+   * no row, which is exactly why editing is not offered on it.
+   */
+  const pendingRowRef = useRef<Record<string, string>>({});
 
   /**
    * Follow-ups typed while a chat's turn was still running, per chat. The
@@ -592,12 +626,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * is authoritative (the done handler fires between renders); the state
    * renders the chips.
    */
-  const queuedRef = useRef<Record<string, string[]>>({});
-  const [queuedBySession, setQueuedBySession] = useState<Record<string, string[]>>({});
+  const queuedRef = useRef<Record<string, QueuedMessage[]>>({});
+  const [queuedBySession, setQueuedBySession] = useState<Record<string, QueuedMessage[]>>({});
   /** Lets the done handler send the queued follow-up without a dependency
    *  cycle: `send` is defined later and reads state this effect owns. */
   const sendRef = useRef<
-    ((prompt: string, attachmentPaths?: string[], intoSession?: string) => Promise<boolean>) | null
+    ((prompt: string, attachmentPaths?: string[], intoSession?: string, modeOverride?: AgentMode) => Promise<boolean>) | null
   >(null);
 
   /* Permissions — a queue, because concurrent chats can each be asking */
@@ -945,6 +979,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }),
     );
 
+    void add(
+      core.on('agent://user-stored', (u) => {
+        // The core has persisted the operator message that started this run.
+        // Stamp its store row id onto the optimistic bubble `send` recorded,
+        // so the message becomes editable — truncation is addressed by the
+        // store's id, never by the local one.
+        const localId = pendingRowRef.current[u.sessionId];
+        if (!localId) return;
+        delete pendingRowRef.current[u.sessionId];
+        setMessagesBySession((prev) => {
+          const rows = prev[u.sessionId];
+          if (!rows) return prev;
+          const at = rows.findIndex((m) => m.id === localId && m.sender === 'user');
+          if (at === -1) return prev;
+          const next = rows.slice();
+          next[at] = { ...next[at], rowId: u.messageId };
+          return { ...prev, [u.sessionId]: next };
+        });
+      }),
+    );
+
     return () => {
       cancelled = true;
       unsubs.forEach((u) => u());
@@ -1043,7 +1098,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               return others;
             })();
           setQueuedBySession(queuedRef.current);
-          void sendRef.current(next, [], sid);
+          void sendRef.current(next.text, next.attachments, sid, next.mode).then((accepted) => {
+            if (!accepted) {
+              queuedRef.current = { ...queuedRef.current, [sid]: [next, ...(queuedRef.current[sid] ?? [])] };
+              setQueuedBySession(queuedRef.current);
+            }
+          });
         }
 
         // Pull anything the run may have produced. A requested deliverable is
@@ -1463,6 +1523,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ) => {
       const text = prompt.trim();
       if (!text) return false;
+      const taskTitle = /^\[Workflow: (?:inspection|dashboard|discrepancy|revision)\]\r?\n([^\n]+)/.exec(text)?.[1] ?? text;
       const runMode = modeOverride ?? mode;
 
       // Ensure there is a session to attach the turn to. `intoSession` is for the
@@ -1508,7 +1569,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const s: Session = {
           id: uid('sess'),
           workspaceId: wsId,
-          title: text.slice(0, 60),
+          title: taskTitle.slice(0, 60),
           mode,
           useMemories,
           contributeMemories,
@@ -1526,7 +1587,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ? {
                   ...s,
                   updatedAt: Date.now(),
-                  title: s.title.startsWith('New ') ? text.slice(0, 60) : s.title,
+                  title: s.title.startsWith('New ') ? taskTitle.slice(0, 60) : s.title,
                 }
               : s,
           ),
@@ -1585,6 +1646,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return true;
       }
 
+      // This chat's optimistic bubble is the one the core will confirm when
+      // the row is stored. Record it so `agent://user-stored` can stamp the
+      // store's row id onto it — the id editing truncates by.
+      pendingRowRef.current[key] = userMessage.id;
+
       const started = await guard('execution_failed', () =>
         core.turns.start({
           threadId: key,
@@ -1599,6 +1665,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }),
       );
       if (started) {
+        // A chat is idle until the start reply says otherwise, so at most one
+        // operator bubble is awaiting its row at a time. If the core had
+        // stored the message and finished the whole run before this reply
+        // crossed the bridge, the user-stored handler has already resolved
+        // the mapping and there is nothing left to register.
         if (completedBeforeStartReply.current.has(started.runId)) {
           // The run already completed before its start reply crossed the
           // bridge; the done handler has committed the answer and cleared
@@ -1609,6 +1680,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           mutateLiveRun(key, (run) => ({ ...run, runId: started.runId }));
         }
       } else {
+        delete pendingRowRef.current[key];
         delete runsRef.current[key];
         setRunsBySession({ ...runsRef.current });
         setMessagesBySession((prev) => ({
@@ -1638,17 +1710,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * Queues a follow-up for a chat whose turn is still running. Delivered
    * automatically by the done handler, in order, one per completed turn.
    */
-  const queueMessage = useCallback((text: string, intoSession?: string) => {
+  const queueMessage = useCallback((text: string, attachments: string[] = [], modeOverride?: AgentMode, intoSession?: string) => {
     const value = text.trim();
     if (!value) return;
     const sid = intoSession ?? activeSessionId;
     if (!sid) return;
     queuedRef.current = {
       ...queuedRef.current,
-      [sid]: [...(queuedRef.current[sid] ?? []), value],
+      [sid]: [...(queuedRef.current[sid] ?? []), { id: uid('queued'), text: value, attachments: [...attachments], mode: modeOverride ?? mode }],
     };
     setQueuedBySession(queuedRef.current);
-  }, [activeSessionId]);
+  }, [activeSessionId, mode]);
 
   const removeQueued = useCallback((index: number, intoSession?: string) => {
     const sid = intoSession ?? activeSessionId;
@@ -1674,6 +1746,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPendingPermissions((prev) => prev.filter((p) => p.runId !== runId));
     setPendingQuestions((prev) => prev.filter((q) => q.runId !== runId));
   }, [activeSessionId, guard]);
+
+  /**
+   * §6 Editing a sent user message.
+   *
+   * Only a message whose row the core has confirmed (`rowId`) can be edited,
+   * because the edit is truncate-and-resend: the store deletes that operator
+   * row and every turn after it (and rewrites the JSONL mirror), the on-screen
+   * transcript drops them the same way, and the corrected wording goes out as
+   * a fresh turn whose answer replaces the replies the old wording drew.
+   * ChatGPT leaves the same shape behind when an earlier message is changed.
+   *
+   * Attachments attached to the original message are carried into the new
+   * turn unless `attachmentPaths` says otherwise (an edit that drops an image
+   * passes the kept list). Refuses the edit while the chat is busy or has a
+   * queued follow-up — both would send a new turn into a transcript whose
+   * anchor the live run has not settled yet; the affordance is hidden then too.
+   */
+  const commitEdit = useCallback(
+    async (messageId: string, newText: string, attachmentPaths?: string[]) => {
+      const sid = activeSessionId;
+      if (!sid) return false;
+      const trimmed = newText.trim();
+      if (!trimmed) return false;
+      if (runsRef.current[sid] || (queuedRef.current[sid]?.length ?? 0) > 0) return false;
+      const rows = messagesBySession[sid];
+      if (!rows) return false;
+      const at = rows.findIndex((m) => m.id === messageId && m.sender === 'user');
+      if (at === -1) return false;
+      const msg = rows[at];
+      if (!msg.rowId) return false;
+      const kept = (msg.attachments ?? []).map((a) => a.path);
+      const paths = attachmentPaths ?? kept;
+      const unchangedText = msg.content.trim() === trimmed;
+      const unchangedFiles = paths.length === kept.length && paths.every((p) => kept.includes(p));
+      // Nothing changed: treat as cancel. The caller has already closed the
+      // editor by the time this resolves.
+      if (unchangedText && unchangedFiles) return true;
+
+      const truncated = await guard('execution_failed', () =>
+        core.sessions.truncate(sid, msg.rowId as string),
+      );
+      // Success is `undefined`; only `null` is a routed failure.
+      if (truncated === null) return false;
+
+      // The edited bubble and everything that answered it are gone from the
+      // transcript; the fresh turn appends the corrected wording in their
+      // place. Anything the dropped turns proposed leaves the review panel
+      // with them.
+      setMessagesBySession((prev) => {
+        const list = prev[sid];
+        if (!list) return prev;
+        const cut = list.findIndex((m) => m.id === messageId);
+        if (cut === -1) return prev;
+        return { ...prev, [sid]: list.slice(0, cut) };
+      });
+      setChangesBySession((prev) => {
+        if (!(sid in prev)) return prev;
+        const next = { ...prev };
+        delete next[sid];
+        return next;
+      });
+
+      void send(trimmed, paths, sid);
+      return true;
+    },
+    [activeSessionId, guard, messagesBySession, send],
+  );
 
   /* ---------------------------------------------------------------- */
   /* §9  Permissions                                                  */
@@ -1935,7 +2074,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * extraction, not report that there isn't one.
    */
   const openDocumentAt = useCallback(
-    async (path: string) => {
+    async (path: string, citation?: Citation) => {
+      setSourceCitation(citation ?? null);
       const known = documents.find((d) => samePath(d.path, path));
       if (known) {
         await openDocument(known.id);
@@ -2221,6 +2361,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     livePlan,
     livePhase,
     send,
+    commitEdit,
     queuedMessages,
     queueMessage,
     removeQueued,
@@ -2256,6 +2397,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ingestFiles,
     openDocument,
     openDocumentAt,
+    sourceCitation,
+    workflowDrafts,
+    setWorkflowDrafts,
     removeDocument,
 
     knowledgeStats,

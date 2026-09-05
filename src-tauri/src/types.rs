@@ -1037,6 +1037,13 @@ pub struct MessageExtra {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_sec: Option<f64>,
+    /// The run that produced an `agent` row. Present on answers and failed
+    /// turns only, never on the operator's own messages. It survives a reload
+    /// so the transcript view can name a finished turn's run (`msg-<runId>`),
+    /// which is what lets editing that turn back out of its still-pending file
+    /// changes even after the page was refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<AgentMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1133,6 +1140,21 @@ fn default_true() -> bool {
 pub struct RunStarted {
     pub run_id: String,
     pub session_id: String,
+}
+
+/// Fired once a started turn's operator message has actually been written to
+/// the conversation store.
+///
+/// `turn_start` answers before the row exists (the store happens in the run's
+/// async body), so the id cannot ride on the start reply. The frontend uses
+/// this to stamp the DB row id onto the user bubble it already drew — without
+/// it, an edit could never address the message it came from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunUserStored {
+    pub run_id: String,
+    pub session_id: String,
+    pub message_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

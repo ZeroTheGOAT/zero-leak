@@ -5,6 +5,7 @@
 import React from 'react';
 import {
   FolderOpen,
+  ClipboardCheck,
   Logs,
   Minus,
   Settings,
@@ -76,6 +77,7 @@ export const TitleBar: React.FC = () => {
         {...(desktop ? { 'data-tauri-drag-region': true } : {})}
         className="flex min-w-0 flex-none items-center gap-1.5"
       >
+        <button onClick={() => openTab('workflows', 'Workflows')} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-[var(--foreground)] hover:bg-[var(--accent)]" title="Industrial workflows, receipts and readiness"><ClipboardCheck size={15} /><span>Workflows</span></button>
         <span className="hidden sm:inline-flex rounded-md border nerve-border px-2 py-1 font-mono text-[10px] text-[var(--muted-foreground)]">
           v0.1.0
         </span>

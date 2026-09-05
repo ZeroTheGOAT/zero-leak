@@ -21,6 +21,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { ApprovalPopover } from './ApprovalPopover';
 import { formatBytes } from '../../services/registry';
+import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
 import {
   blobToBase64,
   recordingToWav,
@@ -48,7 +49,7 @@ const SLASH_COMMANDS: Array<{ cmd: string; detail: string }> = [
   { cmd: '/serve', detail: 'Ask the agent to host the open folder locally' },
 ];
 
-interface ComposerDraft {
+export interface ComposerDraft {
   text: string;
   attached: string[];
 }
@@ -56,7 +57,10 @@ interface ComposerDraft {
 const EMPTY_DRAFT: ComposerDraft = { text: '', attached: [] };
 type VoiceState = 'idle' | 'checking' | 'recording' | 'transcribing';
 
-export const FloatingInput: React.FC = () => {
+export const FloatingInput: React.FC<{
+  drafts: Record<string, ComposerDraft>;
+  setDrafts: React.Dispatch<React.SetStateAction<Record<string, ComposerDraft>>>;
+}> = ({ drafts, setDrafts }) => {
   const {
     send,
     isRunning,
@@ -77,7 +81,6 @@ export const FloatingInput: React.FC = () => {
     catalogueModels,
     loadedModelIds,
   } = useApp();
-  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
   const [submitting, setSubmitting] = useState(false);
   const [showPlus, setShowPlus] = useState(false);
   const [showApproval, setShowApproval] = useState(false);
@@ -89,7 +92,7 @@ export const FloatingInput: React.FC = () => {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingTimerRef = useRef<number | null>(null);
-  const draftKey = activeSessionId ?? '__new_chat__';
+  const draftKey = activeSessionId ?? `__new_chat__:${activeWorkspace?.id ?? 'none'}`;
   const draft = drafts[draftKey] ?? EMPTY_DRAFT;
   const { text, attached } = draft;
 
@@ -142,6 +145,8 @@ export const FloatingInput: React.FC = () => {
   const clearDraft = () => {
     setDrafts((current) => {
       const next = { ...current };
+      // A send can finish after the operator has started typing another draft.
+      if (current[draftKey] !== draft) return current;
       delete next[draftKey];
       return next;
     });
@@ -166,6 +171,12 @@ export const FloatingInput: React.FC = () => {
       } else {
         // `/serve` is a real turn: hosting is the agent's serve_folder call,
         // not a local shortcut. Sent in Agent mode so the tool is offered.
+        if (isRunning) {
+          queueMessage('Host the open workspace folder with serve_folder and give me the http://127.0.0.1 URL to open.', attached, 'agent');
+          clearDraft();
+          return;
+        }
+        submittingRef.current = true;
         setSubmitting(true);
         try {
           const accepted = await send(
@@ -176,6 +187,7 @@ export const FloatingInput: React.FC = () => {
           );
           if (accepted) clearDraft();
         } finally {
+          submittingRef.current = false;
           setSubmitting(false);
         }
       }
@@ -185,7 +197,7 @@ export const FloatingInput: React.FC = () => {
     // The turn is busy: park the instruction behind it instead of dropping
     // it. It is sent on its own when the running turn completes.
     if (isRunning) {
-      queueMessage(text);
+      queueMessage(text, attached, mode);
       clearDraft();
       return;
     }
@@ -207,6 +219,17 @@ export const FloatingInput: React.FC = () => {
       setAttached((current) => [...new Set([...current, ...added])]);
     }
   };
+
+  /**
+   * Paste into the composer: image files on the clipboard are staged to disk
+   * and thumbnailed exactly like one picked from the + menu; a text paste is
+   * left to the textarea.
+   */
+  const onComposerPaste = stagePastedImages((paths) => {
+    if (paths.length === 0) return;
+    setAttached((current) => [...new Set([...current, ...paths])]);
+    window.requestAnimationFrame(() => areaRef.current?.focus());
+  });
 
   const insertTranscription = (transcript: string) => {
     const clean = transcript.trim();
@@ -316,6 +339,23 @@ export const FloatingInput: React.FC = () => {
             <div className="flex flex-wrap gap-1.5">
               {attached.map((path) => {
                 const document = documents.find((item) => item.path === path);
+                // A pasted image thumbnails like ChatGPT; anything else stays
+                // a chip with its name.
+                if (isImagePath(path)) {
+                  return (
+                    <span key={path} className="relative flex-shrink-0">
+                      <ImageThumb path={path} className="h-16 w-16 rounded-md" />
+                      <button
+                        type="button"
+                        onClick={() => setAttached((current) => current.filter((item) => item !== path))}
+                        className="absolute -right-1.5 -top-1.5 grid size-5 place-items-center rounded-full border nerve-border bg-[var(--card)] text-[var(--muted-foreground)] shadow-sm hover:text-[var(--foreground)] transition"
+                        title="Remove image"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  );
+                }
                 return (
                   <span key={path} className="flex items-center gap-1.5 rounded-md border nerve-border bg-[var(--card)] py-1 pl-2 pr-1 text-xs text-[var(--card-foreground)]" title={path}>
                     <Paperclip size={10} className="text-[var(--muted-foreground)]" />
@@ -327,7 +367,9 @@ export const FloatingInput: React.FC = () => {
               })}
             </div>
             <p className="mt-1 text-[10px] text-[var(--muted-foreground)]">
-              Attached to this draft · nothing is read until you send an instruction
+              {attached.some(isImagePath)
+                ? 'Image added · nothing is read until you send an instruction'
+                : 'Attached to this draft · nothing is read until you send an instruction'}
             </p>
           </div>
         )}
@@ -336,9 +378,10 @@ export const FloatingInput: React.FC = () => {
           <div className="mb-2">
             <div className="flex flex-wrap gap-1.5">
               {queuedMessages.map((queued, i) => (
-                <span key={`${i}-${queued}`} className="flex items-center gap-1.5 rounded-md border nerve-border bg-[var(--card)] py-1 pl-2 pr-1 text-xs text-[var(--card-foreground)]" title={queued}>
+                <span key={queued.id} className="flex items-center gap-1.5 rounded-md border nerve-border bg-[var(--card)] py-1 pl-2 pr-1 text-xs text-[var(--card-foreground)]" title={queued.text}>
                   <Clock size={10} className="text-[var(--muted-foreground)]" />
-                  <span className="max-w-[220px] truncate">{queued}</span>
+                  <span className="max-w-[220px] truncate">{queued.text}</span>
+                  {queued.attachments.length > 0 && <span>{queued.attachments.length} attached</span>}
                   <button onClick={() => removeQueued(i)} className="grid size-5 place-items-center rounded hover:bg-[var(--accent)]" title="Take it back"><X size={10} /></button>
                 </span>
               ))}
@@ -392,7 +435,8 @@ export const FloatingInput: React.FC = () => {
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Tab' && slashHint.length > 0) {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (event.key === 'Tab' && !event.shiftKey && slashHint.length > 0) {
                 // Complete the command instead of moving focus out of the
                 // composer — the hint list is the only thing Tab means here.
                 event.preventDefault();
@@ -404,6 +448,7 @@ export const FloatingInput: React.FC = () => {
                 void submit();
               }
             }}
+            onPaste={onComposerPaste}
             rows={2}
             disabled={disabled}
             placeholder={disabled ? 'The local core is not attached' : attached.length > 0 ? 'Tell the agent what to do with the attached files' : 'Ask the local Servergen agent'}

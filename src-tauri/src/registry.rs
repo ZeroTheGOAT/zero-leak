@@ -14,11 +14,13 @@
 //! Every measured number came from `llama-bench -p 512 -n 128 -r 2 -ngl 99` on
 //! this workstation. Nothing here is estimated.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
+use crate::gguf;
 use crate::types::*;
 
 /// The card this catalogue was measured on: 8187 MiB installed, of which the
@@ -97,6 +99,91 @@ fn solo_budget(total_mb: u32) -> u32 {
 }
 
 const MODELS_ROOT_TOKEN: &str = "${MODELS_ROOT}";
+
+/* ------------------------------------------------------------------ */
+/* Automatic context sizing                                            */
+/* ------------------------------------------------------------------ */
+
+/// The largest window auto-sizing will ever ask llama-server for. Qwen3.5-9b
+/// is trained to 262 144 tokens, and a venue GPU with 24+ GiB could in
+/// principle hold that — but the KV cache alone at 262k is ~17 GiB, and
+/// "a bigger context" does not mean "reserve the whole card". 65 536 is the
+/// practical target; a card that cannot fit it runs the model as big as it
+/// can, and one that could runs no larger than this.
+const AUTO_CTX_CAP: u32 = 65_536;
+
+/// How far below the solo budget a raised window may sit. `estimated_vram_mb`
+/// is an occupancy *measured* at the configured context, so the extra KV a raise
+/// adds is exact — geometry × cache type — but real residency runs a little
+/// above the estimate and the decoder allocates transient buffers on top, so a
+/// launch that fills the card to the last megabyte is the kind of "fits by 40
+/// MiB" that WDDM pages out mid-demo. 512 MiB of air is the same reserve the
+/// desktop gets.
+const AUTO_CTX_RESERVE_MB: u32 = 512;
+
+/// Whether a model is a candidate for automatic context sizing: an agentic
+/// llama.cpp model on this device whose configured window sits well below what
+/// it was trained at. Those are the models whose context is *VRAM-pinned* —
+/// worth raising for free when the card has room. Specialists, embedders,
+/// huge-window models and everything served from elsewhere keep their catalogue
+/// numbers.
+pub fn context_auto_eligible(e: &ModelEntry) -> bool {
+    e.priority != ModelPriority::Disabled
+        && e.location == ModelLocation::ThisDevice
+        && e.backend == ModelBackend::LlamaCpp
+        && e.capabilities.contains(&ModelCapability::Tools)
+        && e.context_size > 0
+        && e.trained_context > e.context_size
+        && e.context_size < AUTO_CTX_CAP
+        && e.kv_cache_type.is_some()
+}
+
+/// The window a model should actually be launched with, given how much of the
+/// card is free.
+///
+/// `estimated_vram_mb` is taken as the occupancy at the configured
+/// `context_size` — that is how it was measured (llama-bench at the
+/// catalogue's own window). Each extra token of context costs exactly
+/// KV-bytes-per-token for the model's GGUF geometry and cache type, so the
+/// raise is: the solo budget, minus that anchor, minus a reserve, divided by
+/// the per-token KV cost — clamped by the training ceiling and `AUTO_CTX_CAP`.
+///
+/// Returns the configured window unchanged when the geometry is unknown, the
+/// cache type unmapped, or the card has no room for a meaningful raise. It is
+/// pure and reads only the entry, so routing, the preset file and the agent's
+/// context note can all be sized from one decision.
+pub fn autosized_context(e: &ModelEntry, geometry: Option<gguf::KvGeometry>, solo_mb: u32) -> u32 {
+    if !context_auto_eligible(e) || e.estimated_vram_mb == 0 {
+        return e.context_size;
+    }
+    let Some(kv_type) = e.kv_cache_type.as_deref() else {
+        return e.context_size;
+    };
+    let Some(g) = geometry else {
+        return e.context_size;
+    };
+    let Some(kv_per_token_mb) = g.kv_mb_per_token(kv_type) else {
+        return e.context_size;
+    };
+    let anchor = i64::from(e.estimated_vram_mb);
+    let solo = i64::from(solo_mb);
+    // Extra KV the solo budget can still hold, in MiB. Negative means the
+    // baseline already sits above the solo budget — a specialist kept for a
+    // bigger card — and there is nothing to raise into.
+    let room = solo - anchor - i64::from(AUTO_CTX_RESERVE_MB);
+    if room <= 0 {
+        return e.context_size;
+    }
+    let extra_tokens = (room as f64 / kv_per_token_mb) as i64;
+    let ceiling = i64::from(e.trained_context.min(AUTO_CTX_CAP));
+    let raised = (i64::from(e.context_size) + extra_tokens).min(ceiling);
+    // A raise of under half a kilotoken is not worth a launched window that
+    // differs from the catalogue for no observable gain.
+    if raised < i64::from(e.context_size) + 512 {
+        return e.context_size;
+    }
+    raised as u32
+}
 
 /* ------------------------------------------------------------------ */
 /* Routing                                                             */
@@ -633,6 +720,16 @@ pub struct Registry {
     models: Vec<ModelEntry>,
     pub rules: Vec<RouteRule>,
     pub path: PathBuf,
+    /// Windows the router actually launched models with, raised above the
+    /// catalogue baseline by [`autosized_context`] at preset-write time.
+    ///
+    /// The catalogue's `context_size` stays the operator's number (and the
+    /// baseline `estimated_vram_mb` was measured at), so `persist` never sees
+    /// these — they are runtime state only, rebuilt on every router start, and
+    /// dropped when the model list reloads. [`Registry::effective_context`] is
+    /// what routing, admission and the agent's context note must read: the
+    /// window llama-server was actually started with.
+    ctx_override: HashMap<String, u32>,
 }
 
 impl Registry {
@@ -672,7 +769,12 @@ impl Registry {
             })
             .collect();
 
-        Ok(Self { models, rules, path })
+        Ok(Self {
+            models,
+            rules,
+            path,
+            ctx_override: HashMap::new(),
+        })
     }
 
     pub fn all(&self) -> &[ModelEntry] {
@@ -772,7 +874,8 @@ impl Registry {
         model: ModelEntry,
         models_root: &str,
     ) -> CoreResult<Vec<ModelEntry>> {
-        let id = model.id.trim();
+        // Owned so it can be used after `model` is moved into the list below.
+        let id = model.id.trim().to_string();
         if id.is_empty() || model.display_name.trim().is_empty() {
             return Err(CoreError::InvalidDocument(
                 "A model needs both an id and a display name before it can be added.".into(),
@@ -802,6 +905,10 @@ impl Registry {
         } else {
             self.models.push(model);
         }
+        // The operator has just changed this model's definition. Any launch-time
+        // context override is now stale (it was sized for the old numbers), so
+        // drop it; the next preset write recomputes from the edited entry.
+        self.ctx_override.remove(&id);
 
         self.persist(models_root)?;
         Ok(self.models.clone())
@@ -818,6 +925,29 @@ impl Registry {
                 self.path.display()
             ))
         })
+    }
+
+    /// The window a model actually runs at: the catalogue's configured
+    /// `context_size`, raised at router launch by [`autosized_context`] to what
+    /// the card can hold. This — not the raw catalogue line — is the figure
+    /// llama-server was started with, so routing fits, the agent's compaction
+    /// gate and the context note it prints must all judge against it.
+    pub fn effective_context(&self, id: &str) -> u32 {
+        if let Some(&ctx) = self.ctx_override.get(id) {
+            return ctx;
+        }
+        self.get(id).map(|m| m.context_size).unwrap_or(0)
+    }
+
+    /// Records which windows the preset file was rendered with, replacing any
+    /// earlier set. Called from the router's preset write, so the overrides
+    /// always describe the models that are actually about to launch; a model
+    /// that is no longer raised simply drops out of the map.
+    pub fn set_ctx_overrides(&mut self, raised: &[(String, u32)]) {
+        self.ctx_override.clear();
+        for (id, ctx) in raised {
+            self.ctx_override.insert(id.clone(), *ctx);
+        }
     }
 
     /// Whether the weights are actually on disk. A catalogue entry is a claim;
@@ -914,14 +1044,19 @@ impl Registry {
         let primary = rule.model_id.as_deref().unwrap_or_default();
 
         // Context first. A model that cannot hold the input is not a candidate,
-        // however well it matches the task.
+        // however well it matches the task. Fit is judged against the window the
+        // model will actually be launched with (the catalogue baseline,
+        // auto-raised to what the card can hold), never the raw catalogue line —
+        // a raised window is room a long turn is genuinely allowed to use.
         if let Some(tokens) = token_estimate {
-            let fits = self.get(primary).is_some_and(|m| tokens + 2048 <= m.context_size);
+            let fits = self
+                .get(primary)
+                .is_some_and(|_| tokens + 2048 <= self.effective_context(primary));
             if !fits {
                 if let Some(long) = self
                     .by_capability(ModelCapability::LongContext)
                     .into_iter()
-                    .find(|m| tokens + 2048 <= m.context_size && self.is_present(&m.id))
+                    .find(|m| tokens + 2048 <= self.effective_context(&m.id) && self.is_present(&m.id))
                 {
                     return RouteDecision {
                         kind,
@@ -991,7 +1126,8 @@ impl Registry {
             TaskKind::Embedding => ModelCapability::Reasoning,
         };
         let fits = |model: &ModelEntry| {
-            token_estimate.is_none_or(|tokens| tokens.saturating_add(2048) <= model.context_size)
+            token_estimate
+                .is_none_or(|tokens| tokens.saturating_add(2048) <= self.effective_context(&model.id))
         };
         let is_coordinator = |model: &ModelEntry| {
             model.priority != ModelPriority::Disabled
@@ -1054,7 +1190,11 @@ impl Registry {
 agent turn; an OCR, embedding, or other specialist cannot coordinate."
                 )
             } else if let Some(tokens) = token_estimate {
-                let biggest = capable.iter().map(|m| m.context_size).max().unwrap_or(0);
+                let biggest = capable
+                    .iter()
+                    .map(|m| self.effective_context(&m.id))
+                    .max()
+                    .unwrap_or(0);
                 format!(
                     "Every {needed:?}-capable tool model fits less than the ~{tokens} tokens this turn \
 needs (the largest window is {biggest}), and no substitute fits either. Shorten the task or raise a \
@@ -1084,7 +1224,7 @@ model's context size."
                 candidate.display_name
             ),
             None if kind == TaskKind::DigitalDocument => format!(
-                "The attachment is extracted natively without a worker model. {} coordinates the turn and answers from that extracted content.",
+                "Text layers can be extracted natively; scanned pages require the OCR tool to choose a local specialist. {} coordinates the turn and answers from the extracted content.",
                 candidate.display_name
             ),
             _ => format!(
@@ -1171,6 +1311,7 @@ mod local_model_catalogue_tests {
             models: Vec::new(),
             rules: routing_rules(),
             path: path.clone(),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         let saved = registry
@@ -1190,6 +1331,7 @@ mod local_model_catalogue_tests {
             models: Vec::new(),
             rules: routing_rules(),
             path: std::env::temp_dir().join("unused-servergen-catalogue.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
         let error = registry
             .upsert_local_model(local_model("https://example.com/model.gguf"), "C:/models")
@@ -1242,6 +1384,7 @@ mod local_model_catalogue_tests {
             models: vec![specialist, coordinator],
             rules: routing_rules(),
             path: dir.join("models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         assert_eq!(
@@ -1285,6 +1428,7 @@ mod local_model_catalogue_tests {
             models: vec![first, second, incompatible],
             rules: routing_rules(),
             path,
+            ctx_override: std::collections::HashMap::new(),
         };
         let root = dir.to_string_lossy().to_string();
 
@@ -1333,6 +1477,7 @@ mod local_model_catalogue_tests {
             models: vec![coordinator],
             rules: routing_rules(),
             path: dir.join("models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         assert!(registry.route(TaskKind::DigitalDocument, None).model_id.is_none());
@@ -1362,6 +1507,7 @@ mod local_model_catalogue_tests {
             models: vec![],
             rules: routing_rules(),
             path: dir.join("empty-models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
         let empty = none_at_all.route_agent(TaskKind::ScannedDocument, Some(1_000));
         assert_eq!(empty.model_id, None);
@@ -1387,6 +1533,7 @@ mod local_model_catalogue_tests {
             models: vec![tiny],
             rules: routing_rules(),
             path: dir.join("small-models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
         let fits_nobody = registry.route_agent(TaskKind::ScannedDocument, Some(1_000_000));
         assert_eq!(fits_nobody.model_id, None);
@@ -1451,6 +1598,7 @@ mod local_model_catalogue_tests {
             models: vec![primary, long],
             rules: routing_rules(),
             path: dir.join("models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         // Message text alone (~10k) with its routing slack still fits the 16k
@@ -1507,6 +1655,7 @@ mod local_model_catalogue_tests {
             models: vec![coder, long],
             rules: routing_rules(),
             path: dir.join("models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         let fits = registry.route_agent(TaskKind::Code, Some(10_000));
@@ -1555,6 +1704,7 @@ mod local_model_catalogue_tests {
             models: vec![fast, thorough],
             rules: routing_rules(),
             path: dir.join("models.json"),
+            ctx_override: std::collections::HashMap::new(),
         };
 
         // The page came back as fragments from the fast reader, so olmOCR reads it.
@@ -1697,5 +1847,102 @@ mod models_root_detection {
     #[test]
     fn a_path_that_is_not_there_holds_nothing() {
         assert!(!holds_weights(&std::env::temp_dir().join("servergen-absent-root")));
+    }
+}
+
+#[cfg(test)]
+mod auto_ctx_tests {
+    use super::*;
+    use crate::gguf::KvGeometry;
+    use std::collections::HashMap;
+
+    /// The seed's qwen3.5-9b, exactly as shipped: 16k window, 262 144 trained,
+    /// 6883 MiB measured at 16k, q8_0 KV, tool-capable — the profile that is
+    /// VRAM-pinned and therefore the case auto-sizing exists for.
+    fn qwen() -> ModelEntry {
+        seed_catalogue()
+            .models
+            .into_iter()
+            .find(|m| m.id == "qwen3.5-9b")
+            .expect("seed qwen3.5-9b")
+    }
+
+    const QWEN_GEO: KvGeometry = KvGeometry {
+        layers: 33,
+        heads: 4,
+        key_len: 256,
+        value_len: 256,
+    };
+
+    #[test]
+    fn eight_gig_card_raises_qwen_by_the_free_vram_delta() {
+        let e = qwen();
+        assert!(context_auto_eligible(&e));
+        // The fallback card this catalogue was tuned on: 8187 MiB total, of
+        // which the display keeps ~512, leaving solo ≈ 7675. Qwen is measured
+        // at 6883 MiB there, so with a 512 MiB reserve the raise is ~4k extra
+        // tokens — 16k → ~20k, not 56k, and never under the configured window.
+        let eff = autosized_context(&e, Some(QWEN_GEO), vram_solo_mb());
+        assert!(
+            (18_000..=24_576).contains(&eff),
+            "8 GB card should raise qwen to ~20-24k; got {eff}"
+        );
+        assert!(eff <= e.trained_context.min(AUTO_CTX_CAP));
+    }
+
+    #[test]
+    fn huge_card_hits_the_auto_cap_not_the_trained_ceiling() {
+        let e = qwen();
+        // A 24 GiB venue card. Room dwarfs qwen's trained 262 144, but
+        // AUTO_CTX_CAP (65 536) is the intended practical target: a bigger GPU
+        // runs the same build at 64k without a catalogue edit, not by reserving
+        // 17 GiB of KV at the training ceiling.
+        let solo_24gb = 24_576 - 512;
+        assert_eq!(autosized_context(&e, Some(QWEN_GEO), solo_24gb), 65_536);
+    }
+
+    #[test]
+    fn no_room_specialists_and_unknown_geometry_stay_at_the_catalogue_window() {
+        // A specialist (no Tools) is not sized up even when the geometry reads.
+        let mut ocr = qwen();
+        ocr.id = "olmocr-2".into();
+        ocr.capabilities = vec![ModelCapability::Ocr, ModelCapability::Documents];
+        assert!(!context_auto_eligible(&ocr));
+        assert_eq!(
+            autosized_context(&ocr, Some(QWEN_GEO), vram_solo_mb()),
+            16_384
+        );
+
+        let e = qwen();
+        // No room above the anchor → baseline. (Solo below the measured 6883.)
+        assert_eq!(autosized_context(&e, Some(QWEN_GEO), 6_800), 16_384);
+        // Unreadable header or unmapped cache type → baseline.
+        assert_eq!(autosized_context(&e, None, vram_solo_mb()), 16_384);
+    }
+
+    #[test]
+    fn effective_context_tracks_the_launched_override_not_the_catalogue_line() {
+        let e = qwen();
+        let mut reg = Registry {
+            models: vec![e.clone()],
+            rules: Vec::new(),
+            path: std::path::PathBuf::from("models.json"),
+            ctx_override: HashMap::new(),
+        };
+        assert_eq!(reg.effective_context("qwen3.5-9b"), 16_384);
+
+        // After the router raises the window at preset-write time, routing and
+        // the agent see the launched number...
+        reg.set_ctx_overrides(&[("qwen3.5-9b".to_string(), 20_480)]);
+        assert_eq!(reg.effective_context("qwen3.5-9b"), 20_480);
+        // ...while the catalogue line stays the operator's number (persist()
+        // writes it, never the machine-derived override).
+        assert_eq!(reg.get("qwen3.5-9b").unwrap().context_size, 16_384);
+        assert_eq!(reg.effective_context("unknown-model"), 0);
+
+        // A later preset write replaces the set; a model no longer raised (its
+        // weights moved away, say) falls back to its catalogue window.
+        reg.set_ctx_overrides(&[("nemotron-cascade-8b".to_string(), 24_576)]);
+        assert_eq!(reg.effective_context("qwen3.5-9b"), 16_384);
     }
 }

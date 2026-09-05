@@ -57,13 +57,20 @@ export const SearchModal: React.FC = () => {
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const activeResultRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (isSearchOpen) {
+      const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setQuery('');
       setCursor(0);
       // Focus after paint so the modal is mounted.
-      requestAnimationFrame(() => inputRef.current?.focus());
+      const frame = requestAnimationFrame(() => inputRef.current?.focus());
+      return () => {
+        cancelAnimationFrame(frame);
+        if (previousFocus?.isConnected) previousFocus.focus();
+      };
     }
   }, [isSearchOpen]);
 
@@ -153,6 +160,7 @@ export const SearchModal: React.FC = () => {
     // `tab` is carried rather than derived from `label`, so a panel opened from
     // here is titled exactly as the sidebar, the menu bar and Ctrl+1..7 title it.
     const panels: Array<[PanelTabKind, string, string, React.ElementType]> = [
+      ['workflows', 'Industrial workflows, receipts and readiness', 'Workflows', FileOutput],
       ['knowledge', 'Knowledge base', 'Knowledge', Library],
       ['memories', 'Memories and instructions', 'Memories', Brain],
       ['artifacts', 'Artifacts', 'Artifacts', FileOutput],
@@ -217,6 +225,10 @@ export const SearchModal: React.FC = () => {
     setCursor((c) => Math.min(c, Math.max(0, results.length - 1)));
   }, [results.length]);
 
+  useEffect(() => {
+    if (isSearchOpen) activeResultRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [cursor, query, isSearchOpen]);
+
   if (!isSearchOpen) return null;
 
   const grouped = results.reduce<Record<string, Result[]>>((acc, r) => {
@@ -232,6 +244,29 @@ export const SearchModal: React.FC = () => {
       onMouseDown={close}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search the workbench"
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) return;
+          if (event.key === 'Escape') {
+            event.stopPropagation();
+            close();
+          }
+          if (event.key === 'Tab') {
+            const controls = dialogRef.current?.querySelectorAll<HTMLElement>('input, button');
+            const first = controls?.[0];
+            const last = controls?.[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last?.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first?.focus();
+            }
+          }
+        }}
         className="w-full max-w-xl bg-[var(--accent)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -241,12 +276,14 @@ export const SearchModal: React.FC = () => {
             data-inset-field
             ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            aria-label="Search workspaces, tasks, documents, artifacts and panels"
+            onChange={(e) => { setQuery(e.target.value); setCursor(0); }}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Escape') close();
               else if (e.key === 'ArrowDown') {
                 e.preventDefault();
-                setCursor((c) => Math.min(c + 1, results.length - 1));
+                setCursor((c) => Math.max(0, Math.min(c + 1, results.length - 1)));
               } else if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 setCursor((c) => Math.max(c - 1, 0));
@@ -285,6 +322,7 @@ export const SearchModal: React.FC = () => {
                   return (
                     <button
                       key={r.id}
+                      ref={active ? activeResultRef : undefined}
                       onMouseEnter={() => setCursor(myIndex)}
                       onClick={r.run}
                       className={`w-full flex items-center px-3.5 py-2 text-left transition ${

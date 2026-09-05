@@ -29,6 +29,7 @@ src-tauri/target/
 release/
 
 # Local runtime state and databases
+/.uifix/
 *.db
 *.db-*
 *.sqlite

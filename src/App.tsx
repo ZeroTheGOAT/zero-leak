@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { useApp } from './context/AppContext';
 import { TitleBar } from './components/layout/TitleBar';
@@ -6,7 +6,7 @@ import { Sidebar } from './components/layout/Sidebar';
 import { StatusBar } from './components/layout/StatusBar';
 import { ChatContainer } from './components/chat/ChatContainer';
 import { EmptyState } from './components/chat/EmptyState';
-import { FloatingInput } from './components/chat/FloatingInput';
+import { FloatingInput, type ComposerDraft } from './components/chat/FloatingInput';
 import { TaskDock } from './components/chat/TaskDock';
 import { DevServerBar } from './components/chat/DevServerBar';
 import { PermissionPrompt } from './components/chat/PermissionPrompt';
@@ -17,6 +17,8 @@ import { SearchModal } from './components/modals/SearchModal';
 import { CreateProjectModal } from './components/modals/CreateProjectModal';
 
 export const AppContent: React.FC = () => {
+  // Keep drafts in memory across Settings navigation; never write them to disk.
+  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
   const {
     view,
     activeSessionId,
@@ -36,7 +38,7 @@ export const AppContent: React.FC = () => {
   // is both flags together — the button has to reflect what is on screen.
   const panelVisible = isPanelOpen && tabs.length > 0;
 
-  const togglePanel = () => {
+  const togglePanel = useCallback(() => {
     if (panelVisible) {
       setIsPanelOpen(false);
       return;
@@ -50,7 +52,7 @@ export const AppContent: React.FC = () => {
       return;
     }
     setIsPanelOpen(true);
-  };
+  }, [panelVisible, tabs.length, activeWorkspaceId, openTab, setIsPanelOpen]);
 
   const panelHint = panelVisible
     ? 'Hide the side panel'
@@ -88,12 +90,12 @@ export const AppContent: React.FC = () => {
         openTab('files', 'Files');
       } else if (key === 'b') {
         e.preventDefault();
-        setIsPanelOpen(!isPanelOpen);
+        togglePanel();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [setIsSearchOpen, openSettings, openTab, isPanelOpen, setIsPanelOpen, newSession]);
+  }, [setIsSearchOpen, openSettings, openTab, togglePanel, newSession]);
 
   return (
     <div className="servergen-shell h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
@@ -128,7 +130,7 @@ export const AppContent: React.FC = () => {
                   the composer, not in the conversation timeline. */}
               <TaskDock />
               <DevServerBar />
-              <FloatingInput />
+              <FloatingInput drafts={drafts} setDrafts={setDrafts} />
             </main>
 
             <RightPanel />

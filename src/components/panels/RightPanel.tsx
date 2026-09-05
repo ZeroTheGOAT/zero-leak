@@ -27,11 +27,13 @@ import { ArtifactsView } from './ArtifactsView';
 import { ModelManagerView } from './ModelManagerView';
 import { AuditView } from './AuditView';
 import { FilePreview } from './FilePreview';
+import { WorkflowView } from './WorkflowView';
 
 const TAB_META: Record<
   PanelTabKind,
   { label: string; icon: React.ElementType; tone: string; hint: string }
 > = {
+  workflows: { label: 'Workflows', icon: FileCheck, tone: 'text-[var(--primary)]', hint: 'Industrial workflows, run receipts and deployment checks' },
   review: {
     label: 'Review',
     icon: FileCheck,
@@ -95,6 +97,7 @@ const TAB_META: Record<
 };
 
 const ORDER: PanelTabKind[] = [
+  'workflows',
   'review',
   'terminal',
   'files',
@@ -273,6 +276,7 @@ export const RightPanel: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+        {current?.kind === 'workflows' && <WorkflowView />}
         {current?.kind === 'review' && <DiffReviewer />}
         {current?.kind === 'terminal' && <SandboxConsole />}
         {current?.kind === 'files' && <FileExplorerView />}

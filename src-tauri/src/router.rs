@@ -594,8 +594,45 @@ pub(crate) fn write_preset_ini(st: &AppState) -> CoreResult<(PathBuf, Vec<(Strin
     let entries: Vec<ModelEntry> = reg.all().to_vec();
     drop(reg);
 
-    let (out, skipped) = render_preset_ini(&entries);
+    // Auto-size context before rendering. A model whose window is VRAM-pinned —
+    // agentic and far below its training ceiling — may be launched with more
+    // context than the catalogue baseline if this card can hold the extra KV
+    // cache (the number written below is what llama-server is actually started
+    // with). The raised windows are recorded back on the registry so routing and
+    // the agent's context note never trust a bigger window than the one about to
+    // launch, and never a smaller one either.
+    let solo_mb = registry::vram_solo_mb();
+    let mut launched: Vec<ModelEntry> = Vec::with_capacity(entries.len());
+    let mut raised: Vec<(String, u32)> = Vec::new();
+    for mut e in entries {
+        // Mirror render's launchability so an override is never recorded for a
+        // model the preset does not actually include.
+        let launchable = e.priority != ModelPriority::Disabled
+            && e.location == ModelLocation::ThisDevice
+            && Path::new(&e.source).is_file()
+            && e.projector.as_deref().is_none_or(|p| Path::new(p).is_file());
+        let geometry = if launchable && registry::context_auto_eligible(&e) {
+            crate::gguf::kv_geometry(Path::new(&e.source))
+        } else {
+            None
+        };
+        // Sizing falls back to the catalogue window for anything not eligible,
+        // not on disk, or whose geometry the reader cannot determine.
+        let effective = registry::autosized_context(&e, geometry, solo_mb);
+        if effective != e.context_size {
+            raised.push((e.id.clone(), effective));
+            e.context_size = effective;
+        }
+        launched.push(e);
+    }
+
+    let (out, skipped) = render_preset_ini(&launched);
     std::fs::write(&path, out)?;
+
+    if !raised.is_empty() {
+        let mut reg = st.registry.write().map_err(|_| lock_err("registry"))?;
+        reg.set_ctx_overrides(&raised);
+    }
     Ok((path, skipped))
 }
 

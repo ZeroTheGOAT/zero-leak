@@ -885,7 +885,7 @@ export const SettingsView: React.FC = () => {
           <Section id="private-endpoint" title="Private endpoint" description="Optional on-prem inference only; public endpoints remain blocked.">
             <Row label="Allow approved private server"><Toggle checked={settings.allowPrivateServer} onChange={(value) => setApp('allowPrivateServer', value)} /></Row>
             <Row label="Display name"><Input disabled={!settings.allowPrivateServer} value={settings.privateServerName} onChange={(e) => setApp('privateServerName', e.target.value)} placeholder="Inference cluster" /></Row>
-            <Row label="Endpoint URL"><Input disabled={!settings.allowPrivateServer} className="w-80 font-mono" value={settings.privateServerUrl} onChange={(e) => setApp('privateServerUrl', e.target.value)} placeholder="https://inference.internal" /></Row>
+            <Row label="Endpoint URL" description="Use an approved private IP address. The exact scheme, port and path boundary are enforced."><Input disabled={!settings.allowPrivateServer} className="w-80 font-mono" value={settings.privateServerUrl} onChange={(e) => setApp('privateServerUrl', e.target.value)} placeholder="http://10.0.0.10:8080" /></Row>
           </Section>
         </>;
 
@@ -927,7 +927,7 @@ export const SettingsView: React.FC = () => {
         return <>
           <Section id="default-permission" title="Default permission">
             <Row label="Rule set" description="Applied to new local conversations."><Select value={settings.approvalPolicy} onChange={(e) => setApp('approvalPolicy', e.target.value as ApprovalPolicy)}><option value="ask_always">Review first</option><option value="ask_risky_only">Local autonomous</option><option value="auto_run_sandbox">Full autonomy in the sandbox</option></Select></Row>
-            <Row label="Sandbox network" description="Off means child processes cannot reach any network."><Toggle checked={settings.sandboxNetwork} onChange={(value) => setApp('sandboxNetwork', value)} /></Row>
+            <Row label="Sandbox network" description="Network access remains disabled in this sovereign deployment."><span className="text-xs text-[var(--success)]">Disabled</span></Row>
           </Section>
           <Section id="guardrails" title="Safety guardrails" description="Operator-set hard stops, checked before approvals — like hooks, they cannot be waived by the agent, an allow-session grant, or an approval click.">
             {settings.guardRules.length ? settings.guardRules.map((entry) => (
@@ -992,7 +992,7 @@ export const SettingsView: React.FC = () => {
             {workspaces.length ? workspaces.map((workspace) => <Row key={workspace.id} label={workspace.name} description={workspace.path}><span className={`text-xs ${workspace.approved ? 'text-[var(--success)]' : 'text-[var(--warning)]'}`}>{workspace.approved ? 'Approved' : 'Blocked'}</span></Row>) : <Row label="No project exceptions" description="Open and approve a project folder from the title bar." />}
           </Section>
           <Section id="network-boundary" title="Network boundary">
-            <Row label="Block public internet" description="Hard egress boundary for models, tools, and document processors."><Toggle checked={settings.blockPublicInternet} onChange={(value) => setApp('blockPublicInternet', value)} /></Row>
+            <Row label="Block public internet" description="Public HTTP destinations are refused by the application guard. Verify OS-level containment separately."><span className="text-xs text-[var(--success)]">Always blocked</span></Row>
             <Row label="Observed public traffic"><span className={sovereign.publicInternetBytes === 0 ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--destructive)]'}>{sovereign.publicInternetBytes.toLocaleString()} bytes</span></Row>
           </Section>
         </>;
@@ -1045,9 +1045,9 @@ export const SettingsView: React.FC = () => {
               </div>
             </Row>
           </Section>
-          <Section id="web-search" title="Web search" description="A narrow public-network exception for search only. Every other public destination remains blocked.">
-              <Row label="Search method" description="Disabled keeps the workstation fully offline. Direct combines and de-duplicates DuckDuckGo, Bing, Google News, and Wikipedia results without an API key.">
-              <Select value={settings.webSearchMode} onChange={(event) => setApp('webSearchMode', event.target.value as AppSettings['webSearchMode'])}>
+          <Section id="web-search" title="Web search" description="Public web tools are unavailable in this sovereign deployment. Use the local knowledge connector for manuals and SOPs.">
+              <Row label="Search method" description="The backend refuses public destinations even if a legacy configuration enabled web search.">
+              <Select value="disabled" disabled>
                 <option value="disabled">Disabled</option>
                 <option value="direct">Direct, no API key</option>
                 <option value="provider">Provider API</option>

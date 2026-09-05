@@ -45,13 +45,14 @@ pub static QUITTING: AtomicBool = AtomicBool::new(false);
 /// transport is asking.
 pub const COMMANDS: &[&str] = &[
     "core_status", "sovereign_status", "sync_exposure", "hardware_status", "web_info",
+    "readiness_check", "receipt_list", "receipt_export", "network_events", "network_guard_check",
     "model_list", "model_catalogue_list", "model_catalogue_add", "model_routing_list", "model_routing_set", "model_load", "model_evict", "router_start", "router_stop",
     "mcp_probe", "web_search_test",
     "transcription_status", "transcription_run",
     "workspace_list", "workspace_add", "workspace_source_pick", "workspace_create", "workspace_update", "workspace_approve", "workspace_remove",
     "fs_list", "fs_read", "fs_preview", "fs_write", "fs_reveal",
     "devserver_start", "devserver_stop", "devserver_status", "devserver_open",
-    "document_ingest", "document_get", "document_list", "document_pick", "document_remove",
+    "document_ingest", "document_get", "document_page_image", "document_list", "document_pick", "document_remove",
     "knowledge_stats", "knowledge_list", "knowledge_index", "knowledge_reindex",
     "knowledge_remove", "knowledge_watch",
     "artifact_list", "artifact_verify", "artifact_open",
@@ -112,6 +113,15 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
     match command {
         /* ---- status ---- */
         "core_status" => ok(router::status(st).await),
+        "readiness_check" => ok(crate::evidence::readiness(st).await?),
+        "receipt_list" => ok(crate::evidence::list(st, &arg::<String>(args,"sessionId")?)?),
+        "receipt_export" => ok(crate::evidence::export(st, &arg::<String>(args,"sessionId")?, &arg::<String>(args,"runId")?)?),
+        "network_events" => ok(crate::evidence::network(st)?),
+        "network_guard_check" => {
+            // TEST-NET is never contacted. Only evaluate the same guard used by inference.
+            let denied = st.classify_url("https://203.0.113.1/sovereignty-check").is_err();
+            ok(serde_json::json!({"denied":denied,"detail":"Evaluated a public TEST-NET destination against the HTTP guard. No connection was attempted."}))
+        }
         "sovereign_status" => ok(st.sovereign_status()?),
         // §11 — the replication check. Reads the sync-root registry and the
         // files' own attributes, never the folder name, so a directory merely
@@ -311,6 +321,12 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         /* ---- §4 documents ---- */
         "document_ingest" => ok(documents::ingest(st, &arg::<String>(args, "path")?).await?),
         "document_get" => ok(documents::get(st, &arg::<String>(args, "id")?)?),
+        "document_page_image" => {
+            let id = arg::<String>(args,"id")?;
+            let page = arg::<u32>(args,"page")?;
+            let state = st.clone();
+            ok(tokio::task::spawn_blocking(move || documents::page_image(&state,&id,page)).await.map_err(|e| CoreError::ExecutionFailed(e.to_string()))??)
+        }
         "document_list" => ok(documents::list(st)?),
         "document_pick" => ok(documents::pick(st.clone()).await?),
         "document_remove" => ok(documents::remove(st, &arg::<String>(args, "id")?)?),
@@ -401,6 +417,28 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
             let id = arg::<String>(args, "sessionId")?;
             ok(st.with_db(|c| crate::db::session_messages(c, &id, agent::HISTORY_TURNS))?)
         }
+        // Editing a sent message: delete that operator row and every turn after
+        // it, then resend the corrected wording as a fresh turn. The rewrite
+        // of the generated JSONL mirror is best-effort the way session_delete's
+        // mirror removal is — the database is canonical either way.
+        "session_truncate" => {
+            let session_id = arg::<String>(args, "sessionId")?;
+            let message_id = arg::<String>(args, "messageId")?;
+            st.with_db(|c| crate::db::truncate_session_messages(c, &session_id, &message_id))?;
+            let retained =
+                st.with_db(|c| crate::db::session_messages(c, &session_id, usize::MAX))?;
+            if let Err(error) = crate::harness::rewrite_session_mirror(&session_id, &retained) {
+                st.emit_failure(&error);
+            }
+            ok(())
+        }
+        /* ---- pasted images: write clipboard pixels to a sovereign file so a
+               turn can attach the path exactly as it would a picked file ---- */
+        "attachment_stage" => ok(crate::attachments::stage(
+            &arg::<String>(args, "name")?,
+            &arg::<String>(args, "mimeType")?,
+            &arg::<String>(args, "dataBase64")?,
+        )?),
         "session_delete" => {
             let id = arg::<String>(args, "sessionId")?;
             st.with_db(|c| crate::db::delete_session(c, &id))?;
@@ -718,7 +756,11 @@ mod command_table {
 fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     let before = st.settings();
     let current = serde_json::to_value(&before)?;
-    let merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    let mut merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    // This deployment's sovereign boundary is fixed, including legacy settings.
+    merged.block_public_internet = true;
+    merged.sandbox_network = false;
+    merged.web_search_mode = WebSearchMode::Disabled;
 
     st.with_db(|conn| db::save_settings(conn, &merged))?;
     *st.settings.write().expect("settings lock") = merged.clone();

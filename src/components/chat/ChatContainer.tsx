@@ -1,22 +1,30 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDown,
   BadgeCheck,
   Copy,
   ExternalLink,
   FileDiff,
   FileOutput,
+  FileText,
   Info,
+  Loader2,
+  Pencil,
   Quote,
   RotateCcw,
+  Send,
   ShieldOff,
+  X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AgentTimeline } from './AgentTimeline';
 import { PlanHandoff } from './PlanHandoff';
 import { ThinkingBlock } from './ThinkingBlock';
+import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
 import type {
   Artifact,
+  Attachment,
   ChatActivityBlock,
   ChatMessage,
   Citation,
@@ -276,7 +284,7 @@ const Citations: React.FC<{ citations: Citation[] }> = ({ citations }) => {
       {citations.map((c, i) => (
         <button
           key={i}
-          onClick={() => void openDocumentAt(c.path)}
+          onClick={() => void openDocumentAt(c.path, c)}
           className="w-full text-left px-2.5 py-1.5 rounded-md bg-[var(--sidebar)] border border-[var(--border)] hover:border-[var(--border)] transition group"
           title={c.path}
         >
@@ -286,7 +294,7 @@ const Citations: React.FC<{ citations: Citation[] }> = ({ citations }) => {
               {c.page !== undefined && <span className="text-[var(--muted-foreground)]"> · p.{c.page}</span>}
             </span>
             <span className="text-[var(--muted-foreground)] tabular-nums flex-shrink-0 ml-2">
-              {c.score.toFixed(3)}
+              Source
             </span>
           </span>
           <span className="block text-[11px] text-[var(--muted-foreground)] mt-0.5 leading-relaxed line-clamp-2">
@@ -348,25 +356,113 @@ const Artifacts: React.FC<{ artifacts: Artifact[] }> = ({ artifacts }) => {
 /* One message                                                        */
 /* ------------------------------------------------------------------ */
 
-const Message: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
+/* Hover actions under one message: copy the text; edit & resend, offered only
+ * on a user message whose row the core has confirmed (rowId) while the chat is
+ * idle. Hidden until the message is hovered so the transcript stays calm. */
+const BubbleActions: React.FC<{
+  msg: ChatMessage;
+  editable?: boolean;
+  onEdit?: () => void;
+}> = ({ msg, editable = false, onEdit }) => (
+  <div className="absolute -bottom-2.5 right-0 z-10 flex items-center gap-0.5 rounded-lg border nerve-border bg-[var(--card)] px-1 py-0.5 opacity-0 shadow-sm transition group-hover:opacity-100">
+    <button
+      type="button"
+      onClick={() => void navigator.clipboard?.writeText(msg.content)}
+      className="grid size-6 place-items-center rounded text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+      title="Copy message text"
+    >
+      <Copy size={11} />
+    </button>
+    {editable && onEdit && (
+      <button
+        type="button"
+        onClick={onEdit}
+        className="grid size-6 place-items-center rounded text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+        title="Edit this message — the replies below it are replaced"
+      >
+        <Pencil size={11} />
+      </button>
+    )}
+  </div>
+);
+
+/* Thumbnails for the images a message carried; everything else stays a chip
+ * with its name. A click opens the file preview tab. */
+const AttachmentGrid: React.FC<{ attachments: Attachment[]; onRemove?: (path: string) => void }> = ({
+  attachments,
+  onRemove,
+}) => {
+  const { openTab } = useApp();
+  return (
+    <div className="flex flex-wrap items-start gap-1.5">
+      {attachments.map((a) =>
+        isImagePath(a.path) ? (
+          <span key={a.id} className="relative flex-shrink-0">
+            <ImageThumb
+              path={a.path}
+              className="h-14 w-14"
+              onClick={() => void openTab('file', a.fileName, undefined, a.path)}
+            />
+            {onRemove && (
+              <button
+                type="button"
+                onClick={() => onRemove(a.path)}
+                className="absolute -right-1.5 -top-1.5 grid size-5 place-items-center rounded-full border nerve-border bg-[var(--card)] text-[var(--muted-foreground)] shadow-sm transition hover:text-[var(--foreground)]"
+                title="Remove image from this edit"
+              >
+                <X size={10} />
+              </button>
+            )}
+          </span>
+        ) : (
+          <span key={a.id} className="relative flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => void openTab('file', a.fileName, undefined, a.path)}
+              className="flex items-center gap-1.5 rounded-md border nerve-border bg-[var(--background)] py-1 pl-2 pr-1.5 text-[11px] text-[var(--muted-foreground)] transition hover:text-[var(--foreground)]"
+              title={a.path}
+            >
+              <FileText size={11} className="flex-shrink-0" />
+              <span className="max-w-[180px] truncate">{a.fileName}</span>
+            </button>
+            {onRemove && (
+              <button
+                type="button"
+                onClick={() => onRemove(a.path)}
+                className="absolute -right-1.5 -top-1.5 grid size-5 place-items-center rounded-full border nerve-border bg-[var(--card)] text-[var(--muted-foreground)] shadow-sm transition hover:text-[var(--foreground)]"
+                title="Remove this file from the edit"
+              >
+                <X size={10} />
+              </button>
+            )}
+          </span>
+        ),
+      )}
+    </div>
+  );
+};
+
+const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => void }> = ({
+  msg,
+  editable = false,
+  onEdit,
+}) => {
   const { openTab, setSelectedChangePath } = useApp();
   const model = modelById(msg.modelId);
 
   if (msg.sender === 'user') {
+    const workflow = /^\[Workflow: (inspection|dashboard|discrepancy|revision)\]\r?\n([^\n]+)/.exec(msg.content);
     return (
-      <div className="flex justify-end">
+      <div className="group relative flex justify-end">
         <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-br-md bg-[var(--card)] text-[13.5px] text-[var(--foreground)] leading-relaxed whitespace-pre-wrap">
-          {msg.content}
+          {workflow ? <><p className="font-medium">{workflow[2]}</p><p className="mt-1">{msg.content.split('Operator context:\n')[1] ?? ''}</p><details className="mt-2 text-xs text-[var(--muted-foreground)]"><summary className="cursor-pointer">Workflow instructions</summary><p className="mt-2">{msg.content}</p></details></> : msg.content}
           {msg.attachments && msg.attachments.length > 0 && (
-            <div className="mt-2 pt-2 border-t border-[var(--border)] space-y-0.5">
-              {msg.attachments.map((a) => (
-                <p key={a.id} className="text-[11px] text-[var(--muted-foreground)] font-mono truncate" title={a.path}>
-                  {a.fileName}
-                </p>
-              ))}
+            <div className="mt-2.5 pt-2.5 border-t border-[var(--border)]">
+              <AttachmentGrid attachments={msg.attachments} />
             </div>
           )}
         </div>
+        <BubbleActions msg={msg} editable={editable} onEdit={onEdit} />
       </div>
     );
   }
@@ -391,7 +487,7 @@ const Message: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
   const unwritten = changes.filter((c) => !c.applied).length;
 
   return (
-    <div className="space-y-2.5">
+    <div className="group relative space-y-2.5">
       {msg.activity && msg.activity.length > 0 ? (
         <ActivityFlow blocks={msg.activity} />
       ) : (
@@ -446,6 +542,8 @@ const Message: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
           {msg.tokensPerSec !== undefined && <span>{msg.tokensPerSec.toFixed(1)} tok/s</span>}
         </div>
       )}
+
+      <BubbleActions msg={msg} />
     </div>
   );
 };
@@ -453,6 +551,110 @@ const Message: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
 /* ------------------------------------------------------------------ */
 /* Container                                                          */
 /* ------------------------------------------------------------------ */
+
+/**
+ * An open edit of a sent message: the bubble is swapped for this editor while
+ * `chatEditing` names it. Saving is truncate-and-resend (commitEdit); until
+ * then nothing on disk has changed and Cancel restores the bubble untouched.
+ * Enter saves, Escape cancels, and more images can be pasted in like the
+ * composer.
+ */
+const EditingBubble: React.FC<{
+  msg: ChatMessage;
+  text: string;
+  onChangeText: (text: string) => void;
+  attached: string[];
+  onChangeAttached: (attached: string[]) => void;
+  saving: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+}> = ({ msg, text, onChangeText, attached, onChangeAttached, saving, onSave, onCancel }) => {
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const area = areaRef.current;
+    if (area) {
+      area.focus();
+      area.setSelectionRange(text.length, text.length);
+    }
+  }, []);
+  useEffect(() => {
+    const area = areaRef.current;
+    if (!area) return;
+    area.style.height = 'auto';
+    area.style.height = `${Math.min(area.scrollHeight, 260)}px`;
+  }, [text]);
+
+  const save = () => {
+    if (!text.trim() || saving) return;
+    onSave();
+  };
+
+  return (
+    <div className="flex justify-end">
+      <div className="w-full max-w-2xl rounded-2xl rounded-br-md border nerve-border bg-[var(--card)] p-2 shadow-sm">
+        <textarea
+          ref={areaRef}
+          value={text}
+          onChange={(event) => onChangeText(event.target.value)}
+          onPaste={stagePastedImages((added) => {
+            if (added.length === 0) return;
+            onChangeAttached([...new Set([...attached, ...added])]);
+          })}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              save();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              onCancel();
+            }
+          }}
+          data-inset-field
+          className="w-full resize-none bg-transparent px-2 py-1.5 text-[13.5px] leading-relaxed text-[var(--foreground)] outline-none"
+        />
+        {(attached.length > 0 || (msg.attachments?.length ?? 0) > 0) && (
+          <div className="px-1 pt-0.5 pb-1">
+            <AttachmentGrid
+              attachments={attached.map((path) => ({
+                id: `edit-att-${path}`,
+                path,
+                fileName: path.split(/[\\/]/).pop() ?? path,
+                kind: 'image',
+                sizeBytes: 0,
+              }))}
+              onRemove={(path) => onChangeAttached(attached.filter((p) => p !== path))}
+            />
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-3 px-1 pt-1">
+          <p className="min-w-0 truncate text-[10px] text-[var(--muted-foreground)]">
+            Editing your message · the replies below it will be replaced
+          </p>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={saving}
+              className="rounded-full px-3 py-1 text-[11px] text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={!text.trim() || saving}
+              className="servergen-primary flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {saving ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
+              {saving ? 'Resending…' : 'Save & resend'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export const ChatContainer: React.FC = () => {
   const {
@@ -466,9 +668,70 @@ export const ChatContainer: React.FC = () => {
     mode,
     coreStatus,
     send,
+    commitEdit,
   } = useApp();
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef(true);
+  const [readingSessionId, setReadingSessionId] = useState<string | null>(null);
+  const showLatest = readingSessionId !== null && readingSessionId === activeSessionId;
   const [retrying, setRetrying] = useState(false);
+  /**
+   * The message open in its editor, when one is. Only one edit at a time, and
+   * only while this chat is idle — an edit under a running turn would be
+   * overwritten by the live stream, and one while a follow-up is queued would
+   * truncate a turn that has not been written yet.
+   */
+  const [chatEditing, setChatEditing] = useState<{
+    id: string;
+    text: string;
+    attachments: string[];
+  } | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  // Leave the editor when the chat switches; a half-typed edit belongs to the
+  // session it was started in.
+  useEffect(() => {
+    setChatEditing(null);
+    setEditSaving(false);
+  }, [activeSessionId]);
+
+  const canEdit = !isRunning && chatEditing === null;
+  const beginEdit = (msg: ChatMessage) => {
+    if (!canEdit || msg.sender !== 'user' || !msg.rowId) return;
+    setChatEditing({
+      id: msg.id,
+      text: msg.content,
+      attachments: (msg.attachments ?? []).map((a) => a.path),
+    });
+    // The new editor sits above the fold; pull it into view.
+    window.requestAnimationFrame(() => {
+      const container = scrollRef.current;
+      if (container) container.scrollTop = container.scrollHeight;
+    });
+  };
+  const commitChatEdit = async () => {
+    if (!chatEditing) return;
+    setEditSaving(true);
+    try {
+      const accepted = await commitEdit(
+        chatEditing.id,
+        chatEditing.text,
+        chatEditing.attachments,
+      );
+      if (accepted) setChatEditing(null);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+  const cancelChatEdit = () => {
+    if (!editSaving) setChatEditing(null);
+  };
+
+  const jumpToLatest = () => {
+    followRef.current = true;
+    setReadingSessionId(null);
+    const container = scrollRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  };
 
   // Whether the bottom of the stream is already naming the current action
   // with its own spinner.
@@ -492,7 +755,15 @@ export const ChatContainer: React.FC = () => {
         lastBlock.text.trim().length > 0;
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    followRef.current = true;
+    const container = scrollRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    // Streaming should never pull the operator away from older messages.
+    const container = scrollRef.current;
+    if (container && followRef.current) container.scrollTop = container.scrollHeight;
   }, [messages.length, liveActivity, liveSteps.length, livePhase?.label]);
 
   const banner = useMemo(() => {
@@ -550,7 +821,7 @@ export const ChatContainer: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="relative flex-1 flex flex-col min-h-0">
       {/* Session header */}
       <div className="h-10 px-4 flex items-center justify-between border-b border-[var(--muted)] flex-shrink-0">
         <div className="min-w-0 flex items-center space-x-2">
@@ -563,7 +834,16 @@ export const ChatContainer: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        onScroll={(event) => {
+          const container = event.currentTarget;
+          const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 64;
+          followRef.current = atBottom;
+          setReadingSessionId(atBottom ? null : activeSessionId);
+        }}
+        className="flex-1 overflow-y-auto"
+      >
         <div className="max-w-3xl mx-auto px-4 py-5 space-y-5">
           {banner && (
             <div className="flex items-start space-x-2.5 px-3 py-2.5 rounded-lg bg-[var(--sidebar)] border border-[var(--border)]">
@@ -572,9 +852,35 @@ export const ChatContainer: React.FC = () => {
             </div>
           )}
 
-          {messages.map((m) => (
-            <Message key={m.id} msg={m} />
-          ))}
+          {messages.map((m) => {
+            if (chatEditing?.id === m.id) {
+              return (
+                <EditingBubble
+                  key={m.id}
+                  msg={m}
+                  text={chatEditing.text}
+                  onChangeText={(text) =>
+                    setChatEditing((cur) => (cur ? { ...cur, text } : cur))
+                  }
+                  attached={chatEditing.attachments}
+                  onChangeAttached={(attachments) =>
+                    setChatEditing((cur) => (cur ? { ...cur, attachments } : cur))
+                  }
+                  saving={editSaving}
+                  onSave={() => void commitChatEdit()}
+                  onCancel={cancelChatEdit}
+                />
+              );
+            }
+            return (
+              <Message
+                key={m.id}
+                msg={m}
+                editable={canEdit && m.sender === 'user' && Boolean(m.rowId)}
+                onEdit={canEdit && m.sender === 'user' && m.rowId ? () => beginEdit(m) : undefined}
+              />
+            );
+          })}
 
           {/* Plan-mode handoff: approve the plan above and execution starts */}
           {!isRunning && handoffPlan && lastAgentMsg && (
@@ -615,9 +921,17 @@ export const ChatContainer: React.FC = () => {
             </div>
           )}
 
-          <div ref={endRef} />
         </div>
       </div>
+      {showLatest && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border nerve-border bg-[var(--card)] px-3 py-1.5 text-xs text-[var(--foreground)] shadow-md hover:bg-[var(--accent)]"
+        >
+          <ArrowDown size={13} />Jump to latest
+        </button>
+      )}
     </div>
   );
 };

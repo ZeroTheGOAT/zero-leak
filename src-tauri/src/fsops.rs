@@ -1068,11 +1068,15 @@ fn permitted_existing_file(st: &AppState, path: &str) -> CoreResult<PathBuf> {
         .filter_map(|folder| std::fs::canonicalize(folder.path).ok())
         .collect();
     let projects_root = crate::registry::sovereign_root().join("projects");
+    // Pasted images are staged under `sovereign_root/attachments`, so that
+    // folder is an output root of this application too.
+    let attachments_root = crate::registry::sovereign_root().join("attachments");
     for extra in [
         Path::new(&settings.artifact_root),
         Path::new(&settings.sandbox_root),
         Path::new(&settings.knowledge_root),
         projects_root.as_path(),
+        attachments_root.as_path(),
     ] {
         if let Ok(p) = std::fs::canonicalize(extra) {
             roots.push(p);

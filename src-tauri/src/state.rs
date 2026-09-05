@@ -356,6 +356,8 @@ impl AppState {
             .collect();
 
         let http = reqwest::Client::builder()
+            // A trusted local endpoint must not redirect the client to a public host.
+            .redirect(reqwest::redirect::Policy::none())
             // Loopback and LAN only; a long default would make an unreachable
             // private server look like a hang instead of a failure.
             .connect_timeout(std::time::Duration::from_secs(3))
@@ -417,6 +419,11 @@ impl AppState {
     /// string is what makes it impossible for the two transports to drift.
     pub fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
         if let Ok(json) = serde_json::to_string(&payload) {
+            if event == "agent://step" || event == "agent://done" {
+                if let Err(error) = crate::evidence::observe(self, event, &json) {
+                    eprintln!("[receipt] Could not persist {event}: {error}");
+                }
+            }
             let _ = self.events.send(format!(
                 "{{\"event\":{},\"payload\":{}}}",
                 serde_json::Value::String(event.to_string()),
@@ -473,41 +480,12 @@ impl AppState {
     pub fn classify_url(&self, url: &str) -> CoreResult<Destination> {
         let s = self.settings();
 
-        let host = url
-            .split("://")
-            .nth(1)
-            .unwrap_or(url)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or_else(|| url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or_default())
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_ascii_lowercase();
-
-        let is_loopback = host == "localhost"
-            || host == "::1"
-            || host
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false);
-
-        if is_loopback {
-            return Ok(Destination::Loopback);
-        }
-
-        if s.allow_private_server && !s.private_server_url.is_empty() {
-            let configured = s.private_server_url.trim_end_matches('/');
-            if url.starts_with(configured) {
-                return Ok(Destination::PrivateServer);
-            }
-        }
-
-        Err(CoreError::Denied(format!(
-            "Refused a request to {host}. This build reaches loopback and the one private server you approve in Settings, and nothing else. No public cloud service is contacted, including as a fallback."
-        )))
+        let result = crate::evidence::classify_destination(&s, url);
+        // Store only origin: query strings and userinfo may contain credentials.
+        let origin = reqwest::Url::parse(url).ok().map(|u| u.origin().ascii_serialization()).unwrap_or_else(|| "invalid URL".into());
+        let zone = match &result { Ok(Destination::Loopback) => "loopback", Ok(Destination::PrivateServer) => "private_server", Err(_) => "denied" };
+        crate::evidence::record_network(self, &origin, zone, if result.is_ok() {"HTTP guard allowed destination; not proof of transmission."} else {"HTTP guard refused destination before connecting."});
+        result
     }
 
     /// Counts a completed request. `bytes` is the response size; the split
@@ -541,7 +519,7 @@ impl AppState {
             private_server_bytes: private,
             device_requests: device,
             private_server_requests: private_req,
-            egress_blocked: s.block_public_internet,
+            egress_blocked: true,
             private_server_name: if s.allow_private_server && !s.private_server_name.is_empty() {
                 Some(s.private_server_name)
             } else {

@@ -1408,8 +1408,15 @@ fn decode_pdf_image(img: &lopdf::xobject::PdfImage<'_>) -> Result<Vec<u8>, Strin
         }
     }
 
-    // Raw samples. `Document::get_page_images` has already applied FlateDecode,
-    // so what is here is the sample array.
+    // get_page_images exposes the ORIGINAL stream, including compressed bytes.
+    // Decode through its dictionary so Flate predictors are handled as well.
+    let content = if filters.is_empty() {
+        img.content.to_vec()
+    } else {
+        lopdf::Stream::new(img.origin_dict.clone(), img.content.to_vec())
+            .decompressed_content_with_limit(128 * 1024 * 1024)
+            .map_err(|e| format!("its image stream could not be decompressed: {e}"))?
+    };
     let bpc = img.bits_per_component.unwrap_or(8);
     if bpc != 8 {
         return Err(format!("{bpc} bits per component, which this build does not unpack"));
@@ -1422,19 +1429,19 @@ fn decode_pdf_image(img: &lopdf::xobject::PdfImage<'_>) -> Result<Vec<u8>, Strin
     }
 
     let space = img.color_space.clone().unwrap_or_default();
-    let components = img.content.len() / px.max(1);
+    let components = content.len() / px.max(1);
 
     let dynamic = match (components, space.as_str()) {
-        (1, _) => image::GrayImage::from_raw(w, h, img.content.to_vec())
+        (1, _) => image::GrayImage::from_raw(w, h, content.clone())
             .map(image::DynamicImage::ImageLuma8),
-        (3, _) => image::RgbImage::from_raw(w, h, img.content.to_vec())
+        (3, _) => image::RgbImage::from_raw(w, h, content.clone())
             .map(image::DynamicImage::ImageRgb8),
         (4, _) => {
             // CMYK, and PDF stores it inverted for DeviceN separations often
             // enough that a naive read produces a negative. Convert plainly and
             // accept a colour cast: this is going to OCR, not to a printer.
             let mut rgb = Vec::with_capacity(px * 3);
-            for chunk in img.content.chunks_exact(4) {
+            for chunk in content.chunks_exact(4) {
                 let (c, m, y, k) = (chunk[0] as u32, chunk[1] as u32, chunk[2] as u32, chunk[3] as u32);
                 rgb.push((255 - (c * k / 255).min(255)) as u8);
                 rgb.push((255 - (m * k / 255).min(255)) as u8);
@@ -1447,7 +1454,7 @@ fn decode_pdf_image(img: &lopdf::xobject::PdfImage<'_>) -> Result<Vec<u8>, Strin
     .ok_or_else(|| {
         format!(
             "{} bytes of {space} samples for {w}×{h}, which is not a layout this build recognises",
-            img.content.len()
+            content.len()
         )
     })?;
 
@@ -2178,6 +2185,69 @@ pub async fn ingest(st: &Arc<AppState>, path: &str) -> CoreResult<IngestedDocume
 
 pub fn get(st: &AppState, id: &str) -> CoreResult<IngestedDocument> {
     st.with_db(|c| crate::db::document(c, id))
+}
+
+/// One inspectable passage per extracted page, using recorded coordinates.
+/// Prefer measurement passages to repeated letterheads; this is navigation,
+/// not a claim that all conclusions on a page have been verified.
+pub fn source_page_citations(doc: &IngestedDocument) -> Vec<Citation> {
+    (1..=doc.page_count.min(40)).filter_map(|page| {
+        let block = doc.blocks.iter().filter(|b| b.bbox.page == page && !b.text.trim().is_empty()).max_by_key(|b| {
+            let text = b.text.to_lowercase();
+            let measurement = text.chars().any(|c| c.is_ascii_digit()) && [" mm", " bar", "reading", "thickness", "pressure", "temperature"].iter().any(|word| text.contains(word));
+            (measurement, b.text.len())
+        })?;
+        Some(Citation {doc_id:doc.id.clone(),path:doc.path.clone(),file_name:doc.file_name.clone(),page:Some(page),bbox:Some(block.bbox.clone()),snippet:block.text.chars().take(500).collect(),score:1.0})
+    }).collect()
+}
+
+/// A page must match the recorded extraction. Never draw page-one pixels below
+/// page-two coordinates, or silently replace evidence when a source is edited.
+pub fn page_image(st: &AppState, id: &str, page: u32) -> CoreResult<Option<String>> {
+    let doc = get(st,id)?;
+    if page == 0 || page > doc.page_count { return Err(CoreError::InvalidDocument("Page is outside the recorded document.".into())); }
+    if std::fs::metadata(&doc.path)?.len() > 128 * 1024 * 1024 { return Err(CoreError::InvalidDocument("Source preview exceeds the 128 MiB safety limit.".into())); }
+    let bytes = std::fs::read(&doc.path)?;
+    if sha256_hex(&bytes) != doc.sha256 { return Err(CoreError::InvalidDocument("The source changed since extraction. Reattach it to create a new revision before trusting page highlights.".into())); }
+    if ext_of(&doc.path) != "pdf" { return Ok(if page == 1 {doc.preview_uri} else {None}); }
+    let pdf = lopdf::Document::load_mem(&bytes).map_err(|e| CoreError::InvalidDocument(e.to_string()))?;
+    let pages = pdf.get_pages();
+    let Some(id) = pages.get(&page) else { return Ok(None) };
+    let Ok(images) = pdf.get_page_images(*id) else { return Ok(None) };
+    let image = images.into_iter().filter(|i| i.width * i.height >= MIN_PAGE_IMAGE_PIXELS).max_by_key(|i| i.width * i.height);
+    let Some(image) = image else {return Ok(None)};
+    let png = decode_pdf_image(&image).map_err(CoreError::InvalidDocument)?;
+    Ok(preview_data_uri(&png))
+}
+
+#[cfg(test)]
+mod scan_regression_tests {
+    use super::*;
+    #[test]
+    fn source_citations_preserve_pages_and_select_measurements_over_headers() {
+        let doc = IngestedDocument { id:"d".into(),path:"scan.pdf".into(),file_name:"scan.pdf".into(),kind:DocumentKind::Text,page_count:2,extraction:ExtractionMethod::Native,model_id:None,blocks:vec![page_block(1,BlockKind::Text,"Synthetic cover page for the inspection",None),page_block(2,BlockKind::Heading,"A deliberately very long repeated header with no measurement",None),page_block(2,BlockKind::Text,"DEMO-L-201 measured thickness is 6.2 mm",None)],tables:vec![],entities:vec![],size_bytes:0,sha256:String::new(),ingested_at:0,preview_uri:None };
+        let cites = source_page_citations(&doc);
+        assert_eq!(cites.len(),2); assert_eq!(cites[1].page,Some(2));
+        assert!(cites[1].snippet.contains("6.2 mm"));
+        assert_eq!(cites[1].bbox.as_ref().unwrap().page,2);
+    }
+    #[test]
+    fn flate_scans_decode_into_distinct_pages_without_a_text_layer() {
+        let bytes = include_bytes!("../../examples/mrpl-demo/inspection-revision-a-scan.pdf");
+        let pages = pdf_page_images(bytes,"synthetic scan").unwrap();
+        assert_eq!(pages.len(),2);
+        assert_eq!(pages[0].0,1); assert_eq!(pages[1].0,2);
+        let first = image::load_from_memory(&pages[0].1).unwrap();
+        let second = image::load_from_memory(&pages[1].1).unwrap();
+        assert_eq!(first.width(),1240); assert_eq!(first.height(),1754);
+        assert_ne!(first.to_rgb8(),second.to_rgb8());
+    }
+    #[test]
+    fn revised_scan_really_changes_the_second_page() {
+        let old = pdf_page_images(include_bytes!("../../examples/mrpl-demo/inspection-revision-a-scan.pdf"),"old").unwrap();
+        let new = pdf_page_images(include_bytes!("../../examples/mrpl-demo/inspection-revision-b-scan.pdf"),"new").unwrap();
+        assert_ne!(old[1].1,new[1].1);
+    }
 }
 
 pub fn list(st: &AppState) -> CoreResult<Vec<IngestedDocument>> {

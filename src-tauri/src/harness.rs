@@ -994,6 +994,40 @@ pub fn append_session_message(
     Ok(())
 }
 
+/// Rewrites a chat's JSONL transcript mirror to match its retained database
+/// rows, oldest first.
+///
+/// The mirror is a generated convenience copy — the database is canonical — so
+/// when a conversation is truncated from the middle (an edited message and
+/// everything after it), the mirror is rebuilt rather than played append-only:
+/// a stale tail would describe a conversation that no longer exists. Editing
+/// while the vault seals the mirror leaves the sealed copy untouched, exactly
+/// as append does; the next disable rebuilds every mirror from the database.
+pub fn rewrite_session_mirror(session_id: &str, messages: &[StoredMessage]) -> CoreResult<()> {
+    let id = safe_id(session_id, "session")?;
+    let dir = crate::registry::sovereign_root().join("sessions").join(id);
+    if !dir.exists() {
+        // Nothing was ever mirrored (the chat may have begun while the vault
+        // was on); there is nothing to rewrite, and creating an empty file
+        // would only add a mirror that never earned one.
+        return Ok(());
+    }
+    if crate::vault::is_enabled() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(dir.join("transcript.jsonl"))?;
+    for message in messages {
+        serde_json::to_writer(&mut file, message)?;
+        file.write_all(b"\n")?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

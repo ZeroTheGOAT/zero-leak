@@ -52,12 +52,15 @@
 mod agent;
 mod api;
 mod artifacts;
+mod attachments;
 mod audit;
 mod db;
 mod devserver;
 mod documents;
+mod evidence;
 mod error;
 mod fsops;
+mod gguf;
 mod guards;
 mod harness;
 mod hardware;
@@ -134,6 +137,7 @@ fn parse_args() -> Mode {
             }
             "--no-web" => mode.web = false,
             "--open" => mode.open_browser = true,
+            "--no-open-browser" => mode.open_browser = false,
             "--port" => {
                 if let Some(p) = args.next().and_then(|v| v.parse().ok()) {
                     mode.port = p;

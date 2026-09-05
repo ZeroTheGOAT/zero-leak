@@ -200,6 +200,7 @@ export const documents = {
   /** Native extraction is attempted first; OCR only if there is no text layer. */
   ingest: (path: string) => call<IngestedDocument>('document_ingest', { path }),
   get: (id: string) => call<IngestedDocument>('document_get', { id }),
+  pageImage: (id: string, page: number) => call<string | null>('document_page_image', { id, page }),
   list: () => call<IngestedDocument[]>('document_list'),
   /** Opens the file picker and returns the chosen paths. */
   pick: () => call<string[]>('document_pick'),
@@ -390,6 +391,25 @@ export const sessions = {
   remove: (sessionId: string) => call<void>('session_delete', { sessionId }),
   setMemory: (sessionId: string, useMemories: boolean, contributeMemories: boolean) =>
     call<Session>('session_memory', { sessionId, useMemories, contributeMemories }),
+  /**
+   * Deletes one operator message and every turn after it in the store. The
+   * frontend then re-sends the corrected wording as a fresh turn, which is how
+   * editing an earlier message rewrites the conversation from that point.
+   */
+  truncate: (sessionId: string, messageId: string) =>
+    call<void>('session_truncate', { sessionId, messageId }),
+};
+
+/* ------------------------------------------------------------------ */
+/* Pasted images                                                       */
+/* ------------------------------------------------------------------ */
+
+export const attachments = {
+  /** Writes pasted clipboard pixels under the sovereign root and answers with
+   *  the path, so the turn can attach it exactly like a picked file. The core
+   *  answers a bare path string — like `fs_read` answers text — not an object. */
+  stage: (name: string, mimeType: string, dataBase64: string) =>
+    call<string>('attachment_stage', { name, mimeType, dataBase64 }),
 };
 
 /* ------------------------------------------------------------------ */
@@ -454,6 +474,13 @@ export interface RunDone {
   plan?: PlanItem[];
 }
 
+export interface RunUserStored {
+  runId: string;
+  sessionId: string;
+  /** The store's row id of the operator message just persisted. */
+  messageId: string;
+}
+
 export interface RunText {
   runId: string;
   sessionId: string;
@@ -492,6 +519,7 @@ export interface CoreEvents {
   'agent://question': OperatorQuestion;
   'agent://permission': PermissionRequest;
   'agent://done': RunDone;
+  'agent://user-stored': RunUserStored;
   'agent://failure': CoreFailure;
   'devserver://status': DevServerStatus;
   'core://hardware': HardwareStatus;

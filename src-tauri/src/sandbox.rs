@@ -404,9 +404,14 @@ pub async fn run_python(
     // it a file named `random.py` in the sandbox folder silently shadows the
     // module, which is a debugging afternoon nobody needs. `-u` is unbuffered,
     // so print output streams as it happens instead of arriving at exit.
+    // `-X utf8` forces UTF-8 mode on the stdio, which `PYTHONUTF8` cannot do
+    // here: isolated mode ignores every `PYTHON*` environment variable, so a
+    // captured script printing `✓` or `°` would otherwise die encoding to the
+    // locale codepage (`cp1252` on a Western Windows install). The flag is
+    // honoured under `-I` because it is an explicit command-line option.
     // Spelled out in full rather than left relative: the child's working
     // directory is the open folder now, and the script does not live there.
-    let command = format!("python -I -u \"{}\"", script.display());
+    let command = format!("python -I -u -X utf8 \"{}\"", script.display());
     exec(st, command, Some(script), dir).await
 }
 
@@ -422,6 +427,27 @@ pub(crate) fn inherit_minimal_env(cmd: &mut Command) {
             cmd.env(key, v);
         }
     }
+}
+
+/// Python-specific child environment, applied whenever the sandbox runs a
+/// command that may be an interpreter.
+///
+/// `PYTHONUTF8` puts stdio in UTF-8 mode instead of the locale codepage
+/// (`cp1252` on a Western Windows install), so a captured script printing `✓`,
+/// `°` or `mm²` does not die with `UnicodeEncodeError` before its first check
+/// runs. This came up in rehearsal: the local model's dashboard test crashed
+/// printing U+2713 under `cp1252`.
+///
+/// Environment alone is not enough for `execute_python`: its synthesized
+/// command runs under `python -I` (isolated mode), which ignores every
+/// `PYTHON*` variable. That path therefore also passes `-X utf8` on the
+/// command line (see `run_python`). This env covers the rest — `run_command`
+/// python, `python -m http.server`, anything the operator or model typed
+/// without the flag. Harmless for non-Python children.
+fn python_env(cmd: &mut Command) {
+    cmd.env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONUTF8", "1");
 }
 
 /* ------------------------------------------------------------------ */
@@ -662,12 +688,8 @@ async fn exec(
     // sandboxed script has no need for any of it. `PATH`, `SYSTEMROOT` and
     // `TEMP` are what a Windows program needs to start at all.
     inherit_minimal_env(&mut cmd);
-    cmd.env("TEMP", &cwd)
-        .env("TMP", &cwd)
-        // Python-specific, and harmless for anything else: unbuffered output and
-        // no `.pyc` files littering the sandbox folder.
-        .env("PYTHONUNBUFFERED", "1")
-        .env("PYTHONDONTWRITEBYTECODE", "1");
+    cmd.env("TEMP", &cwd).env("TMP", &cwd);
+    python_env(&mut cmd);
 
     let contained = crate::winproc::spawn_contained(
         cmd,
@@ -1147,6 +1169,41 @@ mod resolution {
             !pkgs.available.is_empty() || !pkgs.missing.is_empty(),
             "the probe answered about nothing at all"
         );
+    }
+
+    /// The sandbox captures stdout through a pipe, and Python then writes in
+    /// the locale codepage (`cp1252` on a Western Windows install) unless UTF-8
+    /// mode is forced. A generated dashboard test prints `✓` for a passing
+    /// assertion and crashed with `UnicodeEncodeError` before its first check
+    /// ran; engineering scripts printing `°` or `mm²` would hit the same wall.
+    /// The command mirrors `run_python` (`-I -u -X utf8`): `-X utf8` is what
+    /// survives isolated mode, which ignores a `PYTHONUTF8` environment
+    /// variable. The child environment must make such output survive capture.
+    #[test]
+    fn sandboxed_python_prints_non_ascii_to_a_captured_pipe() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let Some(python) = super::resolve_program("python") else {
+            return; // no interpreter on this machine: nothing to sandbox
+        };
+        let mut cmd = Command::new(python);
+        cmd.args(["-I", "-u", "-X", "utf8", "-c", "print('\u{2713} pass')"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        super::inherit_minimal_env(&mut cmd);
+        super::python_env(&mut cmd);
+        let mut child = cmd.spawn().expect("python should start");
+        let mut out = String::new();
+        let mut err = String::new();
+        child.stdout.take().expect("stdout").read_to_string(&mut out).expect("read stdout");
+        child.stderr.take().expect("stderr").read_to_string(&mut err).expect("read stderr");
+        let status = child.wait().expect("wait for python");
+        assert!(
+            status.success(),
+            "printing a check mark must not die on encoding. stderr: {err}"
+        );
+        assert!(out.contains('\u{2713}'), "output was {out:?}");
     }
 
     #[test]

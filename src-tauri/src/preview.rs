@@ -139,6 +139,9 @@ pub async fn serve(
     root: &Path,
     rel: &str,
 ) -> CoreResult<PreviewInfo> {
+    if !root.is_dir() {
+        return Err(CoreError::InvalidDocument("serve_folder requires an existing directory, not a file. Create index.html inside the workspace and serve its containing directory (usually '.').".into()));
+    }
     serve_with_preferred(st, workspace_id, root, rel, None).await
 }
 
@@ -248,7 +251,15 @@ async fn serve_with_preferred(
     // operator accepts later, and later edits, are picked up on refresh
     // without anything here being told.
     let shutdown = Arc::new(Notify::new());
-    let app = axum::Router::new().fallback_service(ServeDir::new(root.to_path_buf()));
+    let app = axum::Router::new().fallback_service(ServeDir::new(root.to_path_buf()))
+        .layer(axum::middleware::map_response(|mut response: axum::response::Response| async move {
+            // Generated pages must not pull CDN assets or fetch public APIs in
+            // the operator's browser, outside the core's HTTP guard.
+            response.headers_mut().insert("content-security-policy", axum::http::HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"));
+            response.headers_mut().insert("x-content-type-options", axum::http::HeaderValue::from_static("nosniff"));
+            response.headers_mut().insert("referrer-policy", axum::http::HeaderValue::from_static("no-referrer"));
+            response
+        }));
     let task_shutdown = shutdown.clone();
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::from_std(std_listener) {

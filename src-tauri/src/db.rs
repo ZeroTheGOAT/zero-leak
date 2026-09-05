@@ -419,6 +419,25 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX vault_event_time ON vault_event(at DESC);
     "#,
+    // Durable receipts and guard decisions. SQLite remains canonical.
+    r#"
+    CREATE TABLE run_receipts (
+        run_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        workspace_id TEXT,
+        started_at INTEGER NOT NULL,
+        receipt TEXT NOT NULL
+    );
+    CREATE INDEX receipts_session ON run_receipts(session_id, started_at DESC);
+    CREATE TABLE network_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        run_id TEXT,
+        destination TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        detail TEXT NOT NULL
+    );
+    "#,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -440,6 +459,7 @@ pub fn open(dir: &Path) -> CoreResult<Connection> {
     conn.busy_handler(Some(|attempts: i32| attempts < 200))?;
 
     migrate(&conn)?;
+    crate::evidence::recover(&conn)?;
 
     // A column added to an already-released migration's DDL cannot reach a
     // store that has passed that version. Repaired separately, and only when
@@ -550,7 +570,11 @@ pub fn load_settings(conn: &Connection) -> CoreResult<AppSettings> {
         },
         None => defaults,
     };
-    Ok(serde_json::from_value(merged)?)
+    let mut settings: AppSettings = serde_json::from_value(merged)?;
+    settings.block_public_internet = true;
+    settings.sandbox_network = false;
+    settings.web_search_mode = WebSearchMode::Disabled;
+    Ok(settings)
 }
 
 pub fn save_settings(conn: &Connection, s: &AppSettings) -> CoreResult<()> {
@@ -1061,6 +1085,13 @@ pub fn touch_session(
     title: &str,
     at: i64,
 ) -> CoreResult<()> {
+    let title = match title.lines().next() {
+        Some("[Workflow: inspection]") => "Inspection approval package",
+        Some("[Workflow: dashboard]") => "Verified internal dashboard",
+        Some("[Workflow: discrepancy]") => "Cross-document discrepancy review",
+        Some("[Workflow: revision]") => "Document revision impact",
+        _ => title,
+    };
     let short: String = title.chars().take(60).collect();
     conn.execute(
         "INSERT INTO sessions (id, workspace_id, title, mode, created_at, updated_at)
@@ -1192,6 +1223,53 @@ pub fn add_message(
     })
 }
 
+/// Removes one operator message and every turn after it, in one call.
+///
+/// This is the store side of editing a sent message: the edited row is deleted
+/// (the caller re-sends the corrected wording as a fresh turn) together with
+/// everything the conversation had moved on to, so the record from that point
+/// on is rewritten — the same shape ChatGPT leaves when an earlier message is
+/// edited. `ordinal >=` is the cut because ordinals are allocated sequentially
+/// per session and never reused below the high-water mark, so the anchor and
+/// everything after it is exactly the tail to drop.
+///
+/// Only the operator's own rows may anchor a rewrite. Returns the number of
+/// rows deleted.
+pub fn truncate_session_messages(
+    conn: &Connection,
+    session_id: &str,
+    message_id: &str,
+) -> CoreResult<usize> {
+    let anchor = conn.query_row(
+        "SELECT ordinal, sender FROM session_messages WHERE id = ?1 AND session_id = ?2",
+        params![message_id, session_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+    );
+    let (ordinal, sender) = match anchor {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(CoreError::ExecutionFailed(
+                "That message is not in this conversation, so it cannot be edited here.".into(),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if sender != "user" {
+        return Err(CoreError::ExecutionFailed(
+            "Only your own messages can be edited into a new turn.".into(),
+        ));
+    }
+    let deleted = conn.execute(
+        "DELETE FROM session_messages WHERE session_id = ?1 AND ordinal >= ?2",
+        params![session_id, ordinal],
+    )?;
+    conn.execute(
+        "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+        params![session_id, crate::state::now_ms()],
+    )?;
+    Ok(deleted)
+}
+
 /// One conversation in the order it happened.
 ///
 /// `limit` counts back from the end, because the turns that matter to the next
@@ -1279,6 +1357,7 @@ pub fn project_session_messages(
 /// Removes a conversation and its turns. `ON DELETE CASCADE` takes the messages.
 pub fn delete_session(conn: &Connection, id: &str) -> CoreResult<()> {
     let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM run_receipts WHERE session_id=?1", params![id])?;
     tx.execute("DELETE FROM memories WHERE source_session_id = ?1", params![id])?;
     tx.execute("DELETE FROM artifacts WHERE session_id = ?1", params![id])?;
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -2570,6 +2649,64 @@ mod conversation {
             "a replayed conversation has to read forwards or the model is told the answer first"
         );
         assert_eq!(turns[1].sender, "agent");
+    }
+
+    #[test]
+    fn editing_an_earlier_message_cuts_it_and_everything_after() {
+        let c = store();
+        touch_session(&c, "s1", Some("ws1"), AgentMode::Plan, "title", 1).unwrap();
+        say(&c, "s1", "user", "start", 1);
+        say(&c, "s1", "agent", "hello — how can I help?", 2);
+        say(&c, "s1", "user", "list the tags", 3);
+        say(&c, "s1", "agent", "PSV-1101, MRPL-4.", 4);
+        say(&c, "s1", "user", "and the plan?", 5);
+        say(&c, "s1", "agent", "Three steps.", 6);
+
+        // Edit the middle user row. The store rewrite that an edit leaves behind
+        // is the ChatGPT shape: that row and every turn after it are gone, the
+        // turns before it stay, and the corrected wording is sent as a fresh turn.
+        let rows = session_messages(&c, "s1", usize::MAX).unwrap();
+        let anchor = rows.iter().find(|m| m.content == "list the tags").unwrap().id.clone();
+        let removed = truncate_session_messages(&c, "s1", &anchor).unwrap();
+        assert_eq!(removed, 4, "the edited row and the three turns after it go");
+
+        let left_rows = session_messages(&c, "s1", usize::MAX).unwrap();
+        let left: Vec<(String, String)> = left_rows
+            .iter()
+            .map(|m| (m.sender.clone(), m.content.clone()))
+            .collect();
+        assert_eq!(
+            left,
+            [
+                ("user".into(), "start".into()),
+                ("agent".into(), "hello — how can I help?".into()),
+            ],
+            "nothing before the edited row is touched"
+        );
+    }
+
+    #[test]
+    fn only_your_own_rows_can_anchor_an_edit() {
+        let c = store();
+        touch_session(&c, "s1", Some("ws1"), AgentMode::Plan, "title", 1).unwrap();
+        say(&c, "s1", "user", "question", 1);
+        say(&c, "s1", "agent", "answer", 2);
+
+        let rows = session_messages(&c, "s1", usize::MAX).unwrap();
+        let agent_id = rows.iter().find(|m| m.sender == "agent").unwrap().id.clone();
+        assert!(
+            truncate_session_messages(&c, "s1", &agent_id).is_err(),
+            "a reply cannot anchor an edit — only the operator's own row can"
+        );
+        assert!(
+            truncate_session_messages(&c, "s1", "msg-not-here").is_err(),
+            "a row from another conversation, or none at all, is refused"
+        );
+        assert_eq!(
+            session_messages(&c, "s1", usize::MAX).unwrap().len(),
+            2,
+            "refused anchors leave the conversation untouched"
+        );
     }
 
     #[test]

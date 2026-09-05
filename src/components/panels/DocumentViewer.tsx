@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatBytes, modelById } from '../../services/registry';
+import { documents as documentCore } from '../../services/core';
 import type { BlockKind, DocBlock, IngestedDocument } from '../../types';
 
 const BLOCK_TONE: Record<BlockKind, string> = {
@@ -48,6 +49,16 @@ const PageCanvas: React.FC<{
   onSelect: (id: string | null) => void;
 }> = ({ doc, page, zoom, showBoxes, selectedId, onSelect }) => {
   const blocks = doc.blocks.filter((b) => b.bbox.page === page);
+  const [preview, setPreview] = useState<{ key: string; uri: string | null; error?: string } | null>(null);
+  const key = `${doc.id}:${page}`;
+  useEffect(() => {
+    let stopped = false;
+    void documentCore.pageImage(doc.id,page).then((uri) => {
+      if (!stopped) setPreview({ key,uri });
+    }).catch((e) => { if (!stopped) setPreview({ key,uri:null,error:String(e) }); });
+    return () => { stopped = true; };
+  }, [doc.id,page,key]);
+  const current = preview?.key === key ? preview : null;
 
   return (
     <div className="flex-1 overflow-auto bg-[var(--sidebar-accent)] p-4">
@@ -58,9 +69,9 @@ const PageCanvas: React.FC<{
           transform: 'none',
         }}
       >
-        {doc.previewUri ? (
+        {current?.uri ? (
           <img
-            src={doc.previewUri}
+            src={current.uri}
             alt={`${doc.fileName} page ${page}`}
             className="w-full block select-none"
             draggable={false}
@@ -68,10 +79,10 @@ const PageCanvas: React.FC<{
         ) : (
           // No raster preview (native text extraction, or a preview not yet
           // rendered). The overlay still positions correctly on a blank page.
-          <div className="w-full" style={{ aspectRatio: '1 / 1.414' }} />
+          <div className="w-full p-5 text-xs text-[var(--muted-foreground)]" style={{ aspectRatio: '1 / 1.414' }}>{current?.error ?? (current ? 'No raster preview for this page. Read the extracted text and source quotation alongside it.' : 'Loading source page…')}</div>
         )}
 
-        {showBoxes &&
+        {showBoxes && current?.uri &&
           blocks.map((b) => {
             const selected = selectedId === b.id;
             return (
@@ -250,7 +261,7 @@ const BlockRow: React.FC<{
  * invented to fill the column.
  */
 export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }) => {
-  const { documents, ingestFiles } = useApp();
+  const { documents, ingestFiles, sourceCitation } = useApp();
 
   // A tab opened without a document is the index, and stays the index. Following
   // whatever was opened last would leave the panel's own `Document` entry showing
@@ -261,6 +272,7 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
   );
 
   const [page, setPage] = useState(1);
+  const citation = sourceCitation && doc?.path.replace(/\\/g,'/').toLowerCase() === sourceCitation.path.replace(/\\/g,'/').toLowerCase() ? sourceCitation : null;
   // Zero means fit-to-pane. This is the useful default in a split viewer: the
   // whole source remains visible even before the user moves either divider.
   const [zoom, setZoom] = useState(0);
@@ -272,6 +284,16 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
   const splitRef = useRef<HTMLDivElement>(null);
   const detailsRef = useRef<HTMLDivElement>(null);
   const resizeStart = useRef<{ x: number; width: number } | null>(null);
+
+  useEffect(() => {
+    if (!doc) return;
+    const targetPage = Math.min(Math.max(1,citation?.page ?? citation?.bbox?.page ?? 1),doc.pageCount);
+    setPage(targetPage);
+    const quote = citation?.snippet.trim().toLowerCase();
+    const match = quote ? doc.blocks.find((b) => b.bbox.page === targetPage && (b.text.toLowerCase().includes(quote) || quote.includes(b.text.trim().toLowerCase()) && b.text.trim().length > 12)) : null;
+    setSelectedId(match?.id ?? null);
+    if (citation) { setSide('blocks'); setShowBoxes(true); }
+  }, [doc, citation]);
 
   const beginDetailsResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -363,6 +385,7 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Toolbar */}
+      {citation && <div className="border-b nerve-border bg-[var(--primary-soft)] p-3 text-xs"><p className="font-medium">Source quotation{citation.page ? ` · page ${citation.page}` : ''}</p><p className="mt-1 select-text">{citation.snippet}</p><p className="mt-1 text-[var(--muted-foreground)]">{selectedId ? 'Matching extracted passage selected below.' : 'No exact extracted passage match. Compare the quotation with the source; no location is inferred.'}</p></div>}
       <div className="px-2.5 py-2 border-b border-[var(--muted)] flex-shrink-0 space-y-1.5">
         <div className="flex items-center justify-between">
           <span className="text-[12px] text-[var(--foreground)] truncate min-w-0" title={doc.path}>
