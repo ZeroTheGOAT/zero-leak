@@ -27,3 +27,15 @@ Use **Workflows → Network** to inspect application HTTP guard decisions and ev
 ## Measure, do not invent
 
 Record elapsed time from each receipt, correct expected observations, incorrect claims, missing findings and citation accuracy. Rehearse repeatedly on the actual demonstration GPU. Keep a recording of a real successful run if the venue allows recorded fallback demonstrations; label recordings explicitly.
+
+## Second scenario: turbine / CDU-4
+
+`turbine-cdu4/` is a second, self-contained scenario with its own narrative
+and evaluation key. Where this folder's documents are the DEMO-SOP-001
+revision story (two image-only PDFs), `turbine-cdu4/` adds a P&ID, a gauge
+photograph, scanned records, CSV thickness logs across two shutdown surveys
+(14 March and 19 September 2026), a spool-replacement execution record and
+four knowledge sources. See `turbine-cdu4/README.md` for ground truth. The
+round-2 log and the execution record were added when the corpus was versioned
+into this folder; the round-1 log and all knowledge files are copies of the
+previously unversioned material.

@@ -1,0 +1,6 @@
+Files mentioning TP-04:
+
+1. thickness-log.csv (line 5)
+   - TP-04,9.5,7.1,2026-03-14
+
+No other files in the open folder mention TP-04.
