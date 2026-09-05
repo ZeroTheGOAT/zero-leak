@@ -1,0 +1,11 @@
+file,objects,types
+Document 6_1.jpg,8,"association:2;class attributes:5;inheritance:1"
+Document 6_2.jpg,7,"association:3;class attributes:4"
+classes7image1.jpeg,5,"association:2;class attributes:3"
+classes8image1.jpeg,5,"association:2;class attributes:3"
+classes8image2.jpeg,7,"association:3;class attributes:1;simple class:3"
+IMG_20210826_123200.jpg,18,"association:9;class attributes:9"
+IMG_20210826_123211.jpg,5,"association:2;class attributes:1;simple class:2"
+IMG_20210903_182816.jpg,9,"association:4;simple class:5"
+IMG_20210903_182827.jpg,6,"association:1;class attributes:3;inheritance:1;simple class:1"
+IMG_20210624_173209.jpg,4,"inheritance:1;simple class:3"
