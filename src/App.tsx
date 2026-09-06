@@ -7,7 +7,6 @@ import { SidebarPeek } from './components/layout/SidebarPeek';
 import { BottomPanel } from './components/layout/BottomPanel';
 import { StatusBar } from './components/layout/StatusBar';
 import { ChatContainer } from './components/chat/ChatContainer';
-import { EmptyState } from './components/chat/EmptyState';
 import { FloatingInput, type ComposerDraft } from './components/chat/FloatingInput';
 import { TaskDock } from './components/chat/TaskDock';
 import { DevServerBar } from './components/chat/DevServerBar';
@@ -142,7 +141,7 @@ export const AppContent: React.FC = () => {
   const sidebarMounted = isSidebarOpen || sidebarLeaving;
 
   return (
-    <div className="servergen-shell h-full w-full flex flex-col font-sans overflow-hidden">
+    <div className="zeroleak-shell h-full w-full flex flex-col font-sans overflow-hidden">
       <TitleBar />
 
       <div
@@ -201,15 +200,11 @@ export const AppContent: React.FC = () => {
                 {panelVisible ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
               </button>
               )}
-              {activeSessionId === null ? (
-                <>
-                  <EmptyState />
-                  <FloatingInput drafts={drafts} setDrafts={setDrafts} layout="docked" />
-                </>
-              ) : isNewChat ? (
-                /* Fresh chat: the centered start screen. Title plus the
-                    composer in the middle of the canvas, project row
-                    attached beneath it — no transcript, no dock. */
+              {activeSessionId === null || isNewChat ? (
+                /* No chat open (e.g. right after deleting one) or a fresh chat:
+                   the centered start screen. Title plus the composer in the
+                   middle of the canvas, project row attached beneath it — no
+                   transcript, no dock, no suggestion cards. */
                 <div className="flex-1 flex flex-col items-center justify-center min-h-0 overflow-y-auto px-4">
                   <h1 className="text-2xl font-medium text-[var(--foreground)] text-center">
                     What should we work on?

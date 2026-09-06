@@ -370,7 +370,7 @@ mod tests {
     /// Ignored by default because the multi-GiB files need not be present on every
     /// developer machine; run it explicitly on a machine with the weights.
     #[test]
-    #[ignore = "needs the real weights under ../../models; run: cargo test --bin servergen-ai -- --ignored gguf::real_gemma_and_cascade"]
+    #[ignore = "needs the real weights under ../../models; run: cargo test --bin zeroleak-ai -- --ignored gguf::real_gemma_and_cascade"]
     fn real_gemma_and_cascade_geometry_are_readable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models");
         let gemma = root.join("gemma-4-e4b/gemma-4-E4B_q4_0-it.gguf");

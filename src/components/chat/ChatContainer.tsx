@@ -681,7 +681,7 @@ const EditingBubble: React.FC<{
               type="button"
               onClick={save}
               disabled={!text.trim() || saving}
-              className="servergen-primary flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
+              className="zeroleak-primary flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
             >
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
               {saving ? 'Resending…' : 'Save & resend'}

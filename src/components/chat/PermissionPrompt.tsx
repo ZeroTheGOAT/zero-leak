@@ -162,7 +162,7 @@ export const PermissionPrompt: React.FC = () => {
             className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
               destructive
                 ? 'bg-[var(--destructive-solid)] text-[var(--destructive-solid-foreground)] hover:brightness-110'
-                : 'servergen-primary hover:brightness-105'
+                : 'zeroleak-primary hover:brightness-105'
             }`}
           >
             Allow once

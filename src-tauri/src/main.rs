@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! Servergen AI — process entry point and transports.
+//! ZeroLeak AI — process entry point and transports.
 //!
 //! This file is deliberately thin. It opens the store, builds the shared state,
 //! starts the router, and attaches transports. It contains no policy and no
@@ -253,7 +253,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("Servergen AI failed to start");
+        .expect("ZeroLeak AI failed to start");
 
     // Teardown lives on `RunEvent::Exit` rather than on a window event, because
     // in headless mode there is no window whose destruction could carry it. The

@@ -1,8 +1,8 @@
 {
-  "name": "servergen-ai",
+  "name": "zeroleak-ai",
   "private": true,
   "version": "0.1.0",
-  "description": "Servergen AI - a local-only agentic workflow workbench",
+  "description": "ZeroLeak AI - a local-only agentic workflow workbench",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -1,6 +1,6 @@
 /*
  * Source-port of Nerve's settings information architecture and presentation
- * primitives for Servergen AI. Nerve Copyright © 2026 ThilinaTLM,
+ * primitives for ZeroLeak AI. Nerve Copyright © 2026 ThilinaTLM,
  * Apache-2.0. See THIRD_PARTY_NOTICES.md.
  */
 import React, { useEffect, useMemo, useState } from 'react';
@@ -131,7 +131,7 @@ const PAGES: NavPage[] = [
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, description: 'Fixed keyboard bindings for the desktop workbench.', sections: [
     { id: 'shortcuts', label: 'Shortcuts' },
   ] },
-  { id: 'storage', label: 'Storage', icon: HardDrive, description: 'Inspect the local-only data owned by Servergen AI.', sections: [
+  { id: 'storage', label: 'Storage', icon: HardDrive, description: 'Inspect the local-only data owned by ZeroLeak AI.', sections: [
     { id: 'storage', label: 'Storage' },
   ] },
   { id: 'system', label: 'System', icon: Server, sections: [
@@ -502,7 +502,7 @@ const DEFAULT_PREFS: WorkbenchPreferences = {
   toolEnabled: {},
   transcriptionModel: 'whisper.cpp-base',
   transcriptionLanguage: 'auto',
-  transcriptionVocabulary: 'Servergen, GGUF, llama.cpp, Zero, P&ID',
+  transcriptionVocabulary: 'ZeroLeak, GGUF, llama.cpp, Zero, P&ID',
   notifications: true,
   sounds: false,
   diagnosticLogs: true,
@@ -516,7 +516,7 @@ const DEFAULT_PREFS: WorkbenchPreferences = {
 function useWorkbenchPreferences() {
   const [value, setValue] = useState<WorkbenchPreferences>(() => {
     try {
-      const raw = localStorage.getItem('servergen.workbench-preferences.v1');
+      const raw = localStorage.getItem('zeroleak.workbench-preferences.v1');
       const parsed: unknown = raw ? JSON.parse(raw) : {};
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return DEFAULT_PREFS;
       const rec = parsed as Record<string, unknown>;
@@ -528,7 +528,7 @@ function useWorkbenchPreferences() {
     }
   });
   useEffect(() => {
-    localStorage.setItem('servergen.workbench-preferences.v1', JSON.stringify(value));
+    localStorage.setItem('zeroleak.workbench-preferences.v1', JSON.stringify(value));
   }, [value]);
   return [value, setValue] as const;
 }
@@ -579,7 +579,7 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
           estimatedVramMb: Number(form.estimatedVramMb),
           fileSizeBytes: Number(form.fileSizeBytes),
           priority: form.priority,
-          note: 'Added from Servergen AI Settings.',
+          note: 'Added from ZeroLeak AI Settings.',
         });
         onClose();
       } catch (reason) {
@@ -682,7 +682,7 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
         {error && <p className="mt-3 rounded-md bg-[var(--destructive-soft)] px-3 py-2 text-xs text-[var(--destructive)]">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Cancel</button>
-          <button disabled={busy} className="servergen-primary h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50"><span className="inline-flex items-center gap-1.5"><Save size={13} />{busy ? 'Adding…' : 'Add model'}</span></button>
+          <button disabled={busy} className="zeroleak-primary h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50"><span className="inline-flex items-center gap-1.5"><Save size={13} />{busy ? 'Adding…' : 'Add model'}</span></button>
         </div>
       </form>
     </div>
@@ -760,7 +760,7 @@ const VaultDialog: React.FC<{
         {error && <p className="mt-3 rounded-md bg-[var(--destructive-soft)] px-3 py-2 text-xs text-[var(--destructive)]">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Cancel</button>
-          <button disabled={busy} className={`h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50 ${mode === 'enable' ? 'servergen-primary' : 'border nerve-border hover:bg-[var(--accent)]'}`}>
+          <button disabled={busy} className={`h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50 ${mode === 'enable' ? 'zeroleak-primary' : 'border nerve-border hover:bg-[var(--accent)]'}`}>
             {busy ? (mode === 'enable' ? 'Sealing…' : 'Restoring…') : mode === 'enable' ? 'Enable vault' : 'Disable vault'}
           </button>
         </div>
@@ -937,7 +937,7 @@ export const SettingsView: React.FC = () => {
   const testWebSearch = async () => {
     setIntegrationStatus((current) => ({ ...current, web: 'Checking…' }));
     try {
-      await core.integrations.testWebSearch('Servergen AI connectivity test');
+      await core.integrations.testWebSearch('ZeroLeak AI connectivity test');
       setIntegrationStatus((current) => ({ ...current, web: 'Search connection works' }));
     } catch (error) {
       setIntegrationStatus((current) => ({
@@ -1015,8 +1015,7 @@ export const SettingsView: React.FC = () => {
             </Row>
           </Section>
           <Section id="desktop" title="Desktop">
-            <Row label="Header style" description="Auto follows the operating system. Choose another style to override it."><Select value={appearance.headerStyle} onChange={(e) => setAppearanceValue('headerStyle', e.target.value as AppearancePreferences['headerStyle'])}><option value="auto">Auto</option><option value="windows">Windows</option><option value="macos">macOS</option><option value="linux">Linux</option></Select></Row>
-            <Row label="Close to system tray" description="Hide Servergen AI in the tray instead of quitting."><Toggle checked={appearance.closeToTray} onChange={(value) => setAppearanceValue('closeToTray', value)} /></Row>
+            <Row label="Close to system tray" description="Hide ZeroLeak AI in the tray instead of quitting."><Toggle checked={appearance.closeToTray} onChange={(value) => setAppearanceValue('closeToTray', value)} /></Row>
           </Section>
         </>;
 
@@ -1025,11 +1024,11 @@ export const SettingsView: React.FC = () => {
           <Section id="local-runtimes" title="Local runtimes" description="Only runtimes permitted by this air-gapped workflow are shown.">
             <Row label="llama.cpp" description="Loopback-native GGUF inference for reasoning, coding, vision, OCR, and embeddings."><span className="rounded-full bg-[var(--success-soft)] px-2 py-1 text-xs text-[var(--success)]">Configured</span></Row>
             <Row label="Python sidecars" description="Local specialist runtimes for document processing, data work, and speech-to-text."><span className="rounded-full bg-[var(--success-soft)] px-2 py-1 text-xs text-[var(--success)]">Available</span></Row>
-            <Row label="Public cloud providers" description="Hidden and unavailable. Servergen AI does not expose API keys or public inference providers."><span className="rounded-full bg-[var(--muted)] px-2 py-1 text-xs text-[var(--muted-foreground)]">Blocked</span></Row>
+            <Row label="Public cloud providers" description="Hidden and unavailable. ZeroLeak AI does not expose API keys or public inference providers."><span className="rounded-full bg-[var(--muted)] px-2 py-1 text-xs text-[var(--muted-foreground)]">Blocked</span></Row>
           </Section>
           <Section id="local-models" title="Local models">
             <Row label="Models directory" description="All registered weights must resolve to files on this device."><CommitInput className="w-80 font-mono" value={settings.modelsDirectory} onCommit={(raw) => setApp('modelsDirectory', raw)} /></Row>
-            <Row label="Registered models" description={`${catalogueModels.length} local definitions in the canonical catalogue.`}><button onClick={() => setAddModelOpen(true)} className="servergen-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add model</button></Row>
+            <Row label="Registered models" description={`${catalogueModels.length} local definitions in the canonical catalogue.`}><button onClick={() => setAddModelOpen(true)} className="zeroleak-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add model</button></Row>
             <Row label="llama-server path"><CommitInput className="w-80 font-mono" value={settings.llamaServerPath} onCommit={(raw) => setApp('llamaServerPath', raw)} /></Row>
           </Section>
           <Section id="private-endpoint" title="Private endpoint" description="Optional on-prem inference only; public endpoints remain blocked.">
@@ -1043,7 +1042,7 @@ export const SettingsView: React.FC = () => {
         return <>
           <Section id="model-catalogue" title="Scoped Models" description="Load, unload, inspect, and route the local model catalogue.">
             <div className="h-[520px] min-h-0 overflow-hidden flex"><ModelManagerView /></div>
-            <div className="flex justify-end border-t nerve-border p-3"><button onClick={() => setAddModelOpen(true)} className="servergen-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add local model</button></div>
+            <div className="flex justify-end border-t nerve-border p-3"><button onClick={() => setAddModelOpen(true)} className="zeroleak-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add local model</button></div>
           </Section>
           <Section id="runtime" title="Runtime">
             <Row label="Router port" description={`The bind host is fixed at ${ROUTER_BIND_HOST} — the models stay unreachable from off this machine. The port applies the next time the router starts.`}><CommitInput className="w-24 font-mono" type="number" min="1024" max="65535" value={settings.routerPort} onCommit={(raw) => { const n = Number(raw); if (Number.isFinite(n)) setApp('routerPort', n); }} /></Row>
@@ -1131,7 +1130,7 @@ export const SettingsView: React.FC = () => {
                 <button
                   onClick={saveGuardRule}
                   disabled={!guardDraft.name.trim() || !guardDraft.pattern.trim() || (guardDraft.kind === 'protect_path' && !/^[a-zA-Z]:[\\/]/.test(guardDraft.pattern.trim()))}
-                  className="servergen-primary sm:col-span-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-40"
+                  className="zeroleak-primary sm:col-span-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-40"
                 >
                   <ShieldAlert size={13} /> Add safety rule
                 </button>
@@ -1152,7 +1151,7 @@ export const SettingsView: React.FC = () => {
           <Section id="core" title="Core tools" description="Built into the local harness and constrained by workspace permissions.">
             {TOOL_GROUPS.slice(0, 7).map(([id, label, description, tools]) => <Row key={id} label={label} description={`${description} ${tools}.`}><Toggle checked={prefs.toolEnabled[id] ?? true} onChange={(value) => setTool(id, value)} /></Row>)}
           </Section>
-          <Section id="workflow" title="Workflow tools" description="Additional local tools selected for Servergen AI.">
+          <Section id="workflow" title="Workflow tools" description="Additional local tools selected for ZeroLeak AI.">
             {TOOL_GROUPS.slice(7).map(([id, label, description, tools]) => <Row key={id} label={label} description={`${description} ${tools}.`}><Toggle checked={prefs.toolEnabled[id] ?? true} onChange={(value) => setTool(id, value)} /></Row>)}
           </Section>
           <Section id="mcp" title="MCP servers" description="Local stdio servers only. Each launch and tool call requires approval in Agent mode.">
@@ -1188,7 +1187,7 @@ export const SettingsView: React.FC = () => {
                 <button
                   onClick={saveMcpServer}
                   disabled={!mcpDraft.name.trim() || !mcpDraft.command.trim()}
-                  className="servergen-primary sm:col-span-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-40"
+                  className="zeroleak-primary sm:col-span-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-40"
                 >
                   <PlugZap size={13} /> Add MCP server
                 </button>
@@ -1229,7 +1228,7 @@ export const SettingsView: React.FC = () => {
         </>;
 
       case 'skills':
-        return <Section id="skills" title="Skills" description="Servergen keeps instructions, knowledge, and memories local and project-scoped.">
+        return <Section id="skills" title="Skills" description="ZeroLeak keeps instructions, knowledge, and memories local and project-scoped.">
           <Row label="Knowledge resources" description={`${knowledgeStats.documents} documents · ${knowledgeStats.chunks.toLocaleString()} indexed passages`}><button onClick={() => openSettings('knowledge')} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Manage</button></Row>
           <Row label="Memory resources" description={`${memories.length} durable global and project-scoped memories`}><button onClick={() => openSettings('memories')} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Manage</button></Row>
           <Row label="Project instructions" description={activeWorkspace ? `Isolated to ${activeWorkspace.name}` : 'Open a project to manage its AGENTS.md'}><span className="text-xs text-[var(--muted-foreground)]">AGENTS.md</span></Row>
@@ -1408,7 +1407,7 @@ export const SettingsView: React.FC = () => {
                   <span className="rounded-full bg-[var(--muted)] px-2 py-1 text-xs text-[var(--muted-foreground)]">Disabled</span>
                 </Row>
                 <Row label="Seal confidential mirrors" description="Seals every existing memory and transcript mirror to ciphertext and pauses further plain-text writes until the vault is disabled. Choose a passphrase of at least 10 characters — it is never stored.">
-                  <button onClick={() => setVaultDialog('enable')} className="servergen-primary h-8 rounded-md px-3 text-sm font-medium">Enable vault</button>
+                  <button onClick={() => setVaultDialog('enable')} className="zeroleak-primary h-8 rounded-md px-3 text-sm font-medium">Enable vault</button>
                 </Row>
               </>
             )}
@@ -1487,7 +1486,7 @@ export const SettingsView: React.FC = () => {
             <Row label="Security model"><span className={`text-xs ${settings.blockPublicInternet ? 'text-[var(--success)]' : 'text-[var(--warning)]'}`}>{settings.blockPublicInternet ? 'Air-gapped' : 'Networked — public egress permitted by Settings'}</span></Row>
           </Section>
           <Section id="system-information" title="System information">
-            <Row label="Application"><span className="text-xs text-[var(--muted-foreground)]">Servergen AI 0.1.0</span></Row>
+            <Row label="Application"><span className="text-xs text-[var(--muted-foreground)]">ZeroLeak AI 0.1.0</span></Row>
             <Row label="GPU" description={hardware.gpuName}><span className="font-mono text-xs text-[var(--muted-foreground)]">{Math.round(hardware.vramBudgetMb / 1024)} GB usable</span></Row>
             <Row label="CPU" description={hardware.cpuName}><Cpu size={15} className="text-[var(--muted-foreground)]" /></Row>
           </Section>
@@ -1532,7 +1531,6 @@ export const SettingsView: React.FC = () => {
               <h1 className="text-lg font-semibold">{activePage.label}</h1>
               {activePage.description && <p className="mt-1 text-xs text-[var(--muted-foreground)]">{activePage.description}</p>}
             </div>
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]"><Check size={12} className="text-[var(--success)]" />Saved locally</span>
           </header>
           {renderPage()}
         </div>

@@ -5143,47 +5143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "servergen-ai"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "axum",
- "base64 0.22.1",
- "calamine",
- "chrono",
- "docx-rs",
- "futures-util",
- "getrandom 0.2.17",
- "image",
- "lopdf 0.44.0",
- "notify",
- "pdf-extract",
- "printpdf",
- "quick-xml 0.42.0",
- "reqwest 0.12.28",
- "rusqlite",
- "rust_xlsxwriter",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "similar",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tokio",
- "tower-http 0.7.1",
- "uuid",
- "walkdir",
- "windows 0.61.3",
- "winreg 0.52.0",
- "zeroize",
- "zip",
-]
-
-[[package]]
 name = "servo_arc"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7628,6 +7587,47 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zeroleak-ai"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "axum",
+ "base64 0.22.1",
+ "calamine",
+ "chrono",
+ "docx-rs",
+ "futures-util",
+ "getrandom 0.2.17",
+ "image",
+ "lopdf 0.44.0",
+ "notify",
+ "pdf-extract",
+ "printpdf",
+ "quick-xml 0.42.0",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tokio",
+ "tower-http 0.7.1",
+ "uuid",
+ "walkdir",
+ "windows 0.61.3",
+ "winreg 0.52.0",
+ "zeroize",
+ "zip",
+]
 
 [[package]]
 name = "zerotrie"

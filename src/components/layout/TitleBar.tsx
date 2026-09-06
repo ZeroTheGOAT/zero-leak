@@ -1,5 +1,5 @@
 /*
- * Source-port of Nerve's titlebar composition for Servergen AI.
+ * Source-port of Nerve's titlebar composition for ZeroLeak AI.
  * Nerve Copyright © 2026 ThilinaTLM, Apache-2.0. See THIRD_PARTY_NOTICES.md.
  *
  * ChatGPT-style menu bar: sidebar toggle, back/forward, File / Edit / View.
@@ -517,7 +517,7 @@ export const TitleBar: React.FC = () => {
         <button
           onClick={() => openTab('audit', 'Logs')}
           className="grid size-6 place-items-center rounded-md text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-          title="Open Servergen logs"
+          title="Open ZeroLeak logs"
         >
           <Logs size={12} strokeWidth={2.1} />
         </button>

@@ -581,7 +581,7 @@ mod tests {
     impl TempRoot {
         fn new() -> Self {
             let base = std::env::temp_dir().join(format!(
-                "servergen-vault-test-{}-{}",
+                "zeroleak-vault-test-{}-{}",
                 std::process::id(),
                 crate::state::new_id("tmp")
             ));

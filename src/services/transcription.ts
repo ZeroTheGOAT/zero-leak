@@ -1,6 +1,6 @@
 import { call } from './transport';
 
-const PREFERENCES_KEY = 'servergen.workbench-preferences.v1';
+const PREFERENCES_KEY = 'zeroleak.workbench-preferences.v1';
 
 export interface TranscriptionPreferences {
   modelId: string;

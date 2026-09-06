@@ -64,7 +64,7 @@ export const PlanHandoff: React.FC<{ items: PlanItem[] }> = ({ items }) => {
         <button
           onClick={() => void start()}
           disabled={starting}
-          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11.5px] font-medium servergen-primary transition hover:brightness-105 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11.5px] font-medium zeroleak-primary transition hover:brightness-105 disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Start working'}
           <ArrowRight size={12} />

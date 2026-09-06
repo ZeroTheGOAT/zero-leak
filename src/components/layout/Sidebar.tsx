@@ -466,9 +466,9 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
       <div className="flex h-[52px] flex-shrink-0 items-center justify-between px-3">
         <span
           className="min-w-0 truncate px-1 py-1 text-[18px] font-semibold tracking-[-0.01em] text-[var(--foreground)]"
-          title="Servergen AI"
+          title="ZeroLeak AI"
         >
-          Servergen AI
+          ZeroLeak AI
         </span>
 
         <div className="flex flex-shrink-0 items-center">

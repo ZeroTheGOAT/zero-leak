@@ -54,6 +54,12 @@ import type {
 } from '../types';
 import * as core from '../services/core';
 import {
+  readAppearance,
+  resetFontSize,
+  stepFontSize,
+  uiZoomFor,
+} from '../services/appearance';
+import {
   DEFAULT_SANDBOX_POLICY,
   DEFAULT_SETTINGS,
   INITIAL_RUNTIME,
@@ -313,9 +319,12 @@ interface AppContextValue {
   /** Pinned run summary (the Tasks checklist docked above the composer). */
   showPinnedSummary: boolean;
   setShowPinnedSummary: (v: boolean) => void;
-  /** UI zoom factor (1 = actual size). Applied to the shell via CSS zoom. */
+  /**
+   * UI zoom factor (1 = actual size), derived from the appearance font size.
+   * There is no separate zoom: stepping it (Ctrl+= / Ctrl+- / Ctrl+0) changes
+   * that one preference, which renders through the compensated mount zoom.
+   */
   zoomLevel: number;
-  setZoomLevel: (v: number) => void;
   zoomIn: () => void;
   zoomOut: () => void;
   resetZoom: () => void;
@@ -563,7 +572,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   /* Shell layout — menu-bar driven, persisted like the composer mode. */
   const [isSidebarOpen, setIsSidebarOpenState] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('servergen.sidebar-open.v1') !== '0';
+      return localStorage.getItem('zeroleak.sidebar-open.v1') !== '0';
     } catch {
       return true;
     }
@@ -600,7 +609,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setIsSidebarOpenState(v);
     try {
-      localStorage.setItem('servergen.sidebar-open.v1', v ? '1' : '0');
+      localStorage.setItem('zeroleak.sidebar-open.v1', v ? '1' : '0');
     } catch {
       /* Storage blocked: the sidebar simply will not survive a reload. */
     }
@@ -615,7 +624,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const [isBottomPanelOpen, setIsBottomPanelOpenState] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('servergen.bottom-panel-open.v1') === '1';
+      return localStorage.getItem('zeroleak.bottom-panel-open.v1') === '1';
     } catch {
       return false;
     }
@@ -623,14 +632,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setIsBottomPanelOpen = useCallback((v: boolean) => {
     setIsBottomPanelOpenState(v);
     try {
-      localStorage.setItem('servergen.bottom-panel-open.v1', v ? '1' : '0');
+      localStorage.setItem('zeroleak.bottom-panel-open.v1', v ? '1' : '0');
     } catch {
       /* Storage blocked: the dock simply will not survive a reload. */
     }
   }, []);
   const [showPinnedSummary, setShowPinnedSummaryState] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('servergen.pinned-summary.v1') !== '0';
+      return localStorage.getItem('zeroleak.pinned-summary.v1') !== '0';
     } catch {
       return true;
     }
@@ -638,64 +647,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setShowPinnedSummary = useCallback((v: boolean) => {
     setShowPinnedSummaryState(v);
     try {
-      localStorage.setItem('servergen.pinned-summary.v1', v ? '1' : '0');
+      localStorage.setItem('zeroleak.pinned-summary.v1', v ? '1' : '0');
     } catch {
       /* Storage blocked: the preference simply will not survive a reload. */
     }
   }, []);
-  const [zoomLevel, setZoomLevelState] = useState<number>(() => {
-    try {
-      const stored = Number(localStorage.getItem('servergen.ui-zoom.v1'));
-      if (Number.isFinite(stored) && stored >= 0.5 && stored <= 2) return stored;
-    } catch {
-      /* fall through to default */
-    }
-    return 1;
-  });
-  const setZoomLevel = useCallback((v: number) => {
-    const next = Math.min(2, Math.max(0.5, Math.round(v * 100) / 100));
-    setZoomLevelState(next);
-    try {
-      localStorage.setItem('servergen.ui-zoom.v1', String(next));
-    } catch {
-      /* Storage blocked: the zoom simply will not survive a reload. */
-    }
+  /* Interface scaling. One mechanism only: the appearance font size, which
+   * applies a compensated zoom on the #root mount (see appearance.ts). The
+   * old Ctrl+/- body zoom multiplied with that mount zoom — viewport-unit
+   * compensation cancels exactly one zoom, not two — so the shell rendered
+   * larger than the window and buttons fell off-screen. zoomLevel here is a
+   * derived view of the same preference, kept for the TitleBar menu. */
+  const [fontSize, setFontSizeState] = useState<number>(() => readAppearance().fontSize);
+  const zoomLevel = uiZoomFor(fontSize);
+  useEffect(() => {
+    const onAppearance = () => setFontSizeState(readAppearance().fontSize);
+    window.addEventListener('zeroleak:appearance', onAppearance);
+    return () => window.removeEventListener('zeroleak:appearance', onAppearance);
   }, []);
   const zoomIn = useCallback(() => {
-    setZoomLevel(Math.min(2, Math.round((zoomLevel + 0.1) * 100) / 100));
-  }, [zoomLevel, setZoomLevel]);
+    stepFontSize(1);
+  }, []);
   const zoomOut = useCallback(() => {
-    setZoomLevel(Math.max(0.5, Math.round((zoomLevel - 0.1) * 100) / 100));
-  }, [zoomLevel, setZoomLevel]);
+    stepFontSize(-1);
+  }, []);
   const resetZoom = useCallback(() => {
-    setZoomLevel(1);
-  }, [setZoomLevel]);
-
-  /* CSS `zoom` is honoured by the desktop webview (Chromium) and by Chrome /
-   * Edge in the browser tab. Applied to <body> so menus, sidebar and chat
-   * scale together; reset removes the property entirely (actual size). */
-  useEffect(() => {
-    try {
-      if (Math.abs(zoomLevel - 1) < 0.001) document.body.style.removeProperty('zoom');
-      else (document.body.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(zoomLevel);
-    } catch {
-      /* A webview without zoom support keeps actual size. */
-    }
-    return () => {
-      try {
-        document.body.style.removeProperty('zoom');
-      } catch {
-        /* ignore */
-      }
-    };
-  }, [zoomLevel]);
+    resetFontSize();
+  }, []);
 
   /* Core */
   const [coreStatus, setCoreStatus] = useState<CoreStatus>({
     state: 'checking',
     ipc: false,
     router: false,
-    detail: 'Checking for the Servergen core…',
+    detail: 'Checking for the ZeroLeak core…',
   });
   const [failures, setFailures] = useState<CoreFailure[]>([]);
 
@@ -768,7 +753,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setMode = useCallback((m: AgentMode) => {
     setModeState(m);
     try {
-      localStorage.setItem('servergen.composer-mode.v1', m);
+      localStorage.setItem('zeroleak.composer-mode.v1', m);
     } catch {
       /* A browser with storage blocked still gets the mode for this session. */
     }
@@ -977,7 +962,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Their own last choice outranks the default: see the note on `setMode`.
       let restored: AgentMode | null = null;
       try {
-        const stored = localStorage.getItem('servergen.composer-mode.v1');
+        const stored = localStorage.getItem('zeroleak.composer-mode.v1');
         if (stored === 'plan' || stored === 'agent') restored = stored;
       } catch {
         /* Storage blocked: the default mode is used, as before. */
@@ -1614,7 +1599,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const s: Session = {
       id: uid('sess'),
       workspaceId,
-      title: workspaceId ? 'New project chat' : 'New personal chat',
+      title: workspaceId ? 'New project chat' : 'New chat',
       mode,
       useMemories: true,
       contributeMemories: true,
@@ -1677,8 +1662,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let savedSessionId: string | null = null;
     let savedWorkspaceId: string | null = null;
     try {
-      savedSessionId = localStorage.getItem('servergen.active-session.v1');
-      savedWorkspaceId = localStorage.getItem('servergen.active-workspace.v1');
+      savedSessionId = localStorage.getItem('zeroleak.active-session.v1');
+      savedWorkspaceId = localStorage.getItem('zeroleak.active-workspace.v1');
     } catch {
       /* Storage blocked: fall through to the default selection. */
     }
@@ -1707,8 +1692,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!restoredSelection.current) return;
     try {
-      if (activeSessionId) localStorage.setItem('servergen.active-session.v1', activeSessionId);
-      else localStorage.removeItem('servergen.active-session.v1');
+      if (activeSessionId) localStorage.setItem('zeroleak.active-session.v1', activeSessionId);
+      else localStorage.removeItem('zeroleak.active-session.v1');
     } catch {
       /* Storage blocked: the chat simply will not survive a reload. */
     }
@@ -1717,8 +1702,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!restoredSelection.current) return;
     try {
-      if (activeWorkspaceId) localStorage.setItem('servergen.active-workspace.v1', activeWorkspaceId);
-      else localStorage.removeItem('servergen.active-workspace.v1');
+      if (activeWorkspaceId) localStorage.setItem('zeroleak.active-workspace.v1', activeWorkspaceId);
+      else localStorage.removeItem('zeroleak.active-workspace.v1');
     } catch {
       /* Storage blocked: the project simply will not survive a reload. */
     }
@@ -2603,7 +2588,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showPinnedSummary,
       setShowPinnedSummary,
       zoomLevel,
-      setZoomLevel,
       zoomIn,
       zoomOut,
       resetZoom,
@@ -2755,7 +2739,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showPinnedSummary,
       setShowPinnedSummary,
       zoomLevel,
-      setZoomLevel,
       zoomIn,
       zoomOut,
       resetZoom,

@@ -100,7 +100,7 @@ code, pre {
   font-family: var(--font-mono) !important;
 }
 
-.servergen-shell {
+.zeroleak-shell {
   background: var(--background);
   color: var(--foreground);
 }
@@ -146,12 +146,12 @@ code, pre {
   color: var(--foreground);
 }
 
-.servergen-primary {
+.zeroleak-primary {
   background: var(--primary);
   color: var(--primary-foreground);
 }
 
-.servergen-primary:hover {
+.zeroleak-primary:hover {
   filter: brightness(1.06);
 }
 

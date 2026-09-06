@@ -212,7 +212,7 @@ export const CreateProjectModal: React.FC = () => {
             <button
               type="submit"
               disabled={!name.trim() || busy}
-              className="min-w-32 h-10 px-4 rounded-xl servergen-primary text-[12px] font-medium flex items-center justify-center gap-2 transition disabled:opacity-35 disabled:cursor-not-allowed"
+              className="min-w-32 h-10 px-4 rounded-xl zeroleak-primary text-[12px] font-medium flex items-center justify-center gap-2 transition disabled:opacity-35 disabled:cursor-not-allowed"
             >
               {busy && <Loader2 size={13} className="animate-spin" />}
               <span>{busy ? 'Creating…' : 'Create project'}</span>

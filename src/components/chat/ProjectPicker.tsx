@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, Folder, FolderOpen, Plus, Search } from 'lucide-react';
+import { Check, Folder, FolderOpen, FolderX, Plus, Search } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 /**
@@ -8,7 +8,8 @@ import { useApp } from '../../context/AppContext';
  * A personal chat (no project) is legitimate: plain questions send with
  * `workspaceId: null` and the core answers them. File work needs a folder,
  * so this control lets the operator attach the empty chat to a project —
- * or create one — before (or when) that work is asked for.
+ * or create one, or detach it again — before (or when) that work is asked
+ * for.
  *
  * Names only, never folder paths: the button and every row show the project
  * name and nothing else.
@@ -70,6 +71,16 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
     setOpen(false);
   };
 
+  // The mirror of `choose`: back to a personal chat. Clearing the session
+  // binding matters as much as the active scope — the core reads the former
+  // on the next turn, so leaving it set would quietly keep the chat in the
+  // project.
+  const unchoose = () => {
+    if (activeSessionId) setSessionWorkspace(activeSessionId, null);
+    else setActiveWorkspaceId(null);
+    setOpen(false);
+  };
+
   const label = activeWorkspace ? activeWorkspace.name : 'Choose project';
 
   return (
@@ -95,7 +106,7 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
         <div
           role="listbox"
           aria-label="Choose project"
-          className="absolute bottom-full z-50 mb-2 w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] py-1 text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover left-0 origin-bottom-left"
+          className="absolute top-full z-50 mt-2 w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] py-1 text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover left-0 origin-top-left"
         >
           <div className="px-2 pb-1 pt-1.5">
             <div className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-1.5">
@@ -111,7 +122,9 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
               />
             </div>
           </div>
-          <div className="max-h-56 overflow-y-auto px-1 pb-1">
+          {/* Four rows at a time: rows are locked to h-8 (32px), so the
+              8rem cap fits exactly four before the scroller kicks in. */}
+          <div className="max-h-32 overflow-y-auto px-1 mb-1">
             {filtered.map((w) => {
               const selected = w.id === activeWorkspaceId;
               return (
@@ -122,7 +135,7 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
                   aria-selected={selected}
                   onClick={() => choose(w.id)}
                   title={w.name}
-                  className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition hover:bg-[var(--accent)] ${
+                  className={`flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-xs transition hover:bg-[var(--accent)] ${
                     selected ? 'bg-[var(--accent)]' : ''
                   }`}
                 >
@@ -138,7 +151,7 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
               </p>
             )}
           </div>
-          <div className="border-t border-[var(--border)] p-1">
+          <div className="menu-divider border-t border-[var(--border)] p-1">
             <button
               type="button"
               onClick={() => {
@@ -150,6 +163,19 @@ export const ProjectPicker: React.FC<{ align?: 'left' | 'right' }> = ({ align = 
               <Plus size={13} />
               <span>New project</span>
             </button>
+            {/* Only offered while a project is attached — there is nothing
+                to detach otherwise. */}
+            {activeWorkspace && (
+              <button
+                type="button"
+                onClick={unchoose}
+                title="Detach the chat from the project"
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              >
+                <FolderX size={13} className="flex-shrink-0" />
+                <span>Don't work in a project</span>
+              </button>
+            )}
           </div>
         </div>
       )}

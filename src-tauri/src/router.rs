@@ -2005,7 +2005,7 @@ mod preset_ini {
     #[test]
     fn a_moved_models_folder_is_rerendered_under_the_new_root() {
         let base = std::env::temp_dir().join(format!(
-            "servergen-moved-models-{}",
+            "zeroleak-moved-models-{}",
             uuid::Uuid::new_v4()
         ));
         let cfg = base.join("config");
@@ -2055,7 +2055,7 @@ mod preset_ini {
     #[test]
     fn a_preset_never_points_at_weights_that_moved_away() {
         let base = std::env::temp_dir().join(format!(
-            "servergen-gone-weights-{}",
+            "zeroleak-gone-weights-{}",
             uuid::Uuid::new_v4()
         ));
         let cfg = base.join("config");

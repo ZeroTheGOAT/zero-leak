@@ -125,7 +125,7 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
             onClick={submit}
             disabled={!answer.trim()}
             aria-label="Send your answer to the agent"
-            className="rounded-md px-3 py-1.5 text-xs font-medium servergen-primary transition hover:brightness-105 disabled:opacity-40 disabled:pointer-events-none"
+            className="rounded-md px-3 py-1.5 text-xs font-medium zeroleak-primary transition hover:brightness-105 disabled:opacity-40 disabled:pointer-events-none"
           >
             Send answer
           </button>

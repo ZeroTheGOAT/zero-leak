@@ -1,5 +1,5 @@
 /*
- * Composer structure source-ported from Nerve for Servergen AI.
+ * Composer structure source-ported from Nerve for ZeroLeak AI.
  * Nerve Copyright © 2026 ThilinaTLM, Apache-2.0. See THIRD_PARTY_NOTICES.md.
  */
 import React, { useEffect, useRef, useState } from 'react';
@@ -172,11 +172,6 @@ export const FloatingInput: React.FC<{
   useEffect(() => {
     if (!isRunning) setStopping(false);
   }, [isRunning]);
-
-  // Whether this chat has a project attached. Null means a personal chat —
-  // every send goes out as-is, exactly like a regular personal chat, with no
-  // project prompt in the way.
-  const hasProject = activeWorkspace !== null;
 
   const clearDraft = () => {
     setDrafts((current) => {
@@ -559,7 +554,7 @@ export const FloatingInput: React.FC<{
             onPaste={onComposerPaste}
             rows={2}
             disabled={disabled}
-            placeholder={disabled ? 'The local core is not attached' : attached.length > 0 ? 'Tell the agent what to do with the attached files' : 'Ask the local Servergen agent'}
+            placeholder={disabled ? 'The local core is not attached' : attached.length > 0 ? 'Tell the agent what to do with the attached files' : 'Ask the local ZeroLeak agent'}
             className="min-h-[5.8rem] w-full resize-none bg-transparent px-4 pb-[2.4rem] pt-[1.4rem] text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none disabled:cursor-not-allowed disabled:opacity-60"
           />
 
@@ -614,11 +609,6 @@ export const FloatingInput: React.FC<{
                 </div>
               )}
             </div>
-            {!hasProject && (
-              <span className="hidden text-[10px] text-[var(--muted-foreground)] sm:inline">
-                Personal chat
-              </span>
-            )}
           </div>
 
           <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1.5">
@@ -669,7 +659,7 @@ export const FloatingInput: React.FC<{
                 type="button"
                 onClick={() => void submit()}
                 disabled={(!text.trim() && voiceState === 'idle') || disabled || submitting}
-                className="servergen-primary grid size-8 place-items-center rounded-full shadow-sm disabled:cursor-not-allowed disabled:opacity-30"
+                className="zeroleak-primary grid size-8 place-items-center rounded-full shadow-sm disabled:cursor-not-allowed disabled:opacity-30"
                 title={voiceState === 'idle' ? 'Send (Enter)' : 'Finish dictation and send automatically'}
               >
                 {submitting || sendAfterVoice ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} strokeWidth={2.4} />}

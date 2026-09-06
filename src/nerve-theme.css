@@ -1,5 +1,5 @@
 /*
- * Modified for Servergen AI from Nerve's design tokens.
+ * Modified for ZeroLeak AI from Nerve's design tokens.
  * Original work Copyright © 2026 ThilinaTLM, Apache-2.0.
  *
  * Design tokens and Tailwind theme mapping.
@@ -645,6 +645,18 @@
 .policy-row { transition: background-color 120ms ease; }
 .policy-row:hover { background-color: color-mix(in oklab, var(--foreground) 8%, transparent); }
 .policy-row-active, .policy-row-active:hover { background-color: color-mix(in oklab, var(--foreground) 14%, transparent); }
+
+/*
+ * Popover menu dividers. Same story once more: Zero's --border (#2e2e2e dark,
+ * #e5e5e5 light) sits within a hair of the popover fill (#2f2f2f / #ffffff),
+ * so the single line above a popover's footer rows vanishes. Tint with the
+ * foreground instead — a touch stronger than the rows, a hairline needs it —
+ * which reads on every theme.
+ */
+:root[data-theme="zero"] .menu-divider,
+[data-theme-preview="zero"] .menu-divider {
+  border-color: color-mix(in oklab, var(--foreground) 18%, transparent);
+}
 
 /* color-scheme drives native scrollbars, form controls and caret. applyAppearance()
    also sets it inline; these rules keep it right before React mounts. */

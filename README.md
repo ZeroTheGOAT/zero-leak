@@ -1,6 +1,6 @@
-# Servergen AI — Local Agentic Workflow Workbench
+# ZeroLeak AI — Local Agentic Workflow Workbench
 
-**Servergen AI** is an offline, air-gapped desktop agentic workflow workstation designed for organizations where source code and sensitive documents must never leave local infrastructure.
+**ZeroLeak AI** is an offline, air-gapped desktop agentic workflow workstation designed for organizations where source code and sensitive documents must never leave local infrastructure.
 
 For problem statement **26117**, open **Workflows** in the title bar. The [industrial workflow guide](MRPL_WORKFLOWS.md) covers inspection packages, verified dashboards, evidence, receipts, readiness and network checks. [Synthetic rehearsal inputs](examples/mrpl-demo/README.md) and [open-dataset P&ID and UML samples](examples/open-datasets/README.md) are included.
 

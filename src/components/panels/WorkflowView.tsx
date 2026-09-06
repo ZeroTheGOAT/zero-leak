@@ -82,7 +82,7 @@ export const WorkflowView: React.FC = () => {
           </div>
           <label className="block mt-4 text-xs">Additional instructions<textarea value={draft.notes} onChange={(e) => setDraft({ notes: e.target.value })} rows={3} placeholder="Equipment scope, intended reader, or acceptance criteria" className="mt-2 w-full rounded-lg border nerve-border bg-[var(--background)] p-2 text-sm select-text" /></label>
           <details className="mt-3 text-xs text-[var(--muted-foreground)]"><summary className="cursor-pointer">Review workflow instructions</summary><p className="mt-2 whitespace-pre-wrap leading-relaxed select-text">{workflowPrompt(kind,draft.notes)}</p></details>
-          <button className={`${button} servergen-primary mt-4 w-full`} disabled={busy || offline || isRunning || !activeWorkspace || draft.files.length < workflow.minimum} onClick={() => void launch()}>{busy ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}Start in this task</button>
+          <button className={`${button} zeroleak-primary mt-4 w-full`} disabled={busy || offline || isRunning || !activeWorkspace || draft.files.length < workflow.minimum} onClick={() => void launch()}>{busy ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}Start in this task</button>
           <p className="mt-2 text-xs text-[var(--muted-foreground)]">{!activeWorkspace ? 'Open a project first.' : isRunning ? 'Wait for this task to finish.' : `Agent mode · your permission rules apply · ${draft.files.length} source files`}</p>
         </div>
       </>}

@@ -1,7 +1,7 @@
 [package]
-name = "servergen-ai"
+name = "zeroleak-ai"
 version = "0.1.0"
-description = "Servergen AI - a local-only agentic workflow workstation for confidential document, code and drawing work"
+description = "ZeroLeak AI - a local-only agentic workflow workstation for confidential document, code and drawing work"
 authors = ["Hari Prasad"]
 edition = "2021"
 

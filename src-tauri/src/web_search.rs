@@ -20,7 +20,7 @@ use crate::state::AppState;
 use crate::types::{WebSearchMode, WebSearchProvider};
 
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
-const USER_AGENT: &str = "Servergen-AI/0.1 local web search";
+const USER_AGENT: &str = "ZeroLeak-AI/0.1 local web search";
 
 #[derive(Debug, Clone)]
 struct SearchHit {

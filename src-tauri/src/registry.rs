@@ -1394,7 +1394,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn a_local_model_is_persisted_with_a_portable_root() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-model-catalogue-{}",
+            "zeroleak-model-catalogue-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary catalogue directory");
@@ -1422,7 +1422,7 @@ mod local_model_catalogue_tests {
         let mut registry = Registry {
             models: Vec::new(),
             rules: routing_rules(),
-            path: std::env::temp_dir().join("unused-servergen-catalogue.json"),
+            path: std::env::temp_dir().join("unused-zeroleak-catalogue.json"),
             ctx_override: std::collections::HashMap::new(),
         };
         let error = registry
@@ -1450,7 +1450,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn scanned_document_worker_never_becomes_the_turn_coordinator() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-agent-route-{}",
+            "zeroleak-agent-route-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1492,7 +1492,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn an_edited_route_is_capability_checked_and_survives_reload() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-editable-route-{}",
+            "zeroleak-editable-route-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1550,7 +1550,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn native_document_extraction_still_gets_a_conversational_coordinator() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-native-route-{}",
+            "zeroleak-native-route-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1587,7 +1587,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn a_missing_coordinator_names_whether_the_cause_is_capability_or_context() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-no-coordinator-{}",
+            "zeroleak-no-coordinator-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1658,7 +1658,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn a_turn_too_big_for_the_16k_reasoner_moves_to_the_long_context_coordinator() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-schema-reasoning-{}",
+            "zeroleak-schema-reasoning-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1714,7 +1714,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn a_code_turn_over_the_coding_windows_is_not_left_on_the_16k_coder() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-schema-coding-{}",
+            "zeroleak-schema-coding-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1775,7 +1775,7 @@ mod local_model_catalogue_tests {
     #[test]
     fn an_unreadable_page_escalates_once_and_never_to_a_dead_end() {
         let dir = std::env::temp_dir().join(format!(
-            "servergen-escalation-{}",
+            "zeroleak-escalation-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
@@ -1857,7 +1857,7 @@ mod server_model_catalogue_tests {
             models: Vec::new(),
             rules: routing_rules(),
             path: std::env::temp_dir().join(format!(
-                "servergen-server-catalogue-{}",
+                "zeroleak-server-catalogue-{}",
                 uuid::Uuid::new_v4()
             )),
             ctx_override: std::collections::HashMap::new(),
@@ -2019,7 +2019,7 @@ mod models_root_detection {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("servergen-root-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("zeroleak-root-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("scratch directory");
         dir
     }
@@ -2071,7 +2071,7 @@ mod models_root_detection {
 
     #[test]
     fn a_path_that_is_not_there_holds_nothing() {
-        assert!(!holds_weights(&std::env::temp_dir().join("servergen-absent-root")));
+        assert!(!holds_weights(&std::env::temp_dir().join("zeroleak-absent-root")));
     }
 }
 
