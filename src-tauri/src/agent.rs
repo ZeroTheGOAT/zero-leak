@@ -33,6 +33,7 @@
 //! `apply_change` is unchanged and still the path for anything that did get
 //! queued — a run from before this, a batch accept.
 
+use crate::logln;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -500,7 +501,7 @@ fn select_model(
     token_estimate: Option<u32>,
 ) -> RouteDecision {
     let decision = {
-        let reg = st.registry.read().expect("registry lock");
+        let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
         reg.route_agent(kind, token_estimate)
     };
 
@@ -514,7 +515,7 @@ fn select_model(
     let title = match &decision.model_id {
         Some(id) => {
             let name = {
-                let reg = st.registry.read().expect("registry lock");
+                let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
                 reg.get(id).map(|m| m.display_name.clone()).unwrap_or_else(|| id.clone())
             };
             format!("Selected {name}")
@@ -1536,6 +1537,17 @@ struct Grounding {
     /// reach the operator as a blank reply. Once, so a run that can still
     /// produce nothing ends with the empty record it is, not a second prompt.
     silent_answer_retried: bool,
+    /// How many answer-phase retries this run has spent, across all of them.
+    ///
+    /// Each named backstop is one-shot on its own flag, so a single run cannot
+    /// loop on one failure. But a badly-behaving answer can trip them in
+    /// sequence — markup, then a no-tools claim, then silence, then a mode
+    /// claim — and pay up to five full generations for one turn. The budget
+    /// caps what the ladder as a whole may spend: two retries, then whatever
+    /// the last one produced is the answer. A budget shared across the
+    /// backstops rather than per-backstop because the operator's cost is per
+    /// generation, not per failure-shape.
+    answer_retries: u32,
 }
 
 /// Whether a `run_command` call is really an attempt to start a dev server,
@@ -1714,6 +1726,28 @@ fn take_plan_ask(g: &mut Grounding) -> bool {
     }
     g.plan_asked = true;
     true
+}
+
+/// The answer-phase retry budget, shared by every backstop that re-generates
+/// the answer: two retries, then whatever the last attempt produced stands.
+///
+/// Charges as it grants, so each call site's own one-shot flag still holds the
+/// "never twice for the same reason" promise while this holds the "never five
+/// full generations for one turn" promise. Two rather than one because the
+/// backstops correct genuinely different failures — a markup answer and a
+/// refusal claim are not the same bug — but the third generation has, in every
+/// observed run, not been where the model suddenly behaved.
+fn answer_budget_left(g: &mut Grounding) -> bool {
+    g.answer_retries += 1;
+    g.answer_retries <= 2
+}
+
+impl Ctx {
+    /// The budget, spent from a context that cannot borrow the grounding
+    /// through the guard the `should_retry_*` helpers already hold.
+    fn spend_answer_retry(&self) -> bool {
+        self.grounding.lock().map(|mut g| answer_budget_left(&mut g)).unwrap_or(false)
+    }
 }
 
 impl Ctx {
@@ -1927,7 +1961,7 @@ Either way the file is not lost and the task is not blocked: retry the call now.
     /// Whether to re-ask, once, for an answer that arrived as tool-call markup.
     fn should_retry_answer_markup(&self) -> bool {
         let Ok(mut g) = self.grounding.lock() else { return false };
-        if g.answer_markup_retried {
+        if g.answer_markup_retried || !answer_budget_left(&mut g) {
             return false;
         }
         g.answer_markup_retried = true;
@@ -2016,7 +2050,7 @@ Either way the file is not lost and the task is not blocked: retry the call now.
         self.grounding
             .lock()
             .map(|mut g| {
-                if g.tools_claim_answer_retried {
+                if g.tools_claim_answer_retried || !answer_budget_left(&mut g) {
                     return false;
                 }
                 g.tools_claim_answer_retried = true;
@@ -2031,7 +2065,7 @@ Either way the file is not lost and the task is not blocked: retry the call now.
         self.grounding
             .lock()
             .map(|mut g| {
-                if g.mode_claim_answer_retried {
+                if g.mode_claim_answer_retried || !answer_budget_left(&mut g) {
                     return false;
                 }
                 g.mode_claim_answer_retried = true;
@@ -2048,7 +2082,7 @@ Either way the file is not lost and the task is not blocked: retry the call now.
         self.grounding
             .lock()
             .map(|mut g| {
-                if g.silent_answer_retried {
+                if g.silent_answer_retried || !answer_budget_left(&mut g) {
                     return false;
                 }
                 g.silent_answer_retried = true;
@@ -2794,7 +2828,7 @@ fn month_year(text: &str) -> Option<String> {
 #[cfg(test)]
 mod grounding {
     use super::{
-        gathering, harvest_tool_markup, names_a_tool, plant_facts_asserted,
+        answer_budget_left, gathering, harvest_tool_markup, names_a_tool, plant_facts_asserted,
         takes_file_contents, take_plan_ask, tool_schemas, written_body, Gathering, Grounding,
     };
     use crate::types::AgentMode;
@@ -2809,6 +2843,18 @@ mod grounding {
     /// A thickness note, which is what the guard is actually for.
     const NOTE: &str = "TP-04 on 4-P-1102 measured 7.1 mm against a 9.8 mm retirement limit \
 per API 570, recorded 2026-09-04 under SOP-INSP-014.";
+
+    /// The answer-phase budget: two grants, then none. A run that trips every
+    /// backstop in sequence must not pay more than two full generations for
+    /// one turn, whatever the shape of each failure.
+    #[test]
+    fn the_answer_retry_budget_allows_two_and_then_refuses() {
+        let mut g = Grounding::default();
+        assert!(answer_budget_left(&mut g), "first retry granted");
+        assert!(answer_budget_left(&mut g), "second retry granted");
+        assert!(!answer_budget_left(&mut g), "third refused");
+        assert!(!answer_budget_left(&mut g), "still refused after that");
+    }
 
     #[test]
     fn a_tool_that_states_nothing_is_never_questioned() {
@@ -5156,7 +5202,13 @@ async fn dispatch_write(ctx: &Ctx, call: &ToolCall) -> CoreResult<(String, Vec<C
             let full = crate::fsops::resolve(&ctx.st, ws, &rel)?;
             let existed = full.is_file();
             let old_content = if existed {
-                std::fs::read_to_string(&full).unwrap_or_default()
+                // A read error is not an empty file: surface it rather than
+                // diffing against "" and reporting a whole-file rewrite.
+                std::fs::read_to_string(&full).map_err(|e| {
+                    crate::error::CoreError::ExecutionFailed(format!(
+                        "Could not read the current contents of {rel} before diffing: {e}"
+                    ))
+                })?
             } else {
                 String::new()
             };
@@ -5669,7 +5721,7 @@ fn recent_turns(st: &AppState, session_id: &str) -> Vec<ChatMessage> {
         // which is how every run behaved before this existed. Answering the
         // question in front of us beats refusing it.
         Err(e) => {
-            eprintln!("[agent] The conversation could not be read back: {e}");
+            logln!("[agent] The conversation could not be read back: {e}");
             return Vec::new();
         }
     };
@@ -6172,7 +6224,7 @@ fn project_session_recall(
     }) {
         Ok(rows) => rows,
         Err(error) => {
-            eprintln!("[agent] Earlier project chats could not be searched: {error}");
+            logln!("[agent] Earlier project chats could not be searched: {error}");
             return (String::new(), 0);
         }
     };
@@ -6626,7 +6678,7 @@ async fn compact_if_needed(
     tools: &[Value],
 ) -> CoreResult<bool> {
     let window = {
-        let reg = ctx.st.registry.read().expect("registry lock");
+        let reg = ctx.st.registry.read().unwrap_or_else(|e| e.into_inner());
         // The window this model was actually launched with. Auto-sizing may
         // have raised the catalogue baseline to what the card can hold, so the
         // launched figure — not the raw `context_size` line — is the real limit.
@@ -7318,7 +7370,7 @@ in the request; asked again with them named.",
 
 /// The whole run. Errors from here are reported once, by the caller.
 async fn switch_workflow_fallback(ctx: &mut Ctx, kind: TaskKind) -> CoreResult<()> {
-    let fallback = { ctx.st.registry.read().expect("registry lock").escalation(kind,&ctx.model_id) };
+    let fallback = { ctx.st.registry.read().unwrap_or_else(|e| e.into_inner()).escalation(kind,&ctx.model_id) };
     if let Some(id) = fallback {
         router::ensure_loaded(&ctx.st,&id).await?;
         Step::start(&ctx.st,StepKind::SelectingModel,"Retrying with the configured local fallback")
@@ -7470,7 +7522,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         ctx.workspace_id.as_deref(),
         &stored_user,
     ) {
-        eprintln!("[agent] The user turn could not be mirrored to JSONL: {e}");
+        logln!("[agent] The user turn could not be mirrored to JSONL: {e}");
     }
     // Tell the frontend which row this operator message became. The turn is
     // already drawing on screen under a client-chosen id; this stamps the
@@ -7498,10 +7550,10 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
                     ctx.workspace_id.as_deref(),
                     &ctx.session_id,
                 ) {
-                    eprintln!("[agent] An automatic memory could not be captured: {e}");
+                    logln!("[agent] An automatic memory could not be captured: {e}");
                 }
             }
-            Err(e) => eprintln!("[agent] An explicit memory could not be captured: {e}"),
+            Err(e) => logln!("[agent] An explicit memory could not be captured: {e}"),
         }
     }
 
@@ -7531,7 +7583,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
     // built in: the choice above is made from the size of this very prompt.
     {
         let (window, trained) = {
-            let reg = st.registry.read().expect("registry lock");
+            let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
             // Same launched window as `compact_if_needed` reads: the catalogue
             // baseline, raised by auto-sizing to what the card can hold.
             (
@@ -7755,6 +7807,17 @@ why.",
         // by this turn's smaller cap. One retry with the boundary restated; a
         // second failure keeps the error rather than looping.
         Err(CoreError::MalformedToolCall(_)) => {
+            // The answer-phase retry budget applies here too: this arm is a
+            // full re-generation, so it shares the same two-retry cap as the
+            // backstops below rather than sitting outside it.
+            if !ctx.spend_answer_retry() {
+                return Err(CoreError::MalformedToolCall(
+                    "The answer turn received a malformed tool call and the run's \
+                     answer-retry budget was already spent, so the error stands. The \
+                     tool phase for this turn is finished; nothing was executed."
+                        .into(),
+                ));
+            }
             Step::start(&st, StepKind::Verifying, "A tool call arrived after the tool phase")
                 .detail("The answer turn accepts no tool calls; asked again for plain text.")
                 .ok(&st);
@@ -7961,14 +8024,14 @@ done, say exactly that and why — never that you were not allowed.",
                 ctx.workspace_id.as_deref(),
                 &stored_agent,
             ) {
-                eprintln!("[agent] The answer could not be mirrored to JSONL: {e}");
+                logln!("[agent] The answer could not be mirrored to JSONL: {e}");
             }
         }
         Err(e) => {
             // The answer is already on screen; losing the copy of it costs the
             // operator a reload, not the answer. Worth a line in the log, not a
             // failed run.
-            eprintln!("[agent] The answer could not be added to the conversation: {e}");
+            logln!("[agent] The answer could not be added to the conversation: {e}");
         }
     }
 
@@ -7997,7 +8060,7 @@ done, say exactly that and why — never that you were not allowed.",
                 ))
                 .ok(&st),
             Err(e) => {
-                eprintln!("[agent] Memory synthesis was skipped: {e}");
+                logln!("[agent] Memory synthesis was skipped: {e}");
                 memory_step
                     .detail("The answer is complete; memory was left unchanged for this turn.")
                     .skip(&st);
@@ -8149,10 +8212,10 @@ pub async fn start(st: Arc<AppState>, input: StartRunInput) -> CoreResult<RunSta
                         done_workspace.as_deref(),
                         &stored_failed,
                     ) {
-                        eprintln!("[agent] The failed turn could not be mirrored to JSONL: {e}");
+                        logln!("[agent] The failed turn could not be mirrored to JSONL: {e}");
                     }
                 }
-                Err(e) => eprintln!("[agent] The failed turn could not be recorded: {e}"),
+                Err(e) => logln!("[agent] The failed turn could not be recorded: {e}"),
             }
 
             // `agent://done` is emitted either way. The frontend commits the
@@ -8283,7 +8346,17 @@ pub fn apply_change(st: &AppState, run_id: &str, path: &str) -> CoreResult<()> {
         return Err(CoreError::Denied(r.message("applying this change")));
     }
 
-    let on_disk = std::fs::read_to_string(&full).unwrap_or_default();
+    // A missing file reads as "" only when the proposal also started from "";
+    // any other read error is surfaced rather than mistaken for a conflict.
+    let on_disk = match std::fs::read_to_string(&full) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && change.old_content.is_empty() => String::new(),
+        Err(e) => {
+            return Err(CoreError::ExecutionFailed(format!(
+                "{path} could not be re-read before apply ({e}), so it was not overwritten."
+            )))
+        }
+    };
     if on_disk != change.old_content {
         return Err(CoreError::ExecutionFailed(format!(
             "{path} has changed on disk since this diff was produced, so it was not overwritten. Discard the change and ask again against the current file."

@@ -1,21 +1,23 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { File, FileWarning, Loader2, Pencil, Save, ScanText, X } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AppWindow, ChevronDown, ChevronRight, File, FileWarning, Folder, Loader2, Pencil, Save, ScanText, SquareTerminal, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import * as core from '../../services/core';
 import { formatBytes } from '../../services/registry';
-import type { FilePreview as FilePreviewData } from '../../types';
+import { decodeBase64 } from '../../services/paths';
+import { CodeView } from './codeHighlight';
+import type { FilePreview as FilePreviewData, OpenWithEntry } from '../../types';
 
 const EXTRACTABLE = /\.(pdf|docx?|rtf|pptx?|xlsx?|csv|tsv|png|jpe?g|webp|bmp|tiff?|gif)$/i;
 
-function decodeBase64(value: string): Uint8Array {
-  const raw = atob(value);
-  const bytes = new Uint8Array(raw.length);
-  for (let offset = 0; offset < raw.length; offset += 65_536) {
-    const end = Math.min(raw.length, offset + 65_536);
-    for (let i = offset; i < end; i += 1) bytes[i] = raw.charCodeAt(i);
-  }
-  return bytes;
-}
+/** Terminal-like executables get a terminal glyph, everything else a plain app glyph. */
+const appIcon = (exe: string) => {
+  const base = exe.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  return /terminal|^wt\.|cmd|powershell|pwsh|bash|wsl|conhost|git-?bash/.test(base) ? (
+    <SquareTerminal size={15} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+  ) : (
+    <AppWindow size={15} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+  );
+};
 
 function isText(preview: FilePreviewData, bytes: Uint8Array): boolean {
   if (
@@ -60,7 +62,7 @@ const drafts = new Map<string, string>();
  * default app, and the only write it can make is to the file it has open.
  */
 export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
-  const { openDocumentAt } = useApp();
+  const { openDocumentAt, workspaces, activeWorkspace } = useApp();
   const [preview, setPreview] = useState<FilePreviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -68,35 +70,72 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState(false);
+  const [apps, setApps] = useState<OpenWithEntry[] | null>(null);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [menuMsg, setMenuMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const msgTimer = useRef<number | null>(null);
 
+  // A pending notice must never fire after unmount.
+  useEffect(
+    () => () => {
+      if (msgTimer.current !== null) window.clearTimeout(msgTimer.current);
+    },
+    [],
+  );
+
+  /* Click-away and Escape close the Open menu. */
   useEffect(() => {
-    let current = true;
-    setLoading(true);
-    setError(null);
+    if (!openMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setOpenMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenu(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenu]);
+  // Track the path the state above belongs to; reset synchronously during
+  // render on path change instead of setState inside the fetch effect.
+  const [loadedPath, setLoadedPath] = useState<string | undefined>(path);
+  if (loadedPath !== path) {
+    setLoadedPath(path);
     setPreview(null);
-    // A held buffer means the operator was editing this file and moved away:
-    // come back into the editor rather than discarding their typing.
+    setError(path ? null : 'This tab does not point to a file.');
+    setLoading(!!path);
     const held = path ? drafts.get(path) : undefined;
     setEditing(held !== undefined);
     setDraft(held ?? '');
     setSaveError(null);
-    if (!path) {
-      setLoading(false);
-      setError('This tab does not point to a file.');
-      return () => {
-        current = false;
-      };
-    }
+    setOpenMenu(false);
+    setApps(null);
+    setAppsLoading(false);
+    setMenuMsg(null);
+  }
+
+  useEffect(() => {
+    if (!path) return;
+    let current = true;
     void core.files.preview(path).then(
       (next) => {
-        if (current) setPreview(next);
+        if (current) {
+          setPreview(next);
+          setLoading(false);
+        }
       },
       (reason: unknown) => {
-        if (current) setError(reason instanceof Error ? reason.message : String(reason));
+        if (current) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setLoading(false);
+        }
       },
-    ).finally(() => {
-      if (current) setLoading(false);
-    });
+    );
     return () => {
       current = false;
     };
@@ -112,8 +151,9 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
       setBlobUrl(null);
       return;
     }
+    // Uint8Array is a valid BlobPart — no ArrayBuffer cast needed.
     const url = URL.createObjectURL(
-      new Blob([bytes.slice().buffer as ArrayBuffer], { type: preview.mimeType }),
+      new Blob([bytes.slice() as unknown as BlobPart], { type: preview.mimeType }),
     );
     setBlobUrl(url);
     return () => URL.revokeObjectURL(url);
@@ -152,6 +192,17 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
   // canonicalizes this again itself, so it lands on the file being shown.
   const target = path ?? preview.path;
 
+  // Breadcrumb crumb: the owning project's name when the file sits inside
+  // one, else the parent folder — never a guess from another project.
+  const norm = (p: string) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const wsMatch = workspaces.find((w) => {
+    const root = norm(w.path);
+    const full = norm(target);
+    return root !== '' && (full === root || full.startsWith(`${root}\\`));
+  });
+  const crumb =
+    wsMatch?.name ?? target.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? activeWorkspace?.name ?? '';
+
   const save = async () => {
     setSaving(true);
     setSaveError(null);
@@ -176,12 +227,67 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
     setSaveError(null);
   };
 
+  const flash = (tone: 'ok' | 'err', text: string) => {
+    setMenuMsg({ tone, text });
+    if (msgTimer.current !== null) window.clearTimeout(msgTimer.current);
+    msgTimer.current = window.setTimeout(() => setMenuMsg(null), 5000);
+  };
+
+  const openMenuNow = () => {
+    setOpenMenu(true);
+    if (apps !== null || appsLoading) return;
+    setAppsLoading(true);
+    core.files
+      .openWithList(target)
+      .then(
+        (rows) => setApps(rows),
+        () => setApps([]),
+      )
+      .finally(() => setAppsLoading(false));
+  };
+
+  const failOpen = (reason: unknown, what: string) =>
+    flash('err', `${what} (${reason instanceof Error ? reason.message : String(reason)})`);
+
+  const doOpenDefault = () => {
+    setOpenMenu(false);
+    core.files.openDefault(target).catch((reason: unknown) => failOpen(reason, 'The default app refused the file'));
+  };
+
+  const doOpenWith = (exe: string) => {
+    setOpenMenu(false);
+    core.files.openWith(target, exe).catch((reason: unknown) => failOpen(reason, 'That app refused the file'));
+  };
+
+  const doReveal = () => {
+    setOpenMenu(false);
+    core.files.reveal(target).catch((reason: unknown) => failOpen(reason, 'Explorer refused the folder'));
+  };
+
+  const doSaveAs = () => {
+    setOpenMenu(false);
+    core.files
+      .saveCopyAs(target)
+      .then((saved) => {
+        if (saved) flash('ok', `Saved a copy to ${saved.split(/[\\/]/).pop() ?? saved}.`);
+      })
+      .catch((reason: unknown) => failOpen(reason, 'The copy was not saved'));
+  };
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-[var(--background)]">
+    <div className="file-view flex-1 flex flex-col min-h-0 bg-[var(--background)]">
       <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-3 flex-shrink-0">
-        <div className="min-w-0">
-          <p className="text-[12px] text-[var(--foreground)] truncate" title={preview.path}>
-            {preview.fileName}
+        <div className="min-w-0 flex-1">
+          <p className="flex items-center gap-1 text-[12px] min-w-0" title={preview.path}>
+            {crumb !== '' && (
+              <>
+                <span className="truncate text-[var(--muted-foreground)] max-w-[160px] flex-shrink-0">
+                  {crumb}
+                </span>
+                <ChevronRight size={11} className="text-[var(--muted-foreground)] flex-shrink-0" />
+              </>
+            )}
+            <span className="truncate text-[var(--foreground)] font-medium">{preview.fileName}</span>
           </p>
           <p className="text-[10px] text-[var(--muted-foreground)] truncate">
             {preview.mimeType} · {formatBytes(preview.sizeBytes)}
@@ -189,6 +295,90 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
+          <div ref={menuRef} className="relative flex-shrink-0">
+            <div className="flex items-stretch rounded-md border border-[var(--border)] text-[var(--muted-foreground)] overflow-hidden transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+              <button
+                onClick={doOpenDefault}
+                className="px-2.5 py-1 text-[10.5px] font-medium transition"
+                title="Open with the default app"
+              >
+                Open
+              </button>
+              <span className="w-px bg-[var(--border)] my-1" aria-hidden="true" />
+              <button
+                onClick={() => (openMenu ? setOpenMenu(false) : openMenuNow())}
+                aria-expanded={openMenu}
+                aria-haspopup="menu"
+                aria-label="Choose an app to open with"
+                className="px-1.5 py-1 transition"
+                title="Choose an app to open with"
+              >
+                <ChevronDown size={12} />
+              </button>
+            </div>
+            {openMenu && (
+              <div
+                role="menu"
+                aria-label="Open with"
+                className="absolute right-0 top-full mt-1.5 w-64 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--popover)] py-1.5 shadow-2xl animate-popover z-[100]"
+              >
+                <button
+                  role="menuitem"
+                  onClick={doOpenDefault}
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition open-menu-row"
+                  title="Open with the default app"
+                >
+                  <AppWindow size={15} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--foreground)]">
+                    Default app
+                  </span>
+                </button>
+                {appsLoading ? (
+                  <p className="px-3 py-2 text-[11.5px] text-[var(--muted-foreground)]">
+                    Reading installed apps…
+                  </p>
+                ) : (
+                  apps?.map((app) => (
+                    <button
+                      key={app.exe}
+                      role="menuitem"
+                      onClick={() => doOpenWith(app.exe)}
+                      className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition open-menu-row"
+                      title={app.exe}
+                    >
+                      {appIcon(app.exe)}
+                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--foreground)]">
+                        {app.name}
+                      </span>
+                    </button>
+                  ))
+                )}
+                <div className="my-1.5 border-t border-[var(--border)]" />
+                <button
+                  role="menuitem"
+                  onClick={doReveal}
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition open-menu-row"
+                  title="Reveal this file in Explorer"
+                >
+                  <Folder size={15} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--muted-foreground)]">
+                    Open in folder
+                  </span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={doSaveAs}
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition open-menu-row"
+                  title="Save a copy of this file somewhere else"
+                >
+                  <Save size={15} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--muted-foreground)]">
+                    Save as…
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
           {editable && !editorOpen && (
             <button
               onClick={() => {
@@ -244,6 +434,18 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
         </p>
       )}
 
+      {menuMsg && (
+        <p
+          className={`px-3 py-1.5 border-b flex-shrink-0 text-[10.5px] leading-relaxed ${
+            menuMsg.tone === 'err'
+              ? 'border-[var(--destructive-ring)] bg-[var(--destructive-soft)] text-[var(--destructive)]'
+              : 'border-[var(--success-ring)] bg-[var(--success-soft)] text-[var(--success)]'
+          }`}
+        >
+          {menuMsg.text}
+        </p>
+      )}
+
       {preview.tooLarge || !bytes ? (
         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
           <File size={28} className="text-[var(--border)] mb-3" />
@@ -271,7 +473,12 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
           <audio src={blobUrl} controls className="w-full max-w-xl" />
         </div>
       ) : preview.mimeType === 'application/pdf' && blobUrl ? (
-        <iframe title={preview.fileName} src={blobUrl} className="flex-1 min-h-0 w-full bg-white" />
+        <iframe
+          title={preview.fileName}
+          src={blobUrl}
+          sandbox="allow-same-origin"
+          className="flex-1 min-h-0 w-full bg-white"
+        />
       ) : editorOpen ? (
         <textarea
           value={draft}
@@ -294,14 +501,10 @@ export const FilePreview: React.FC<{ path?: string }> = ({ path }) => {
           wrap="off"
           autoFocus
           aria-label={`Contents of ${preview.fileName}`}
-          className="flex-1 min-h-0 w-full m-0 p-4 resize-none overflow-auto bg-[var(--background)] text-[var(--foreground)] text-[11.5px] leading-relaxed font-mono tab-size-2 border-0 outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--primary-ring)]"
+          className="file-view flex-1 min-h-0 w-full m-0 p-4 resize-none overflow-auto bg-[var(--background)] text-[var(--foreground)] text-[11.5px] leading-relaxed font-mono tab-size-2 border-0 outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--primary-ring)]"
         />
       ) : text !== null ? (
-        <div className="flex-1 overflow-auto min-h-0">
-          <pre className="m-0 p-4 min-w-full w-max text-[11.5px] leading-relaxed text-[var(--foreground)] whitespace-pre tab-size-2 select-text">
-            {text}
-          </pre>
-        </div>
+        <CodeView text={text} fileName={preview.fileName} />
       ) : (
         <div className="flex-1 overflow-auto min-h-0">
           <div className="px-4 py-2 border-b border-[var(--border)] text-[10.5px] text-[var(--muted-foreground)]">

@@ -30,7 +30,7 @@ const SUGGESTIONS: Array<{ icon: React.ElementType; title: string; prompt: strin
     title: 'Read a P&ID and trace a line',
     prompt:
       'From the attached P&ID, list every valve and instrument on the line into vessel V-2103-A, with its tag number.',
-    route: 'Qwen3.5 9B vision',
+    route: 'Gemma 4 E4B vision',
   },
   {
     icon: PenLine,
@@ -52,6 +52,7 @@ export const EmptyState: React.FC = () => {
   const {
     activeWorkspace,
     addWorkspace,
+    newSession,
     send,
     knowledgeStats,
     openTab,
@@ -65,18 +66,27 @@ export const EmptyState: React.FC = () => {
   if (!activeWorkspace) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-        <FolderOpen size={30} className="text-[var(--muted-foreground)] mb-4" />
-        <h1 className="text-xl font-medium text-[var(--foreground)]">Create a project to begin</h1>
+        <h1 className="text-2xl font-medium text-[var(--foreground)]">What should we work on?</h1>
         <p className="text-sm text-[var(--muted-foreground)] mt-2 max-w-md leading-relaxed">
-          Each project gets its own managed folder. Tools stay inside that project, and nothing is
-          read, written or indexed outside it.
+          Ask anything — no project needed. If it turns into file work, you will be
+          asked to choose or create a project. Each project gets its own managed
+          folder, and tools stay inside it.
         </p>
-        <button
-          onClick={addWorkspace}
-          className="servergen-primary mt-5 px-4 py-2 rounded-lg text-sm font-medium transition"
-        >
-          Create a project
-        </button>
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+          <button
+            onClick={() => newSession('personal')}
+            className="servergen-primary px-4 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Start chatting
+          </button>
+          <button
+            onClick={addWorkspace}
+            className="px-4 py-2 rounded-lg text-sm font-medium border nerve-border bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--accent)] transition flex items-center gap-1.5"
+          >
+            <FolderOpen size={14} />
+            Create a project
+          </button>
+        </div>
         <p className="text-[11px] text-[var(--muted-foreground)] mt-6">
           {onDevice.length} models on this device · {formatBytes(totalBytes)}
         </p>
@@ -121,8 +131,8 @@ export const EmptyState: React.FC = () => {
         <div className="mt-8 flex items-center justify-center flex-wrap gap-x-5 gap-y-2 text-[11px] text-[var(--muted-foreground)]">
           <span className="flex items-center space-x-1.5">
             <FolderOpen size={12} />
-            <span className="font-mono truncate max-w-[260px]" title={activeWorkspace.path}>
-              {activeWorkspace.path}
+            <span className="truncate max-w-[260px]" title={activeWorkspace.name}>
+              {activeWorkspace.name}
             </span>
           </span>
 

@@ -284,9 +284,10 @@ export const MemoryView: React.FC = () => {
                           className={`rounded p-1 transition ${
                             confirmDelete === memory.id
                               ? 'text-[var(--destructive)]'
-                              : 'text-[var(--muted-foreground)] opacity-0 group-hover:opacity-100 hover:text-[var(--destructive)]'
+                              : 'text-[var(--muted-foreground)] opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 hover:text-[var(--destructive)]'
                           }`}
                           title={confirmDelete === memory.id ? 'Click again to forget' : 'Forget memory'}
+                          aria-label={confirmDelete === memory.id ? `Confirm forget memory ${memory.title}` : `Forget memory ${memory.title}`}
                         >
                           <Trash2 size={11} />
                         </button>

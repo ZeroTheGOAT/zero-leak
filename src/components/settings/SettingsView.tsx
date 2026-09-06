@@ -17,6 +17,8 @@ import {
   Library,
   Lightbulb,
   Mic,
+  Minus,
+  MessageSquare,
   Monitor,
   Moon,
   Palette,
@@ -61,6 +63,8 @@ import type {
 import {
   readAppearance,
   saveAppearance,
+  UI_FONT_MAX,
+  UI_FONT_MIN,
   type AppearancePreferences,
   type ColorMode,
   type ColorTheme,
@@ -75,7 +79,7 @@ type NavPage = {
 };
 
 const PAGES: NavPage[] = [
-  { id: 'workbench', label: 'Workbench', icon: Monitor, sections: [
+    { id: 'workbench', label: 'Workbench', icon: Monitor, sections: [
     { id: 'appearance', label: 'Appearance' },
     { id: 'desktop', label: 'Desktop' },
   ] },
@@ -312,6 +316,50 @@ const Input: React.FC<React.InputHTMLAttributes<HTMLInputElement>> = (props) => 
   <input {...props} className={`${fieldClass} ${props.className ?? ''}`} />
 );
 
+/**
+ * An input that commits on blur or Enter rather than on every keystroke.
+ * Every keystroke on a settings field is a full settings write — typing
+ * "18100" into the port was five writes, and each write on a models path
+ * reloads the whole catalogue from disk. A half-typed value is a draft until
+ * the operator leaves the field; Escape abandons it.
+ */
+const CommitInput: React.FC<{
+  value: string | number;
+  onCommit: (raw: string) => void;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'onBlur' | 'onKeyDown'>> =
+  ({ value, onCommit, ...props }) => {
+    const [draft, setDraft] = useState(String(value));
+    // Adopt a value that moved underneath us — the core overwriting settings,
+    // or another control writing the same field. This field's own commit comes
+    // back equal to the draft, so it never clobbers anything.
+    useEffect(() => {
+      setDraft((current) => (current === String(value) ? current : String(value)));
+    }, [value]);
+    const commit = () => {
+      if (draft.trim() !== '' && draft !== String(value)) onCommit(draft);
+    };
+    return (
+      <Input
+        {...props}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+            e.currentTarget.blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            setDraft(String(value));
+            e.currentTarget.blur();
+          }
+        }}
+      />
+    );
+  };
+
 const ChoiceCards = <T extends string>({
   value,
   options,
@@ -391,20 +439,20 @@ const PreviewCards = <T extends string>({
           aria-checked={active}
           aria-label={option.label}
           onClick={() => onChange(option.value)}
-          className={`grid min-w-0 cursor-pointer gap-1.5 rounded-md border bg-[var(--accent)] p-1.5 text-left transition-colors hover:bg-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] ${
+          className={`preview-card grid min-w-0 cursor-pointer gap-1.5 rounded-md border bg-[var(--accent)] p-1.5 text-left transition-colors hover:bg-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] ${
             active ? 'border-[var(--primary)]' : 'border-transparent'
           }`}
         >
           <span
-            className="flex h-12 overflow-hidden rounded-sm border border-[color-mix(in_oklab,var(--border)_60%,transparent)]"
+            className="preview-frame flex h-12 overflow-hidden rounded-sm border border-[color-mix(in_oklab,var(--border)_60%,transparent)]"
             aria-hidden="true"
           >
             {(option.previews ?? ALL_PREVIEW_MODES).map((mode, index) => (
               <span
                 key={mode}
                 {...previewAttrs(option, mode)}
-                className={`flex min-w-0 flex-1 gap-1 bg-[var(--background)] p-1 ${
-                  index === 1 ? 'border-l border-[color-mix(in_oklab,var(--border)_40%,transparent)]' : ''
+                className={`preview-half flex min-w-0 flex-1 gap-1 bg-[var(--background)] p-1 ${
+                  index === 1 ? 'preview-divider border-l border-[color-mix(in_oklab,var(--border)_40%,transparent)]' : ''
                 }`}
               >
                 <span className="w-1.5 flex-none rounded-[2px] bg-[var(--sidebar)]" />
@@ -420,7 +468,7 @@ const PreviewCards = <T extends string>({
             {active ? (
               <Check size={14} className="flex-none text-[var(--primary)]" />
             ) : (
-              <span className="size-3.5 flex-none rounded-full border border-[color-mix(in_oklab,var(--border)_70%,transparent)]" />
+              <span className="preview-radio size-3.5 flex-none rounded-full border border-[color-mix(in_oklab,var(--border)_70%,transparent)]" />
             )}
             <Icon size={14} className="flex-none text-[var(--muted-foreground)]" />
             <span className="truncate text-xs font-medium text-[var(--foreground)]">{option.label}</span>
@@ -450,7 +498,7 @@ const DEFAULT_PREFS: WorkbenchPreferences = {
   compactAt: 80,
   keepRecent: 20,
   exploreEnabled: true,
-  exploreModel: 'qwen3.5-9b',
+  exploreModel: 'gemma-4-e4b',
   toolEnabled: {},
   transcriptionModel: 'whisper.cpp-base',
   transcriptionLanguage: 'auto',
@@ -468,7 +516,12 @@ const DEFAULT_PREFS: WorkbenchPreferences = {
 function useWorkbenchPreferences() {
   const [value, setValue] = useState<WorkbenchPreferences>(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem('servergen.workbench-preferences.v1') ?? '{}') as Partial<WorkbenchPreferences>;
+      const raw = localStorage.getItem('servergen.workbench-preferences.v1');
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return DEFAULT_PREFS;
+      const rec = parsed as Record<string, unknown>;
+      if ('__proto__' in rec || 'constructor' in rec || 'prototype' in rec) return DEFAULT_PREFS;
+      const stored = rec as Partial<WorkbenchPreferences>;
       return { ...DEFAULT_PREFS, ...stored, toolEnabled: { ...DEFAULT_PREFS.toolEnabled, ...stored.toolEnabled } };
     } catch {
       return DEFAULT_PREFS;
@@ -483,6 +536,8 @@ function useWorkbenchPreferences() {
 const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry) => Promise<void> }> = ({ onClose, onAdd }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  /** Which catalogue arm the entry goes through: local files or a private server. */
+  const [where, setWhere] = useState<'local' | 'server'>('local');
   const [form, setForm] = useState({
     id: '',
     displayName: '',
@@ -495,13 +550,50 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
     fileSizeBytes: '0',
     backend: 'llama.cpp' as 'llama.cpp' | 'python',
     priority: 'primary' as ModelEntry['priority'],
+    // Server-model fields. `serverUrl` empty means the global setting applies.
+    serverUrl: '',
+    serverApiKeyEnv: '',
   });
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError('');
+    if (where === 'local') {
+      if (!form.id.trim() || !form.displayName.trim() || !form.source.trim()) {
+        setError('Model id, display name, and local weights path are required.');
+        return;
+      }
+      setBusy(true);
+      try {
+        await onAdd({
+          id: form.id.trim(),
+          displayName: form.displayName.trim(),
+          backend: form.backend,
+          location: 'this_device',
+          source: form.source.trim(),
+          architecture: form.architecture.trim(),
+          quantization: form.quantization.trim(),
+          contextSize: Number(form.contextSize),
+          trainedContext: Number(form.trainedContext),
+          capabilities: ['general', 'reasoning', 'tools'] satisfies ModelCapability[],
+          estimatedVramMb: Number(form.estimatedVramMb),
+          fileSizeBytes: Number(form.fileSizeBytes),
+          priority: form.priority,
+          note: 'Added from Servergen AI Settings.',
+        });
+        onClose();
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    // Server model: the id the remote server serves it under, the server to
+    // send requests to, and the NAME of the env var holding the credential —
+    // the token itself is the operator's to set in the launch environment.
     if (!form.id.trim() || !form.displayName.trim() || !form.source.trim()) {
-      setError('Model id, display name, and local weights path are required.');
+      setError('Model id, display name, and the server-side model id are required.');
       return;
     }
     setBusy(true);
@@ -509,18 +601,20 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
       await onAdd({
         id: form.id.trim(),
         displayName: form.displayName.trim(),
-        backend: form.backend,
-        location: 'this_device',
+        backend: 'private_endpoint',
+        location: 'private_server',
         source: form.source.trim(),
-        architecture: form.architecture.trim(),
-        quantization: form.quantization.trim(),
+        architecture: form.architecture.trim() || 'remote',
+        quantization: form.quantization.trim() || 'server-side',
         contextSize: Number(form.contextSize),
         trainedContext: Number(form.trainedContext),
         capabilities: ['general', 'reasoning', 'tools'] satisfies ModelCapability[],
         estimatedVramMb: Number(form.estimatedVramMb),
         fileSizeBytes: Number(form.fileSizeBytes),
         priority: form.priority,
-        note: 'Added from Servergen AI Settings.',
+        note: 'Served by an approved on-prem server.',
+        serverUrl: form.serverUrl.trim() || undefined,
+        serverApiKeyEnv: form.serverApiKeyEnv.trim() || undefined,
       });
       onClose();
     } catch (reason) {
@@ -535,16 +629,48 @@ const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry)
       <form onSubmit={submit} className="w-full max-w-xl rounded-xl border nerve-border bg-[var(--popover)] p-5 text-[var(--popover-foreground)] shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-base font-semibold">Add local model</h2>
-            <p className="mt-1 text-xs text-[var(--muted-foreground)]">Register a GGUF/llama.cpp model or a local Python sidecar. URLs are refused by the core.</p>
+            <h2 className="text-base font-semibold">Add model</h2>
+            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+              {where === 'local'
+                ? 'Register a GGUF/llama.cpp model or a local Python sidecar. URLs are refused by the core.'
+                : 'Register a model served by an approved on-prem server. Requests stay behind the network guard.'}
+            </p>
           </div>
           <button type="button" onClick={onClose} className="grid size-8 place-items-center rounded-md hover:bg-[var(--accent)]"><X size={15} /></button>
+        </div>
+        <div className="mt-3 flex gap-1 rounded-md bg-[var(--sidebar)] p-1 text-xs">
+          {(['local', 'server'] as const).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setWhere(tab)}
+              className={`flex-1 rounded px-2 py-1 ${where === tab ? 'bg-[var(--card)] text-[var(--foreground)]' : 'text-[var(--muted-foreground)]'}`}
+            >
+              {tab === 'local' ? 'This device' : 'On-prem server'}
+            </button>
+          ))}
         </div>
         <div className="mt-4 grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-xs">Model id<Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="my-local-model" /></label>
           <label className="grid gap-1 text-xs">Display name<Input value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} placeholder="My Local Model" /></label>
-          <label className="col-span-2 grid gap-1 text-xs">Weights path<Input className="font-mono" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} placeholder="C:/models/model.gguf" /></label>
-          <label className="grid gap-1 text-xs">Runtime<Select value={form.backend} onChange={(e) => setForm({ ...form, backend: e.target.value as typeof form.backend })}><option value="llama.cpp">llama.cpp</option><option value="python">Python sidecar</option></Select></label>
+          {where === 'local' ? (
+            <label className="col-span-2 grid gap-1 text-xs">Weights path<Input className="font-mono" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} placeholder="C:/models/model.gguf" /></label>
+          ) : (
+            <>
+              <label className="col-span-2 grid gap-1 text-xs">Server-side model id<Input className="font-mono" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} placeholder="gemma-4-e4b" /></label>
+              <label className="col-span-2 grid gap-1 text-xs">
+                Server URL
+                <Input className="font-mono" value={form.serverUrl} onChange={(e) => setForm({ ...form, serverUrl: e.target.value })} placeholder="http://10.0.0.10:8080 — empty uses the approved server in Settings" />
+              </label>
+              <label className="col-span-2 grid gap-1 text-xs">
+                Credential env var
+                <Input className="font-mono" value={form.serverApiKeyEnv} onChange={(e) => setForm({ ...form, serverApiKeyEnv: e.target.value })} placeholder="SOVEREIGN_MODEL_TOKEN — the NAME, never the token" />
+              </label>
+            </>
+          )}
+          {where === 'local' && (
+            <label className="grid gap-1 text-xs">Runtime<Select value={form.backend} onChange={(e) => setForm({ ...form, backend: e.target.value as typeof form.backend })}><option value="llama.cpp">llama.cpp</option><option value="python">Python sidecar</option></Select></label>
+          )}
           <label className="grid gap-1 text-xs">Priority<Select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value as ModelEntry['priority'] })}><option value="primary">Primary</option><option value="fallback">Fallback</option><option value="specialist">Specialist</option><option value="disabled">Disabled</option></Select></label>
           <label className="grid gap-1 text-xs">Architecture<Input value={form.architecture} onChange={(e) => setForm({ ...form, architecture: e.target.value })} /></label>
           <label className="grid gap-1 text-xs">Quantization<Input value={form.quantization} onChange={(e) => setForm({ ...form, quantization: e.target.value })} /></label>
@@ -755,7 +881,7 @@ export const SettingsView: React.FC = () => {
   }, [prefs.transcriptionModel, settings.modelsDirectory]);
 
   const setApp = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
-    void updateSettings({ [key]: value } as Partial<AppSettings>);
+    void updateSettings({ [key]: value } as { [P in K]: AppSettings[P] });
   };
   const setAppearanceValue = <K extends keyof AppearancePreferences>(key: K, value: AppearancePreferences[K]) => {
     const next = { ...appearance, [key]: value };
@@ -836,7 +962,7 @@ export const SettingsView: React.FC = () => {
       case 'workbench':
         return <>
           <Section id="appearance" title="Appearance">
-            <Row label="Theme" description="Nerve's original theme presets, applied directly from the source tokens." stacked>
+            <Row label="Theme" description="Theme presets, applied directly from the source tokens." stacked>
               <PreviewCards<ColorTheme>
                 value={appearance.theme}
                 ariaLabel="Theme"
@@ -847,6 +973,7 @@ export const SettingsView: React.FC = () => {
                   { value: 'nerve', label: 'Nerve', icon: Palette },
                   { value: 'ocean', label: 'Ocean', icon: Waves },
                   { value: 'forest', label: 'Forest', icon: TreePine },
+                  { value: 'zero', label: 'Zero', icon: MessageSquare },
                 ]}
               />
             </Row>
@@ -863,6 +990,29 @@ export const SettingsView: React.FC = () => {
                 ]}
               />
             </Row>
+            <Row label="Font size" description="Scales text and layout across the whole workbench — sidebar, transcript, composer and panels. Stored on this device.">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setAppearanceValue('fontSize', Math.max(UI_FONT_MIN, appearance.fontSize - 1))}
+                  disabled={appearance.fontSize <= UI_FONT_MIN}
+                  aria-label="Decrease font size"
+                  className="grid size-8 place-items-center rounded-md border nerve-border text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Minus size={13} />
+                </button>
+                <span className="w-14 text-center text-sm tabular-nums text-[var(--foreground)]" aria-live="polite">{appearance.fontSize} px</span>
+                <button
+                  type="button"
+                  onClick={() => setAppearanceValue('fontSize', Math.min(UI_FONT_MAX, appearance.fontSize + 1))}
+                  disabled={appearance.fontSize >= UI_FONT_MAX}
+                  aria-label="Increase font size"
+                  className="grid size-8 place-items-center rounded-md border nerve-border text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Plus size={13} />
+                </button>
+              </div>
+            </Row>
           </Section>
           <Section id="desktop" title="Desktop">
             <Row label="Header style" description="Auto follows the operating system. Choose another style to override it."><Select value={appearance.headerStyle} onChange={(e) => setAppearanceValue('headerStyle', e.target.value as AppearancePreferences['headerStyle'])}><option value="auto">Auto</option><option value="windows">Windows</option><option value="macos">macOS</option><option value="linux">Linux</option></Select></Row>
@@ -878,9 +1028,9 @@ export const SettingsView: React.FC = () => {
             <Row label="Public cloud providers" description="Hidden and unavailable. Servergen AI does not expose API keys or public inference providers."><span className="rounded-full bg-[var(--muted)] px-2 py-1 text-xs text-[var(--muted-foreground)]">Blocked</span></Row>
           </Section>
           <Section id="local-models" title="Local models">
-            <Row label="Models directory" description="All registered weights must resolve to files on this device."><Input className="w-80 font-mono" value={settings.modelsDirectory} onChange={(e) => setApp('modelsDirectory', e.target.value)} /></Row>
+            <Row label="Models directory" description="All registered weights must resolve to files on this device."><CommitInput className="w-80 font-mono" value={settings.modelsDirectory} onCommit={(raw) => setApp('modelsDirectory', raw)} /></Row>
             <Row label="Registered models" description={`${catalogueModels.length} local definitions in the canonical catalogue.`}><button onClick={() => setAddModelOpen(true)} className="servergen-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add model</button></Row>
-            <Row label="llama-server path"><Input className="w-80 font-mono" value={settings.llamaServerPath} onChange={(e) => setApp('llamaServerPath', e.target.value)} /></Row>
+            <Row label="llama-server path"><CommitInput className="w-80 font-mono" value={settings.llamaServerPath} onCommit={(raw) => setApp('llamaServerPath', raw)} /></Row>
           </Section>
           <Section id="private-endpoint" title="Private endpoint" description="Optional on-prem inference only; public endpoints remain blocked.">
             <Row label="Allow approved private server"><Toggle checked={settings.allowPrivateServer} onChange={(value) => setApp('allowPrivateServer', value)} /></Row>
@@ -896,9 +1046,9 @@ export const SettingsView: React.FC = () => {
             <div className="flex justify-end border-t nerve-border p-3"><button onClick={() => setAddModelOpen(true)} className="servergen-primary inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium"><Plus size={13} />Add local model</button></div>
           </Section>
           <Section id="runtime" title="Runtime">
-            <Row label="Router port" description={`Bound to ${ROUTER_BIND_HOST} and not configurable — the models stay unreachable from off this machine.`}><Input className="w-24 font-mono" type="number" min="1024" max="65535" value={settings.routerPort} onChange={(e) => setApp('routerPort', Number(e.target.value))} /></Row>
-            <Row label="Resident models" description="Maximum models kept in memory simultaneously."><Input className="w-20" type="number" min="1" max="3" value={settings.maxResidentModels} onChange={(e) => setApp('maxResidentModels', Number(e.target.value))} /></Row>
-            <Row label="Idle eviction" description="Release an unused model after this many seconds."><Input className="w-24" type="number" min="0" value={settings.modelIdleEvictSec} onChange={(e) => setApp('modelIdleEvictSec', Number(e.target.value))} /></Row>
+            <Row label="Router port" description={`The bind host is fixed at ${ROUTER_BIND_HOST} — the models stay unreachable from off this machine. The port applies the next time the router starts.`}><CommitInput className="w-24 font-mono" type="number" min="1024" max="65535" value={settings.routerPort} onCommit={(raw) => { const n = Number(raw); if (Number.isFinite(n)) setApp('routerPort', n); }} /></Row>
+            <Row label="Resident models" description="Maximum models kept in memory simultaneously."><CommitInput className="w-20" type="number" min="1" max="3" value={settings.maxResidentModels} onCommit={(raw) => { const n = Number(raw); if (Number.isFinite(n)) setApp('maxResidentModels', n); }} /></Row>
+            <Row label="Idle eviction" description="Release an unused model after this many seconds."><CommitInput className="w-24" type="number" min="0" value={settings.modelIdleEvictSec} onCommit={(raw) => { const n = Number(raw); if (Number.isFinite(n)) setApp('modelIdleEvictSec', n); }} /></Row>
           </Section>
         </>;
 
@@ -1045,9 +1195,9 @@ export const SettingsView: React.FC = () => {
               </div>
             </Row>
           </Section>
-          <Section id="web-search" title="Web search" description="Public web tools are unavailable in this sovereign deployment. Use the local knowledge connector for manuals and SOPs.">
-              <Row label="Search method" description="The backend refuses public destinations even if a legacy configuration enabled web search.">
-              <Select value="disabled" disabled>
+          <Section id="web-search" title="Web search" description="The two public tools — search, and fetching one named page — sit behind this switch. Every public byte still counts in the status bar and the audit log.">
+            <Row label="Search method" description="Direct combines independent keyless sources. Provider routes through one search API using the environment variable named below.">
+              <Select value={settings.webSearchMode} onChange={(event) => setApp('webSearchMode', event.target.value as AppSettings['webSearchMode'])}>
                 <option value="disabled">Disabled</option>
                 <option value="direct">Direct, no API key</option>
                 <option value="provider">Provider API</option>
@@ -1311,9 +1461,14 @@ export const SettingsView: React.FC = () => {
       case 'sandbox':
       case 'artifacts':
         return <>
-          <Section id="network" title="Network">
+          <Section id="network" title="Network" description="Egress follows these switches. Whatever leaves this machine is still counted in the status bar and written to the audit log.">
             <Row label="Daemon bind" description="The application API and model router remain bound to loopback."><span className="font-mono text-xs text-[var(--muted-foreground)]">{ROUTER_BIND_HOST}:{settings.routerPort}</span></Row>
-            <Row label="Public egress"><span className={settings.blockPublicInternet ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--warning)]'}>{settings.blockPublicInternet ? 'Blocked' : 'Allowed'}</span></Row>
+            <Row label="Block public egress" description={settings.blockPublicInternet ? 'On: every public destination is refused — the air-gapped posture.' : 'Off: public destinations are reachable by the web tools and anything the sandbox runs.'}>
+              <Toggle checked={settings.blockPublicInternet} onChange={(value) => setApp('blockPublicInternet', value)} />
+            </Row>
+            <Row label="Sandbox terminal network" description={settings.sandboxNetwork ? 'On: commands in the sandbox (curl, wget, pip, npm install…) may reach the network.' : 'Off: commands run with no network access.'}>
+              <Toggle checked={settings.sandboxNetwork} onChange={(value) => setApp('sandboxNetwork', value)} />
+            </Row>
           </Section>
           <Section id="diagnostics" title="Diagnostics">
             <Row label="Application logging" description={`${auditLog.length} locally retained tool records.`}><Toggle checked={prefs.diagnosticLogs} onChange={(value) => setPrefs({ ...prefs, diagnosticLogs: value })} /></Row>
@@ -1329,7 +1484,7 @@ export const SettingsView: React.FC = () => {
           </Section>
           <Section id="launch-context" title="Launch context">
             <Row label="Project" description={activeWorkspace?.path ?? 'No project open'}><span className="text-xs text-[var(--muted-foreground)]">Local</span></Row>
-            <Row label="Security model"><span className="text-xs text-[var(--success)]">Air-gapped</span></Row>
+            <Row label="Security model"><span className={`text-xs ${settings.blockPublicInternet ? 'text-[var(--success)]' : 'text-[var(--warning)]'}`}>{settings.blockPublicInternet ? 'Air-gapped' : 'Networked — public egress permitted by Settings'}</span></Row>
           </Section>
           <Section id="system-information" title="System information">
             <Row label="Application"><span className="text-xs text-[var(--muted-foreground)]">Servergen AI 0.1.0</span></Row>

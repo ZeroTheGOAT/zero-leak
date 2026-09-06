@@ -17,6 +17,7 @@
 //! Schema changes go through `MIGRATIONS`, keyed off `PRAGMA user_version`.
 //! Nothing here drops a table.
 
+use crate::logln;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -456,7 +457,9 @@ pub fn open(dir: &Path) -> CoreResult<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    conn.busy_handler(Some(|attempts: i32| attempts < 200))?;
+    // Wait up to 5s on lock contention instead of hot-spinning: sandbox line
+    // appends contend with UI reads, and a spin loop burns CPU for no gain.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     migrate(&conn)?;
     crate::evidence::recover(&conn)?;
@@ -467,7 +470,7 @@ pub fn open(dir: &Path) -> CoreResult<Connection> {
     // a store that cannot be repaired still opens, it just keeps whatever
     // feature the column serves broken, which is what it was doing anyway.
     if let Err(e) = repair_drifted_columns(&conn) {
-        eprintln!("[db] A schema repair could not run: {e}");
+        logln!("[db] A schema repair could not run: {e}");
     }
 
     // A crash, a power loss or a kill that beat the shutdown handler can leave a
@@ -476,7 +479,7 @@ pub fn open(dir: &Path) -> CoreResult<Connection> {
     match reap_orphan_sandbox_runs(&conn) {
         Ok(0) => {}
         Ok(n) => println!("[db] {n} sandbox run(s) were left marked running by a previous session; recorded as interrupted."),
-        Err(e) => eprintln!("[db] Could not clear interrupted sandbox runs: {e}"),
+        Err(e) => logln!("[db] Could not clear interrupted sandbox runs: {e}"),
     }
 
     Ok(conn)
@@ -570,11 +573,9 @@ pub fn load_settings(conn: &Connection) -> CoreResult<AppSettings> {
         },
         None => defaults,
     };
-    let mut settings: AppSettings = serde_json::from_value(merged)?;
-    settings.block_public_internet = true;
-    settings.sandbox_network = false;
-    settings.web_search_mode = WebSearchMode::Disabled;
-    Ok(settings)
+    // What the operator last chose is what stands. Public egress is audited
+    // and counted by §11 either way, so no deployment clamp is applied here.
+    Ok(serde_json::from_value(merged)?)
 }
 
 pub fn save_settings(conn: &Connection, s: &AppSettings) -> CoreResult<()> {
@@ -1727,7 +1728,9 @@ pub fn record_tool_call(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             rec.id,
-            serde_json::to_value(rec.tool)?.as_str().unwrap_or_default(),
+            // Already the wire string: `ToolCallRecord.tool` is the raw spelling
+            // so the audit view can show names this build no longer knows.
+            rec.tool,
             rec.args_summary,
             rec.status,
             rec.started_at,
@@ -1749,11 +1752,13 @@ pub fn audit_page(conn: &Connection, limit: u32, offset: u32) -> CoreResult<Vec<
     )?;
     let rows = stmt
         .query_map(params![limit, offset], |r| {
-            let tool_raw: String = r.get(1)?;
             Ok(ToolCallRecord {
                 id: r.get(0)?,
-                tool: serde_json::from_value(serde_json::Value::String(tool_raw))
-                    .unwrap_or(ToolName::ReadFile),
+                // The stored spelling, verbatim. A row written by an earlier
+                // build can name a tool this build no longer knows, and
+                // relabelling it as a plausible guess would corrupt the one
+                // table that is supposed to be ground truth.
+                tool: r.get(1)?,
                 args_summary: r.get(2)?,
                 status: r.get(3)?,
                 started_at: r.get(4)?,
@@ -2742,7 +2747,7 @@ mod conversation {
         let c = store();
         touch_session(&c, "s1", None, AgentMode::Plan, "read this", 1).unwrap();
         let extra = MessageExtra {
-            model_id: Some("qwen3.5-9b".into()),
+            model_id: Some("gemma-4-e4b".into()),
             elapsed_ms: Some(4200),
             attachments: vec!["C:/plant/PID-CDU4-1102.png".into()],
             ..Default::default()
@@ -2751,7 +2756,7 @@ mod conversation {
 
         let back = session_messages(&c, "s1", 40).unwrap();
         assert_eq!(back.len(), 1);
-        assert_eq!(back[0].extra.model_id.as_deref(), Some("qwen3.5-9b"));
+        assert_eq!(back[0].extra.model_id.as_deref(), Some("gemma-4-e4b"));
         assert_eq!(back[0].extra.elapsed_ms, Some(4200));
         assert_eq!(back[0].extra.attachments, ["C:/plant/PID-CDU4-1102.png"]);
         assert!(
@@ -2924,7 +2929,7 @@ mod audit_trail {
         let c = store();
         let rec = ToolCallRecord {
             id: "tc_1".into(),
-            tool: ToolName::ReadFile,
+            tool: "read_file".into(),
             args_summary: "read secret-1.pdf".into(),
             status: "ok".into(),
             started_at: 1000,
@@ -2940,7 +2945,29 @@ mod audit_trail {
         let row = &page[0];
         assert_eq!(row.id, "tc_1");
         assert_eq!(row.operator.as_deref(), Some("MRPL\\operator"));
-        assert_eq!(row.tool, ToolName::ReadFile);
+        assert_eq!(row.tool, "read_file");
+    }
+
+    /// The bug this pins: a row whose tool spelling this build does not know
+    /// used to come back as `read_file` — an audit panel that relabels a call
+    /// it cannot name is worse than one that shows the name it cannot resolve.
+    #[test]
+    fn a_tool_this_build_does_not_know_round_trips_verbatim() {
+        let c = store();
+        let rec = ToolCallRecord {
+            id: "tc_old".into(),
+            tool: "renamed_tool_from_an_earlier_build".into(),
+            args_summary: "legacy entry".into(),
+            status: "ok".into(),
+            started_at: 1,
+            duration_ms: 5,
+            workspace_id: "ws1".into(),
+            operator: None,
+            error: None,
+        };
+        record_tool_call(&c, &rec, None, None).expect("the call is recorded");
+        let page = audit_page(&c, 50, 0).expect("the page reads back");
+        assert_eq!(page[0].tool, "renamed_tool_from_an_earlier_build");
     }
 
     #[test]
@@ -2952,7 +2979,7 @@ mod audit_trail {
         // fabricated account.
         let rec = ToolCallRecord {
             id: "tc_old".into(),
-            tool: ToolName::ReadFile,
+            tool: "read_file".into(),
             args_summary: "read legacy.pdf".into(),
             status: "ok".into(),
             started_at: 1,

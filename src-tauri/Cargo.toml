@@ -51,6 +51,7 @@ tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
 getrandom = "0.2"
+zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

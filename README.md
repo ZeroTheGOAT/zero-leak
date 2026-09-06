@@ -64,8 +64,8 @@ All components are modular and located in `src/components/`:
 - `src/components/panels/`: RightPanel, DiffReviewer, TerminalView, SchematicView, FileExplorerView
 - `src/components/settings/`: SettingsView with Permissions & Local LLM Endpoints
 - `src/services/core.ts`: Typed bridge to the native local core.
-- `src-zero/src/agent.rs`: Local model orchestration, context assembly and tool loop.
-- `src-zero/src/harness.rs`: Harness layout, memories, instructions and transcript mirrors.
+- `src-tauri/src/agent.rs`: Local model orchestration, context assembly and tool loop.
+- `src-tauri/src/harness.rs`: Harness layout, memories, instructions and transcript mirrors.
 
 ---
 

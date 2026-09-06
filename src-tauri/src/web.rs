@@ -232,6 +232,38 @@ fn authorised(ctx: &Web, h: &HeaderMap) -> bool {
     cookie_token(h).map(|t| ct_eq(&t, &ctx.token)).unwrap_or(false)
 }
 
+/// Local brute-force throttle: counts unauthorised `/api/invoke` hits per
+/// minute and answers 429 past the budget. The 256-bit token is not guessable,
+/// but an unthrottled endpoint lets a local process try forever for free.
+fn auth_failures() -> &'static std::sync::Mutex<(u64, u32)> {
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<(u64, u32)>> = std::sync::OnceLock::new();
+    FAILURES.get_or_init(|| std::sync::Mutex::new((0, 0)))
+}
+
+fn auth_throttled(now: u64) -> bool {
+    const WINDOW_MS: u64 = 60_000;
+    const BUDGET: u32 = 30;
+    let guard = auth_failures().lock().unwrap_or_else(|e| e.into_inner());
+    now - guard.0 <= WINDOW_MS && guard.1 >= BUDGET
+}
+
+fn note_auth_failure(now: u64) {
+    const WINDOW_MS: u64 = 60_000;
+    let mut guard = auth_failures().lock().unwrap_or_else(|e| e.into_inner());
+    if now - guard.0 > WINDOW_MS {
+        *guard = (now, 1);
+    } else {
+        guard.1 = guard.1.saturating_add(1);
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn deny(status: StatusCode, detail: &str) -> Response {
     let mut r = (status, Json(json!({ "ok": false, "error": detail }))).into_response();
     hardening(r.headers_mut());
@@ -284,7 +316,14 @@ async fn invoke(
             "Rejected: this request did not come from the workbench page on this machine.",
         );
     }
+    if auth_throttled(now_ms()) {
+        return deny(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many unauthorised attempts. Wait a minute and open the workbench link for this launch.",
+        );
+    }
     if !authorised(&ctx, &headers) {
+        note_auth_failure(now_ms());
         return deny(
             StatusCode::UNAUTHORIZED,
             "This session is not authorised. Open the workbench using the link the application printed for this launch.",

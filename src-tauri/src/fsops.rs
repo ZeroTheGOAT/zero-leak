@@ -293,6 +293,39 @@ pub fn resolve(st: &AppState, workspace_id: &str, rel: &str) -> CoreResult<PathB
     contain(&root, target, rel, &ws)
 }
 
+/// Re-verifies containment after open: closes the check-then-open (TOCTOU)
+/// window where a junction swap between `resolve` and `read` could redirect
+/// the handle outside the workspace. The parent is canonicalized again and
+/// must still sit inside the canonical root.
+pub fn reverify_after_open(root: &Path, opened: &Path, rel: &str) -> CoreResult<()> {
+    let real_root = std::fs::canonicalize(root).map_err(|_| {
+        CoreError::Denied(format!(
+            "The path \"{rel}\" was refused: the workspace root could not be re-verified after open."
+        ))
+    })?;
+    let anchor = if opened.is_dir() { opened.to_path_buf() } else { opened.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| opened.to_path_buf()) };
+    // Walk up to the nearest existing ancestor (the file itself may be new).
+    let mut probe = anchor;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&probe) {
+            if real.starts_with(&real_root) {
+                return Ok(());
+            }
+            return Err(CoreError::Denied(format!(
+                "The path \"{rel}\" resolves outside its workspace after open (a folder on the path changed), so nothing was read."
+            )));
+        }
+        match probe.parent() {
+            Some(parent) if parent != probe => probe = parent.to_path_buf(),
+            _ => {
+                return Err(CoreError::Denied(format!(
+                    "The path \"{rel}\" could not be re-verified after open, so nothing was read."
+                )))
+            }
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Native pickers                                                      */
 /* ------------------------------------------------------------------ */
@@ -868,6 +901,12 @@ pub fn list_dir(st: &AppState, workspace_id: &str, rel: &str) -> CoreResult<Vec<
 /// missing half.
 pub fn read_text(st: &AppState, workspace_id: &str, rel: &str) -> CoreResult<String> {
     let path = resolve(st, workspace_id, rel)?;
+    // Re-verify after open (TOCTOU): the workspace root is re-canonicalized
+    // via the opened path's parent before bytes are trusted.
+    {
+        let (_, root) = workspace_root(st, workspace_id)?;
+        reverify_after_open(&root, &path, rel)?;
+    }
     let meta = std::fs::metadata(&path).map_err(|e| {
         CoreError::ExecutionFailed(format!("\"{rel}\" could not be opened ({e}), so nothing was read."))
     })?;
@@ -1139,6 +1178,434 @@ pub fn reveal(st: &AppState, path: &str) -> CoreResult<()> {
             tidy(&target)
         ))
     })
+}
+
+/* ------------------------------------------------------------------ */
+/* Opening                                                              */
+/* ------------------------------------------------------------------ */
+
+/// Opens a file in whatever the machine registered as its default handler.
+///
+/// Gated by the same boundary as [`reveal`]: only files inside an approved
+/// workspace or an application-owned output folder may leave the workbench
+/// inside another program.
+pub fn open_default(st: &AppState, path: &str) -> CoreResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let target = permitted_existing_file(st, path)?;
+    st.app
+        .opener()
+        .open_path(target.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| {
+            CoreError::ExecutionFailed(format!(
+                "\"{}\" could not be opened in its default app ({e}).",
+                tidy(&target)
+            ))
+        })
+}
+
+/// Launches one installed program with a file.
+///
+/// The executable must already exist on disk and end in `.exe`: anything else
+/// would need a shell to interpret it, and there is no shell here to do that.
+/// The file itself clears the same boundary as [`reveal`].
+pub fn open_with(st: &AppState, path: &str, exe: &str) -> CoreResult<()> {
+    use std::process::{Command, Stdio};
+
+    let target = permitted_existing_file(st, path)?;
+    let program = std::fs::canonicalize(exe).map_err(|e| {
+        CoreError::ExecutionFailed(format!("\"{exe}\" could not be launched ({e}), so nothing was opened."))
+    })?;
+    let is_program = program.is_file()
+        && program
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false);
+    if !is_program {
+        return Err(CoreError::Denied(format!(
+            "\"{}\" is not an installed program, so it was not launched.",
+            tidy(&program)
+        )));
+    }
+    Command::new(&program)
+        .arg(&target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            CoreError::ExecutionFailed(format!(
+                "\"{}\" could not open \"{}\" ({e}).",
+                tidy(&program),
+                tidy(&target)
+            ))
+        })?;
+    Ok(())
+}
+
+/// The per-user registrations first — they override the machine — then the
+/// machine-wide ones. Read-only throughout; listing associations never writes
+/// one.
+fn classes_keys() -> Vec<winreg::RegKey> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+        .into_iter()
+        .filter_map(|hive| {
+            RegKey::predef(hive)
+                .open_subkey_with_flags("Software\\Classes", KEY_READ)
+                .ok()
+        })
+        .collect()
+}
+
+/// Pulls the executable out of a `shell\open\command` string — `"C:\a\b.exe"
+/// "%1"` or `C:\a\b.exe %1` — expanding any `%VAR%` segments on the way.
+/// Unknown variables stay verbatim rather than vanishing the path.
+fn parse_open_command(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    let end = match raw.strip_prefix('"') {
+        Some(rest) => rest.find('"').map(|i| &rest[..i]),
+        None => raw.split_whitespace().next(),
+    }?;
+    let expanded = expand_env(end.trim());
+    if expanded.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(expanded))
+}
+
+fn expand_env(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        match tail.find('%') {
+            Some(end) => {
+                let name = &tail[..end];
+                match std::env::var(name) {
+                    Ok(v) => out.push_str(&v),
+                    Err(_) => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('%');
+                out.push_str(tail);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// File stem as a last-resort display name: `Code.exe` reads as "Code".
+fn exe_stem_name(exe: &Path) -> String {
+    exe.file_stem()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Program".to_string())
+}
+
+/// The name Windows itself shows for an installed program: `ApplicationName`,
+/// then `FriendlyAppName` — unless the latter is an indirect `@path,-id`
+/// resource reference, which resolving would mean loading a foreign DLL's
+/// string table. That stays unresolved and the stem wins instead.
+fn app_display_name(classes: &[winreg::RegKey], exe_file_name: &str) -> Option<String> {
+    use winreg::enums::KEY_READ;
+    for root in classes {
+        let key_path = format!("Applications\\{exe_file_name}");
+        let Ok(app) = root.open_subkey_with_flags(&key_path, KEY_READ) else {
+            continue;
+        };
+        for value in ["ApplicationName", "FriendlyAppName"] {
+            if let Ok(name) = app.get_value::<String, _>(value) {
+                let name = name.trim().to_string();
+                if !name.is_empty() && !name.starts_with('@') {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolves a ProgID to its open command's executable.
+fn progid_target(classes: &[winreg::RegKey], progid: &str) -> Option<(PathBuf, String)> {
+    use winreg::enums::KEY_READ;
+    for root in classes {
+        let key_path = format!("{progid}\\shell\\open\\command");
+        let Ok(cmd) = root.open_subkey_with_flags(&key_path, KEY_READ) else {
+            continue;
+        };
+        let Ok(raw) = cmd.get_value::<String, _>("") else {
+            continue;
+        };
+        let Some(exe) = parse_open_command(&raw) else {
+            continue;
+        };
+        if !exe.is_file() {
+            continue;
+        }
+        let file_name = exe.file_name()?.to_string_lossy().to_string();
+        let name = app_display_name(classes, &file_name).unwrap_or_else(|| exe_stem_name(&exe));
+        return Some((exe, name));
+    }
+    None
+}
+
+/// Resolves a bare executable name from `OpenWithList` — first through its
+/// `Applications` registration, then `App Paths`, then `PATH` — because the
+/// list itself only carries names like `Code.exe`, never locations.
+fn exe_target(classes: &[winreg::RegKey], exe_name: &str) -> Option<(PathBuf, String)> {
+    use winreg::enums::KEY_READ;
+    if exe_name.contains(['/', '\\']) {
+        let direct = PathBuf::from(exe_name);
+        if !direct.is_file() {
+            return None;
+        }
+        let file_name = direct.file_name()?.to_string_lossy().to_string();
+        let name =
+            app_display_name(classes, &file_name).unwrap_or_else(|| exe_stem_name(&direct));
+        return Some((direct, name));
+    }
+    for root in classes {
+        let key_path = format!("Applications\\{exe_name}\\shell\\open\\command");
+        if let Ok(cmd) = root.open_subkey_with_flags(&key_path, KEY_READ) {
+            if let Ok(raw) = cmd.get_value::<String, _>("") {
+                if let Some(exe) = parse_open_command(&raw) {
+                    if exe.is_file() {
+                        let name = app_display_name(classes, exe_name)
+                            .unwrap_or_else(|| exe_stem_name(&exe));
+                        return Some((exe, name));
+                    }
+                }
+            }
+        }
+    }
+    let exe = app_paths_target(exe_name)?;
+    let name =
+        app_display_name(classes, exe_name).unwrap_or_else(|| exe_stem_name(&exe));
+    Some((exe, name))
+}
+
+/// Where installers say they put things (`Code.exe` lives far from `PATH`),
+/// with `PATH` itself covering the rest (`notepad.exe`).
+fn app_paths_target(exe_name: &str) -> Option<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
+        let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(&key_path, KEY_READ) else {
+            continue;
+        };
+        let Ok(raw) = key.get_value::<String, _>("") else {
+            continue;
+        };
+        let candidate = PathBuf::from(expand_env(raw.trim().trim_matches('"').trim()));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(exe_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Adds one candidate, first wins on duplicates, hard-capped so a long tail
+/// of stale entries cannot flood the dropdown.
+fn push_entry(seen: &mut Vec<String>, out: &mut Vec<OpenWithEntry>, exe: PathBuf, name: String, recommended: bool) {
+    if out.len() >= 8 {
+        return;
+    }
+    let key = exe.to_string_lossy().to_lowercase();
+    if seen.iter().any(|s| s == &key) {
+        return;
+    }
+    seen.push(key);
+    out.push(OpenWithEntry {
+        name,
+        exe: tidy(&exe),
+        recommended,
+    });
+}
+
+/// Every installed application Windows offers for a file: the registered
+/// default first, then `OpenWithProgids` alternates, then the explicit
+/// `OpenWithList` choices — the same order the system menu shows, capped so
+/// a long tail of stale entries cannot flood the dropdown.
+pub fn open_with_list(st: &AppState, path: &str) -> CoreResult<Vec<OpenWithEntry>> {
+    use winreg::enums::KEY_READ;
+
+    let target = permitted_existing_file(st, path)?;
+    let Some(ext) = target
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| format!(".{}", s.to_lowercase()))
+    else {
+        return Ok(Vec::new());
+    };
+
+    let roots = classes_keys();
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<OpenWithEntry> = Vec::new();
+
+    // The registered default, user hive first — it alone is recommended.
+    for root in &roots {
+        let Ok(ext_key) = root.open_subkey_with_flags(&ext, KEY_READ) else {
+            continue;
+        };
+        if let Ok(pid) = ext_key.get_value::<String, _>("") {
+            let pid = pid.trim().to_string();
+            if !pid.is_empty() {
+                if let Some((exe, name)) = progid_target(&roots, &pid) {
+                    push_entry(&mut seen, &mut out, exe, name, true);
+                }
+                break;
+            }
+        }
+    }
+    for root in &roots {
+        let Ok(ext_key) = root.open_subkey_with_flags(&ext, KEY_READ) else {
+            continue;
+        };
+        if let Ok(progids) = ext_key.open_subkey_with_flags("OpenWithProgids", KEY_READ) {
+            let mut names: Vec<String> = progids.enum_values().flatten().map(|(n, _)| n).collect();
+            names.sort();
+            for pid in names {
+                if pid.trim().is_empty() {
+                    continue;
+                }
+                if let Some((exe, name)) = progid_target(&roots, &pid) {
+                    push_entry(&mut seen, &mut out, exe, name, false);
+                }
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        if out.len() >= 8 {
+            break;
+        }
+        if let Ok(list) = ext_key.open_subkey_with_flags("OpenWithList", KEY_READ) {
+            let mut names: Vec<String> = Vec::new();
+            for (name, _) in list.enum_values().flatten() {
+                if name.eq_ignore_ascii_case("MRUList") || name.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(exe) = list.get_value::<String, _>(&name) {
+                    if !exe.trim().is_empty() {
+                        names.push(exe.trim().to_string());
+                    }
+                }
+            }
+            names.sort();
+            for exe_name in names {
+                if let Some((exe, name)) = exe_target(&roots, &exe_name) {
+                    push_entry(&mut seen, &mut out, exe, name, false);
+                }
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Save dialog plus copy. Answers the destination path, or null when the
+/// operator cancels — cancelling is an answer, not a failure.
+pub async fn save_copy_as(st: Arc<AppState>, path: &str) -> CoreResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let target = permitted_existing_file(&st, path)?;
+    let file_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "copy".to_string());
+    let app = st.app.clone();
+    let chosen = await_picker("The save dialog", move |tx| {
+        app.dialog()
+            .file()
+            .set_title("Save a copy of the file")
+            .set_file_name(&file_name)
+            .save_file(move |file| {
+                let _ = tx.send(file);
+            });
+    })
+    .await?;
+    let Some(picked) = chosen else {
+        return Ok(None);
+    };
+    let dest = to_path(picked, "The save dialog")?;
+    std::fs::copy(&target, &dest).map_err(|e| {
+        CoreError::ExecutionFailed(format!(
+            "The copy to \"{}\" failed ({e}), so nothing was saved.",
+            tidy(&dest)
+        ))
+    })?;
+    Ok(Some(tidy(&dest)))
+}
+
+#[cfg(test)]
+mod open_with_tests {
+    use super::{expand_env, parse_open_command};
+    use std::path::PathBuf;
+
+    #[test]
+    fn quoted_commands_resolve_to_the_exe() {
+        assert_eq!(
+            parse_open_command("\"C:\\Program Files\\App\\app.exe\" \"%1\""),
+            Some(PathBuf::from("C:\\Program Files\\App\\app.exe"))
+        );
+    }
+
+    #[test]
+    fn bare_commands_take_the_first_token() {
+        assert_eq!(
+            parse_open_command("C:\\Windows\\notepad.exe %1"),
+            Some(PathBuf::from("C:\\Windows\\notepad.exe"))
+        );
+    }
+
+    #[test]
+    fn empty_commands_resolve_to_nothing() {
+        assert_eq!(parse_open_command("   "), None);
+        assert_eq!(parse_open_command("\"\""), None);
+    }
+
+    #[test]
+    fn unknown_variables_stay_verbatim() {
+        assert_eq!(
+            expand_env("%DEFINITELY_NOT_SET_ZL123%\\app.exe"),
+            "%DEFINITELY_NOT_SET_ZL123%\\app.exe".to_string()
+        );
+    }
+
+    #[test]
+    fn known_variables_expand() {
+        let root = std::env::var("SystemRoot").expect("SystemRoot is always set on Windows");
+        assert_eq!(
+            expand_env("%SystemRoot%\\notepad.exe"),
+            format!("{root}\\notepad.exe")
+        );
+    }
 }
 
 #[cfg(test)]

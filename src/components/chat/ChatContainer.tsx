@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
@@ -18,10 +18,10 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { AgentTimeline } from './AgentTimeline';
 import { PlanHandoff } from './PlanHandoff';
-import { ThinkingBlock } from './ThinkingBlock';
+import { WorkSummary } from './WorkSummary';
 import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
+import { basename } from '../../services/paths';
 import type {
   Artifact,
   Attachment,
@@ -139,25 +139,34 @@ const inline = (text: string, keyBase: string): React.ReactNode[] =>
     return <span key={key}>{part}</span>;
   });
 
-const CodeBlock: React.FC<{ lang: string; text: string }> = ({ lang, text }) => (
+const CodeBlock: React.FC<{ lang: string; text: string }> = memo(({ lang, text }) => {
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch {
+      // Clipboard blocked (non-secure context): selection copy still works.
+    }
+  };
+  return (
   <div className="my-2 rounded-lg border border-[var(--border)] overflow-hidden bg-[var(--sidebar-accent)]">
     <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--border)]">
       <span className="text-[10px] text-[var(--muted-foreground)] font-mono">{lang}</span>
       <button
-        onClick={() => void navigator.clipboard?.writeText(text)}
+        onClick={() => void copy()}
+        aria-label={`Copy ${lang || 'code'} block to clipboard`}
         className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition"
-        title="Copy"
       >
-        <Copy size={11} />
+        <Copy size={14} />
       </button>
     </div>
     <pre className="p-3 overflow-x-auto text-[12px] leading-relaxed font-mono text-[var(--foreground)]">
       {text}
     </pre>
   </div>
-);
+  );
+});
 
-const Prose: React.FC<{ text: string }> = ({ text }) => (
+const Prose: React.FC<{ text: string }> = memo(({ text }) => (
   <>
     {text
       .split('\n')
@@ -198,15 +207,17 @@ const Prose: React.FC<{ text: string }> = ({ text }) => (
         );
       })}
   </>
-);
+));
 
-const Markdown: React.FC<{ text: string; muted?: boolean }> = ({ text, muted = false }) => (
+const Markdown: React.FC<{ text: string; muted?: boolean }> = memo(({ text, muted = false }) => {
+  const segs = useMemo(() => splitFences(text), [text]);
+  return (
   <div
     className={`text-[13.5px] leading-relaxed ${
       muted ? 'text-[var(--muted-foreground)]' : 'text-[var(--foreground)]'
     }`}
   >
-    {splitFences(text).map((seg, i) =>
+    {segs.map((seg, i) =>
       seg.type === 'code' ? (
         <CodeBlock key={i} lang={seg.lang} text={seg.text} />
       ) : (
@@ -214,7 +225,8 @@ const Markdown: React.FC<{ text: string; muted?: boolean }> = ({ text, muted = f
       ),
     )}
   </div>
-);
+  );
+});
 
 /**
  * The live activity stream. Plans are deliberately NOT rendered here — the
@@ -234,38 +246,29 @@ const ActivityFlow: React.FC<{
   blocks: ChatActivityBlock[];
   live?: boolean;
   thinkingLive?: boolean;
-}> = ({ blocks, live = false, thinkingLive = false }) => (
-  <div className="space-y-2.5">
-    {blocks.map((block, index) =>
-      block.type === 'actions' ? (
-        <AgentTimeline
-          key={block.id}
-          steps={block.steps}
-          live={live && block.steps.some((step) => step.status === 'running')}
-        />
-      ) : block.type === 'console' ? (
-        // Live sandbox output. Not auto-scrolled: the block grows downward
-        // and the message list is already pinned to the newest content.
-        <pre
-          key={block.id}
-          className="max-h-44 overflow-auto whitespace-pre-wrap rounded-lg border nerve-border bg-[var(--sidebar-accent)] p-2.5 font-mono text-[11px] leading-relaxed text-[var(--muted-foreground)]"
-        >
-          {block.text}
-        </pre>
-      ) : block.type === 'text' && block.kind === 'thinking' ? (
-        <ThinkingBlock
-          key={block.id}
-          text={block.text}
-          live={thinkingLive && index === blocks.length - 1}
-          startedAt={block.startedAt}
-          endedAt={block.endedAt}
-        />
-      ) : (
-        <Markdown key={block.id} text={block.text} muted={block.kind === 'commentary'} />
-      ),
-    )}
-  </div>
-);
+}> = ({ blocks, live = false, thinkingLive = false }) => {
+  // ChatGPT pattern: ONE outer "Worked for Xs" card holds the whole run's
+  // thinking + commentary + tool calls. The final answer renders below it.
+  // Without this, every thinking/action alternation becomes its own card
+  // and a single run fills the chat with a dozen stacked panels.
+  const workBlocks = blocks.filter(
+    (b) =>
+      b.type === 'actions' ||
+      b.type === 'console' ||
+      (b.type === 'text' && (b.kind === 'thinking' || b.kind === 'commentary')),
+  );
+  const answerBlocks = blocks.filter((b) => b.type === 'text' && b.kind === 'answer');
+  return (
+    <div className="space-y-2.5">
+      {workBlocks.length > 0 && (
+        <WorkSummary blocks={workBlocks} live={live} thinkingLive={thinkingLive} />
+      )}
+      {answerBlocks.map((block) =>
+        block.type === 'text' ? <Markdown key={block.id} text={block.text} /> : null,
+      )}
+    </div>
+  );
+};
 
 /* ------------------------------------------------------------------ */
 /* Citations and artifacts                                            */
@@ -356,35 +359,63 @@ const Artifacts: React.FC<{ artifacts: Artifact[] }> = ({ artifacts }) => {
 /* One message                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ChatGPT-style timestamp: "Aug 14, 7:06 PM". */
+const formatChatTime = (ts: number): string => {
+  try {
+    return new Date(ts).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+};
+
 /* Hover actions under one message: copy the text; edit & resend, offered only
  * on a user message whose row the core has confirmed (rowId) while the chat is
- * idle. Hidden until the message is hovered so the transcript stays calm. */
+ * idle. ChatGPT-style: transparent inline row, timestamp + small muted icons,
+ * no card background, no native tooltip box (aria-label only). */
 const BubbleActions: React.FC<{
   msg: ChatMessage;
   editable?: boolean;
   onEdit?: () => void;
-}> = ({ msg, editable = false, onEdit }) => (
-  <div className="absolute -bottom-2.5 right-0 z-10 flex items-center gap-0.5 rounded-lg border nerve-border bg-[var(--card)] px-1 py-0.5 opacity-0 shadow-sm transition group-hover:opacity-100">
+  align?: 'right' | 'left';
+  showTime?: boolean;
+}> = memo(({ msg, editable = false, onEdit, align = 'right', showTime = true }) => (
+  <div
+    className={`flex items-center gap-1.5 bg-transparent opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 ${
+      align === 'right' ? 'justify-end' : 'justify-start'
+    }`}
+  >
+    {showTime && (
+      <span className="text-[12px] leading-4 text-[var(--muted-foreground)] tabular-nums">
+        {formatChatTime(msg.createdAt)}
+      </span>
+    )}
     <button
       type="button"
-      onClick={() => void navigator.clipboard?.writeText(msg.content)}
-      className="grid size-6 place-items-center rounded text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-      title="Copy message text"
+      onClick={() => {
+        void navigator.clipboard?.writeText(msg.content).catch(() => {});
+      }}
+      aria-label="Copy message text"
+      className="flex items-center justify-center rounded p-1 text-[var(--muted-foreground)] transition hover:text-[var(--foreground)]"
     >
-      <Copy size={11} />
+      <Copy size={14} />
     </button>
     {editable && onEdit && (
       <button
         type="button"
         onClick={onEdit}
-        className="grid size-6 place-items-center rounded text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-        title="Edit this message — the replies below it are replaced"
+        aria-label="Edit this message"
+        className="flex items-center justify-center rounded p-1 text-[var(--muted-foreground)] transition hover:text-[var(--foreground)]"
       >
-        <Pencil size={11} />
+        <Pencil size={14} />
       </button>
     )}
   </div>
-);
+));
 
 /* Thumbnails for the images a message carried; everything else stays a chip
  * with its name. A click opens the file preview tab. */
@@ -453,7 +484,7 @@ const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => v
   if (msg.sender === 'user') {
     const workflow = /^\[Workflow: (inspection|dashboard|discrepancy|revision)\]\r?\n([^\n]+)/.exec(msg.content);
     return (
-      <div className="group relative flex justify-end">
+      <div className="group flex flex-col items-end gap-1">
         <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-br-md bg-[var(--card)] text-[13.5px] text-[var(--foreground)] leading-relaxed whitespace-pre-wrap">
           {workflow ? <><p className="font-medium">{workflow[2]}</p><p className="mt-1">{msg.content.split('Operator context:\n')[1] ?? ''}</p><details className="mt-2 text-xs text-[var(--muted-foreground)]"><summary className="cursor-pointer">Workflow instructions</summary><p className="mt-2">{msg.content}</p></details></> : msg.content}
           {msg.attachments && msg.attachments.length > 0 && (
@@ -462,7 +493,7 @@ const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => v
             </div>
           )}
         </div>
-        <BubbleActions msg={msg} editable={editable} onEdit={onEdit} />
+        <BubbleActions msg={msg} editable={editable} onEdit={onEdit} align="right" />
       </div>
     );
   }
@@ -492,7 +523,11 @@ const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => v
         <ActivityFlow blocks={msg.activity} />
       ) : (
         <>
-          {msg.steps && msg.steps.length > 0 && <AgentTimeline steps={msg.steps} />}
+          {msg.steps && msg.steps.length > 0 && (
+            <WorkSummary
+              blocks={[{ id: `${msg.id}-steps`, type: 'actions', steps: msg.steps }]}
+            />
+          )}
           {msg.content && <Markdown text={msg.content} />}
         </>
       )}
@@ -533,17 +568,18 @@ const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => v
         </div>
       )}
 
-      {/* Provenance: which model, how fast, how long */}
+      {/* Provenance: which model, how fast, how long, when */}
       {(model || msg.elapsedMs !== undefined) && (
-        <div className="flex items-center space-x-3 text-[10px] text-[var(--muted-foreground)] tabular-nums">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] leading-4 text-[var(--muted-foreground)] tabular-nums">
           {model && <span>{model.displayName}</span>}
           {msg.mode && <span>{msg.mode === 'plan' ? 'plan mode' : 'agent mode'}</span>}
           {msg.elapsedMs !== undefined && <span>{formatDuration(msg.elapsedMs)}</span>}
           {msg.tokensPerSec !== undefined && <span>{msg.tokensPerSec.toFixed(1)} tok/s</span>}
+          <span>{formatChatTime(msg.createdAt)}</span>
         </div>
       )}
 
-      <BubbleActions msg={msg} />
+      <BubbleActions msg={msg} align="left" showTime={!(model || msg.elapsedMs !== undefined)} />
     </div>
   );
 };
@@ -595,6 +631,7 @@ const EditingBubble: React.FC<{
         <textarea
           ref={areaRef}
           value={text}
+          aria-label="Edit your message"
           onChange={(event) => onChangeText(event.target.value)}
           onPaste={stagePastedImages((added) => {
             if (added.length === 0) return;
@@ -619,7 +656,7 @@ const EditingBubble: React.FC<{
               attachments={attached.map((path) => ({
                 id: `edit-att-${path}`,
                 path,
-                fileName: path.split(/[\\/]/).pop() ?? path,
+                fileName: basename(path),
                 kind: 'image',
                 sizeBytes: 0,
               }))}

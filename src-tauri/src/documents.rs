@@ -1683,7 +1683,7 @@ fn b64(bytes: &[u8]) -> String {
 /// it, which is also why the id is stored on the document row.
 fn choose_vision_model(st: &AppState, kind: DocumentKind, why: &str, pages: usize) -> CoreResult<String> {
     let decision = {
-        let reg = st.registry.read().expect("registry lock");
+        let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
         reg.route(task_of(kind), None)
     };
 
@@ -1850,7 +1850,7 @@ async fn ocr_pages(
     /* ---- §3 escalation: one more pass, with a model that reads what this one could not ---- */
     if !thin.is_empty() {
         let escalate = {
-            let reg = st.registry.read().expect("registry lock");
+            let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
             reg.escalation(task_of(kind), model_id)
         };
         match escalate {

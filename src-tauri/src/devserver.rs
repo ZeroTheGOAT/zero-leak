@@ -98,7 +98,7 @@ impl DevServers {
     /// as live — which is right: the axum task's life is the app's, and
     /// `preview::serve` probes the port before reusing one.
     pub fn status(&self) -> Vec<DevServerStatus> {
-        let mut entries = self.entries.lock().expect("dev server registry lock");
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for e in entries.values_mut() {
             let alive = winproc::pid_alive(e.status.pid);
             note_exit(&mut e.status, alive);
@@ -156,8 +156,7 @@ pub(crate) fn register_inprocess(
     let same_listener = st
         .dev_servers
         .entries
-        .lock()
-        .expect("dev server registry lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .get(&status.workspace_id)
         .is_some_and(|e| same_inprocess_listener(&e.status, &status));
     if !same_listener {
@@ -170,8 +169,7 @@ pub(crate) fn register_inprocess(
     };
     st.dev_servers
         .entries
-        .lock()
-        .expect("dev server registry lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .insert(status.workspace_id.clone(), entry);
     emit(st, &status);
 }
@@ -330,7 +328,7 @@ pub async fn start(
         Fresh,
     }
     let reuse = {
-        let entries = st.dev_servers.entries.lock().expect("dev server registry lock");
+        let entries = st.dev_servers.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get(workspace_id) {
             Some(entry)
                 if matches!(entry.status.status, DevServerState::Starting | DevServerState::Running)
@@ -364,7 +362,7 @@ async fn wait_for_start(st: &Arc<AppState>, workspace_id: &str) -> CoreResult<De
     let deadline = Instant::now() + READY_DEADLINE + PORT_DEADLINE;
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let entries = st.dev_servers.entries.lock().expect("dev server registry lock");
+        let entries = st.dev_servers.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get(workspace_id) {
             match entry.status.status {
                 DevServerState::Running => return Ok(entry.status.clone()),
@@ -415,6 +413,30 @@ Pass the plain command, e.g. \"npm run dev\"."
             "'{program}' is not a program a dev server may be started through. Allowed: npm, npx, node, yarn, \
 pnpm, python, deno, bun."
         )));
+    }
+    // Same deny-list as the sandbox: an allowed stem with a denied phrase in
+    // its arguments (e.g. `curl` buried after `node`) is still refused.
+    // `refuse_reason` also re-checks shell operators, so the check above and
+    // the policy cannot drift.
+    {
+        let policy = crate::registry::default_sandbox_policy();
+        if let Some(reason) = crate::sandbox::refuse_reason(command, &policy) {
+            return Err(CoreError::Denied(reason));
+        }
+    }
+    // Inline-code execution has no place in a persistent server: `node -e`,
+    // `python -c`, `npx -p <pkg>` and friends turn an allowed stem into
+    // arbitrary code with server lifetime. Start a file or a package script.
+    {
+        let lowered: Vec<String> = parts[1..].iter().map(|a| a.to_ascii_lowercase()).collect();
+        let evalish = [
+            "-e", "--eval", "-c", "--command", "-p", "--package", "--eval-string",
+        ];
+        if lowered.iter().any(|a| evalish.contains(&a.as_str())) {
+            return Err(CoreError::Denied(
+                "A dev server command may not use inline-code flags (-e/--eval, -c, -p/--package). Start a file or a package script instead.".into(),
+            ));
+        }
     }
     let Some(resolved) = crate::sandbox::resolve_program(program) else {
         return Err(CoreError::ExecutionFailed(format!(
@@ -474,7 +496,7 @@ suffix in PATHEXT), so the dev server could not start."
             let reader = BufReader::new(pipe);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
-                let mut ring = ring.lock().expect("dev server output ring lock");
+                let mut ring = ring.lock().unwrap_or_else(|e| e.into_inner());
                 ring.push(crate::sandbox::truncate_line(&line));
                 let excess = ring.len().saturating_sub(OUTPUT_RING);
                 if excess > 0 {
@@ -497,7 +519,7 @@ suffix in PATHEXT), so the dev server could not start."
         output: Vec::new(),
     };
     emit(st, &initial);
-    st.dev_servers.entries.lock().expect("dev server registry lock").insert(
+    st.dev_servers.entries.lock().unwrap_or_else(|e| e.into_inner()).insert(
         workspace_id.to_string(),
         Entry { status: initial, kill, stopping: Arc::clone(&stopping) },
     );
@@ -509,7 +531,7 @@ suffix in PATHEXT), so the dev server could not start."
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
         let entries = &watch_st.dev_servers.entries;
-        let mut entries = entries.lock().expect("dev server registry lock");
+        let mut entries = entries.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = entries.get_mut(&watch_id) else { return };
         if entry.stopping.load(Ordering::Relaxed) {
             entry.status.status = DevServerState::Stopped;
@@ -517,7 +539,7 @@ suffix in PATHEXT), so the dev server could not start."
         } else {
             entry.status.status = DevServerState::Failed;
             entry.status.url = None;
-            let tail = output_tail(&watch_output.lock().expect("dev server output ring lock"));
+            let tail = output_tail(&watch_output.lock().unwrap_or_else(|e| e.into_inner()));
             entry.status.error = Some(format!(
                 "The dev server exited unexpectedly{}. {}",
                 code.map(|c| format!(" (exit code {c})")).unwrap_or_default(),
@@ -541,7 +563,7 @@ suffix in PATHEXT), so the dev server could not start."
             // Re-read every tick rather than scanning incrementally: a server
             // whose configured port was taken prints the rejected number
             // first and the real URL after it, so the latest URL is the truth.
-            best_port(&output.lock().expect("dev server output ring lock"))
+            best_port(&output.lock().unwrap_or_else(|e| e.into_inner()))
         } else {
             None
         };
@@ -568,14 +590,14 @@ suffix in PATHEXT), so the dev server could not start."
             if probe.is_ok() {
                 let url = format!("http://127.0.0.1:{p}/");
                 let entries = &st.dev_servers.entries;
-                let mut entries = entries.lock().expect("dev server registry lock");
+                let mut entries = entries.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(entry) = entries.get_mut(workspace_id) {
                     if winproc::pid_alive(entry.status.pid) {
                         entry.status.port = Some(p);
                         entry.status.url = Some(url.clone());
                         entry.status.status = DevServerState::Running;
                         entry.status.output =
-                            output.lock().expect("dev server output ring lock").clone();
+                            output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         let status = entry.status.clone();
                         emit(st, &status);
                         return Ok(status);
@@ -587,7 +609,7 @@ suffix in PATHEXT), so the dev server could not start."
     }
 
     // Not ready. Kill it, and say why with the server's own output.
-    let ring = output.lock().expect("dev server output ring lock").clone();
+    let ring = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let failure = if !winproc::pid_alive(pid) {
         format!(
             "The dev server exited before it was reachable. {}",
@@ -626,8 +648,7 @@ seconds. Last output:\n{}",
     let entry = st
         .dev_servers
         .entries
-        .lock()
-        .expect("dev server registry lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .remove(workspace_id);
     if let Some(entry) = entry {
         let mut status = entry.status;
@@ -647,8 +668,7 @@ pub fn stop(st: &AppState, workspace_id: &str) -> CoreResult<()> {
     let entry = st
         .dev_servers
         .entries
-        .lock()
-        .expect("dev server registry lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .remove(workspace_id);
     let Some(entry) = entry else { return Ok(()) };
     entry.stopping.store(true, Ordering::Relaxed);
@@ -667,8 +687,7 @@ pub fn stop_all(st: &AppState) {
     let ids: Vec<String> = st
         .dev_servers
         .entries
-        .lock()
-        .expect("dev server registry lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .keys()
         .cloned()
         .collect();

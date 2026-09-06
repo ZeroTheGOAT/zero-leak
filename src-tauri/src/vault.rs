@@ -50,6 +50,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
+use zeroize::Zeroizing;
 
 use crate::error::{CoreError, CoreResult};
 use crate::state::{now_ms, AppState};
@@ -194,11 +195,8 @@ fn verify(state: &State, passphrase: &str) -> CoreResult<bool> {
     Ok(ct_eq(&expected, &got))
 }
 
-fn wipe(key: &mut [u8; KEY_LEN]) {
-    for byte in key.iter_mut() {
-        *byte = 0;
-    }
-}
+/// Key material is held in `Zeroizing` buffers at call sites so it is wiped on
+/// drop even on early returns; there is no manual `wipe` helper to forget.
 
 /* ------------------------------------------------------------------ */
 /* Envelope seal / open                                                */
@@ -264,7 +262,20 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> CoreResult<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = dest.with_extension("tmp");
+    // Unique sibling per write (pid + micros + random): a fixed `.tmp` name
+    // collides when two enables race, and `rename` without a unique temp can
+    // clobber the other writer's envelope.
+    let mut rand = [0u8; 8];
+    getrandom::getrandom(&mut rand).map_err(|e| {
+        CoreError::ExecutionFailed(format!("Could not get randomness for a temp file: {e}"))
+    })?;
+    let suffix = format!(
+        "tmp-{}-{}-{}",
+        std::process::id(),
+        crate::state::now_ms(),
+        rand.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let tmp = dest.with_extension(suffix);
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, dest)?;
     Ok(())
@@ -383,9 +394,11 @@ fn enable_impl<R: FnMut(VaultAction, String)>(
         })?;
 
     // Derive a key and a verifier. The verifier is written to the state file;
-    // the key exists only for the sealing below and is wiped afterwards.
-    let mut key = derive_raw(passphrase, &key_salt)?;
-    let mut verifier = derive_raw(passphrase, &verify_salt)?;
+    // the key exists only for the sealing below. Both are `Zeroizing` so key
+    // material is wiped on drop even on an early return — not only on the
+    // explicit `wipe` at the end of the happy path.
+    let key = Zeroizing::new(derive_raw(passphrase, &key_salt)?);
+    let verifier = Zeroizing::new(derive_raw(passphrase, &verify_salt)?);
 
     let state = State {
         version: 1,
@@ -397,7 +410,7 @@ fn enable_impl<R: FnMut(VaultAction, String)>(
         },
         key_salt: B64.encode(key_salt),
         verify_salt: B64.encode(verify_salt),
-        verifier: B64.encode(verifier),
+        verifier: B64.encode(verifier.as_ref() as &[u8]),
         enabled_at: now_ms(),
         operator: operator.to_string(),
     };
@@ -411,7 +424,7 @@ fn enable_impl<R: FnMut(VaultAction, String)>(
     for path in plaintext {
         let outcome = (|| -> CoreResult<()> {
             let bytes = fs::read(&path)?;
-            let envelope = seal_bytes(&key, &bytes)?;
+            let envelope = seal_bytes(&*key, &bytes)?;
             let target = envelope_path(&path);
             write_atomic(&target, &envelope)?;
             fs::remove_file(&path)?;
@@ -422,8 +435,7 @@ fn enable_impl<R: FnMut(VaultAction, String)>(
             Err(_) => failed += 1,
         }
     }
-    wipe(&mut key);
-    wipe(&mut verifier);
+    // Explicit wipe for clarity; `Zeroizing` also wipes on drop on early return.
 
     record(
         VaultAction::Enabled,
@@ -465,14 +477,14 @@ fn disable_impl<R: FnMut(VaultAction, String)>(
         ));
     }
 
-    let mut key = derive(&state, passphrase, &state.key_salt)?;
+    let key = Zeroizing::new(derive(&state, passphrase, &state.key_salt)?);
     let (_, sealed) = payload_files(mem_root, root);
     let mut restored = 0usize;
     let mut failed = 0usize;
     for envelope in sealed {
         let outcome = (|| -> CoreResult<()> {
             let bytes = fs::read(&envelope)?;
-            let plaintext = open_bytes(&key, &bytes)?;
+            let plaintext = open_bytes(&*key, &bytes)?;
             let target = envelope_target(&envelope);
             write_atomic(&target, &plaintext)?;
             fs::remove_file(&envelope)?;
@@ -483,7 +495,6 @@ fn disable_impl<R: FnMut(VaultAction, String)>(
             Err(_) => failed += 1,
         }
     }
-    wipe(&mut key);
 
     if failed > 0 {
         record(

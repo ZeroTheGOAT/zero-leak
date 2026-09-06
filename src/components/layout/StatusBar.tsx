@@ -78,6 +78,7 @@ export const StatusBar: React.FC = () => {
             </span>
             <button
               onClick={() => dismissFailure(latest.id)}
+              aria-label="Dismiss latest failure"
               className="hover:text-[var(--foreground)] flex-shrink-0"
               title="Dismiss"
             >
@@ -100,6 +101,7 @@ export const StatusBar: React.FC = () => {
       <div className="flex items-center space-x-4 flex-shrink-0">
         <button
           onClick={() => openTab('models', 'Models')}
+          aria-label="Open model runtime panel"
           className="flex items-center space-x-1.5 hover:text-[var(--foreground)] transition"
           title="Model runtime"
         >
@@ -115,9 +117,9 @@ export const StatusBar: React.FC = () => {
                   })
                   .join(' · ')}
           </span>
-          {loaded.length === 1 && modelRuntime[loaded[0].id]?.loadTimeMs !== undefined && (
+          {loaded.length === 1 && modelRuntime[loaded[0]?.id ?? '']?.loadTimeMs !== undefined && (
             <span className="text-[var(--muted-foreground)] opacity-70">
-              ({formatDuration(modelRuntime[loaded[0].id].loadTimeMs!)} to load)
+              ({formatDuration(modelRuntime[loaded[0]?.id ?? '']?.loadTimeMs ?? 0)} to load)
             </span>
           )}
         </button>

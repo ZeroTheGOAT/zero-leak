@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { AlertTriangle, FileEdit, ShieldQuestion, Terminal, Trash2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { toolByName } from '../../services/registry';
@@ -35,15 +35,40 @@ const RISK_LABEL: Record<ToolRisk, string> = {
  */
 export const PermissionPrompt: React.FC = () => {
   const { pendingPermission, respondToPermission, workspaces } = useApp();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const rejectRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!pendingPermission) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Initial focus on the safe action.
+    const frame = requestAnimationFrame(() => rejectRef.current?.focus());
     const onKey = (e: KeyboardEvent) => {
       // Escape rejects. There is no keyboard shortcut for allow.
       if (e.key === 'Escape') void respondToPermission('reject');
+      // Focus trap: keep Tab cycling inside the dialog.
+      if (e.key === 'Tab' && dialogRef.current) {
+        const controls = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (!first || !last) return;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      cancelAnimationFrame(frame);
+      if (previous?.isConnected) previous.focus();
+    };
   }, [pendingPermission, respondToPermission]);
 
   if (!pendingPermission) return null;
@@ -59,12 +84,19 @@ export const PermissionPrompt: React.FC = () => {
       className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-sm"
       style={{ background: 'color-mix(in oklab, var(--background) 72%, transparent)' }}
     >
-      <div className="w-full max-w-lg overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="permission-title"
+        aria-describedby="permission-rationale"
+        className="w-full max-w-lg overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover"
+      >
         {/* Header */}
         <div className={`px-4 py-3 border-b flex items-start space-x-3 ${RISK_TONE[req.risk]}`}>
           <Icon size={18} className="flex-shrink-0 mt-0.5" />
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-[var(--popover-foreground)]">{req.title}</h2>
+            <h2 id="permission-title" className="text-sm font-semibold text-[var(--popover-foreground)]">{req.title}</h2>
             <p className="text-[11px] mt-0.5">
               {RISK_LABEL[req.risk]} · {tool?.label ?? req.tool}
             </p>
@@ -72,7 +104,7 @@ export const PermissionPrompt: React.FC = () => {
         </div>
 
         <div className="px-4 py-3 space-y-3">
-          <p className="text-xs leading-relaxed text-[var(--popover-foreground)]">{req.rationale}</p>
+          <p id="permission-rationale" className="text-xs leading-relaxed text-[var(--popover-foreground)]">{req.rationale}</p>
 
           <div className="space-y-1.5 text-[11px]">
             <div className="flex items-start space-x-2">
@@ -107,7 +139,9 @@ export const PermissionPrompt: React.FC = () => {
         {/* Decisions */}
         <div className="flex items-center justify-end space-x-2 border-t nerve-border bg-[var(--card)] px-4 py-3">
           <button
+            ref={rejectRef}
             onClick={() => void respondToPermission('reject')}
+            aria-label="Reject this action"
             className="rounded-md border nerve-border px-3 py-1.5 text-xs text-[var(--card-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]"
           >
             Reject
@@ -115,6 +149,7 @@ export const PermissionPrompt: React.FC = () => {
           {!destructive && (
             <button
               onClick={() => void respondToPermission('allow_session')}
+              aria-label="Allow this tool for the rest of this session in this workspace"
               className="rounded-md border nerve-border px-3 py-1.5 text-xs text-[var(--card-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]"
               title="Allow this tool for the rest of this session, in this workspace only"
             >
@@ -123,6 +158,7 @@ export const PermissionPrompt: React.FC = () => {
           )}
           <button
             onClick={() => void respondToPermission('allow_once')}
+            aria-label={destructive ? 'Allow this destructive action once' : 'Allow this action once'}
             className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
               destructive
                 ? 'bg-[var(--destructive-solid)] text-[var(--destructive-solid-foreground)] hover:brightness-110'

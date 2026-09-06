@@ -295,6 +295,237 @@
   --sidebar-ring: oklch(0.7731 0.018 150);
 }
 
+:root[data-theme="zero"],
+[data-theme-preview="zero"][data-color-mode="light"] {
+  --background: #ffffff;
+  --foreground: #0d0d0d;
+  --card: #f4f4f4;
+  --card-foreground: #0d0d0d;
+  --popover: #ffffff;
+  --popover-foreground: #0d0d0d;
+  --primary: #000000;
+  --primary-foreground: #ffffff;
+  --secondary: #ececec;
+  --secondary-foreground: #0d0d0d;
+  --muted: #f4f4f4;
+  --muted-foreground: #5d5d5d;
+  --accent: #ececec;
+  --accent-foreground: #0d0d0d;
+  --destructive: #d92d20;
+  --destructive-foreground: #ffffff;
+  --destructive-solid: #d92d20;
+  --destructive-solid-foreground: #ffffff;
+  --success: #067647;
+  --success-foreground: #ffffff;
+  --warning: #b54708;
+  --warning-foreground: #ffffff;
+  --info: #175cd3;
+  --info-foreground: #ffffff;
+  --border: #e5e5e5;
+  --input: #d9d9d9;
+  --ring: #0d0d0d;
+  --chart-1: #0d0d0d;
+  --chart-2: #5d5d5d;
+  --chart-3: #9b9b9b;
+  --chart-4: #10a37f;
+  --chart-5: #067647;
+  --sidebar: #f9f9f9;
+  --sidebar-foreground: #0d0d0d;
+  --sidebar-primary: #000000;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #ececec;
+  --sidebar-accent-foreground: #0d0d0d;
+  --sidebar-border: #e5e5e5;
+  --sidebar-ring: #d9d9d9;
+}
+
+:root[data-theme="zero"].dark,
+[data-theme-preview="zero"][data-color-mode="dark"] {
+  --background: #171717;
+  --foreground: #ececec;
+  --card: #2f2f2f;
+  --card-foreground: #ececec;
+  --popover: #2f2f2f;
+  --popover-foreground: #ececec;
+  --primary: #ffffff;
+  --primary-foreground: #171717;
+  --secondary: #2f2f2f;
+  --secondary-foreground: #ececec;
+  --muted: #2f2f2f;
+  --muted-foreground: #b4b4b4;
+  /* Hover fill must stand one step lighter than the popover/menu surface
+     (--popover is #2f2f2f): when accent equals the surface, hover states on
+     menu rows, popovers and chips become invisible. #353535 is the lift
+     ChatGPT itself uses for hover rows on these grays. */
+  --accent: #353535;
+  --accent-foreground: #ececec;
+  --destructive: #f97066;
+  --destructive-foreground: #171717;
+  --destructive-solid: #d92d20;
+  --destructive-solid-foreground: #ffffff;
+  --success: #19c37d;
+  --success-foreground: #171717;
+  --warning: #f5b544;
+  --warning-foreground: #171717;
+  --info: #6eacf5;
+  --info-foreground: #171717;
+  --border: #2e2e2e;
+  --input: #424242;
+  --ring: #ffffff;
+  --chart-1: #ffffff;
+  --chart-2: #b4b4b4;
+  --chart-3: #8e8e8e;
+  --chart-4: #19c37d;
+  --chart-5: #10a37f;
+  --sidebar: #212121;
+  --sidebar-foreground: #ececec;
+  --sidebar-primary: #2f2f2f;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2f2f2f;
+  --sidebar-accent-foreground: #ececec;
+  --sidebar-border: #2e2e2e;
+  --sidebar-ring: #424242;
+}
+
+/*
+ * Zero theme: filled composer like the reference. The composer shell is built
+ * as bg-background + border in every theme (see FloatingInput), while the
+ * reference renders it as a solid card fill (#2f2f2f on #171717, #f4f4f4 on
+ * #ffffff) with no visible outline. Remap it here so Zero matches exactly
+ * without changing the structure other themes rely on.
+ */
+:root[data-theme="zero"] .composer-shell,
+[data-theme-preview="zero"] .composer-shell {
+  background-color: var(--card);
+  border-color: transparent;
+  box-shadow: none;
+}
+:root[data-theme="zero"] .composer-shell:focus-within,
+[data-theme-preview="zero"] .composer-shell:focus-within {
+  border-color: transparent;
+}
+
+/*
+ * Zero theme: ChatGPT chrome. TitleBar + StatusBar use `nerve-card`
+ * (var(--card) #2f2f2f) in every theme, which reads as a light gray strip
+ * on top/bottom. The reference blends those bars with the surrounding
+ * surfaces — top bar same as the left bar (#212121), bottom bar same as
+ * the main area — with a hairline divider, never a gray card.
+ */
+:root[data-theme="zero"] header.nerve-card,
+[data-theme-preview="zero"] header.nerve-card {
+  background-color: var(--sidebar);
+  border-bottom-color: var(--sidebar-border);
+}
+:root[data-theme="zero"] footer.nerve-card,
+[data-theme-preview="zero"] footer.nerve-card {
+  background-color: var(--sidebar);
+  border-top-color: var(--sidebar-border);
+}
+/* Sidebar profile footer: blend with the left bar, not a gray card. */
+:root[data-theme="zero"] aside .h-14.bg-\[var\(--card\)\],
+[data-theme-preview="zero"] aside .h-14.bg-\[var\(--card\)\] {
+  background-color: var(--sidebar);
+  border-top-color: var(--sidebar-border);
+}
+/* Sidebar/main divider: hairline like the reference, not a visible border. */
+:root[data-theme="zero"] aside.bg-\[var\(--sidebar\)\],
+[data-theme-preview="zero"] aside.bg-\[var\(--sidebar\)\] {
+  border-right-color: var(--sidebar-border);
+}
+/*
+ * Zero theme: ChatGPT chat bar shape. Reference composer is a 24-28px
+ * rounded filled card with no outline; the attached project row beneath it
+ * is darker than the composer with bottom rounding only.
+ */
+:root[data-theme="zero"] .composer-shell:not(.rounded-b-none),
+[data-theme-preview="zero"] .composer-shell:not(.rounded-b-none) {
+  border-radius: 24px;
+}
+:root[data-theme="zero"] .composer-shell.rounded-b-none,
+[data-theme-preview="zero"] .composer-shell.rounded-b-none {
+  border-radius: 24px 24px 0 0;
+}
+:root[data-theme="zero"] .composer-attached,
+[data-theme-preview="zero"] .composer-attached {
+  background-color: var(--sidebar);
+  border-color: var(--sidebar-border);
+  border-radius: 0 0 24px 24px;
+}
+/* Right panel: the same surface as the chat canvas, not a gray card — the
+ * reference panel reads as one fill with the conversation beside it. */
+:root[data-theme="zero"] aside.bg-\[var\(--card\)\].border-l,
+[data-theme-preview="zero"] aside.bg-\[var\(--card\)\].border-l {
+  background-color: var(--background);
+  border-left-color: var(--sidebar-border);
+}
+/*
+ * Zero theme: Files tab filter. The reference panel is one uniform fill with
+ * a filled filter pill; here the filter sits darker than the body instead of
+ * filled lighter. Other themes keep their own surfaces.
+ */
+:root[data-theme="zero"] .file-filter,
+[data-theme-preview="zero"] .file-filter {
+  background-color: var(--card);
+}
+/*
+ * Zero theme: settings preview cards. The card buttons use var(--accent),
+ * which in Zero equals the section fill (both #2f2f2f dark), so the boxes
+ * around each theme / color-mode option melt into the section and the
+ * hairlines go with them. Give the boxes their own fill + solid edge.
+ */
+:root[data-theme="zero"] .preview-card {
+  background-color: var(--background);
+  border-color: var(--input);
+}
+:root[data-theme="zero"] .preview-card.border-\[var\(--primary\)\] {
+  border-color: var(--primary);
+}
+:root[data-theme="zero"] .preview-card:hover {
+  background-color: var(--sidebar);
+}
+:root[data-theme="zero"] .preview-frame {
+  border-color: var(--input);
+}
+:root[data-theme="zero"] .preview-radio {
+  border-color: var(--input);
+}
+/*
+ * Divider inside a Zero preview (Theme row Zero halves, Color-mode System
+ * halves while Zero is active). Zero's own border is near-black, so the
+ * 40%-mix divider vanishes between the light and dark halves. A mid-gray
+ * reads on both halves, whatever the current theme is.
+ */
+.preview-divider[data-theme-preview="zero"] {
+  border-left-color: #8e8e8e;
+}
+/*
+ * Zero theme: composer top pills (Agent / planning / permission / docs /
+ * local models). They used var(--card), the exact composer fill, so the
+ * buttons melted into the background. Make them a step darker than the
+ * composer so each pill reads as a button: #212121 on #2f2f2f in dark,
+ * #ececec on #f4f4f4 in light.
+ */
+:root[data-theme="zero"].dark .composer-tab,
+[data-theme-preview="zero"][data-color-mode="dark"] .composer-tab {
+  background-color: var(--sidebar);
+  border-color: var(--sidebar-border);
+  color: var(--muted-foreground);
+}
+:root[data-theme="zero"]:not(.dark) .composer-tab,
+[data-theme-preview="zero"][data-color-mode="light"] .composer-tab {
+  background-color: var(--accent);
+  border-color: var(--border);
+  color: var(--muted-foreground);
+}
+:root[data-theme="zero"]:not(.dark) .composer-tab:hover:not(:disabled),
+:root[data-theme="zero"]:not(.dark) .composer-tab[data-state='open'],
+[data-theme-preview="zero"][data-color-mode="light"] .composer-tab:hover:not(:disabled),
+[data-theme-preview="zero"][data-color-mode="light"] .composer-tab[data-state='open'] {
+  background-color: var(--card);
+  color: var(--foreground);
+}
+
 :root {
   /* Nerve's compact readable scale keeps everyday use comfortable at 100% zoom. */
   --text-xs: 0.8125rem;
@@ -381,6 +612,39 @@
   --accent-2-soft: color-mix(in oklab, var(--chart-2) 12%, transparent);
   --accent-2-ring: color-mix(in oklab, var(--chart-2) 34%, transparent);
 }
+
+/*
+ * Code view token colors. Editor content keeps fixed VS Code-like hues in
+ * every workbench theme — the way a color theme rides along regardless of
+ * the surrounding chrome. Dark and light variants swap with color-scheme.
+ */
+.code-tok-kw { color: #c586c0; }
+.code-tok-str { color: #ce9178; }
+.code-tok-num { color: #b5cea8; }
+.code-tok-com { color: #6a9955; }
+.code-tok-fn { color: #dcdcaa; }
+:root:not(.dark) .code-tok-kw { color: #0000ff; }
+:root:not(.dark) .code-tok-str { color: #a31515; }
+:root:not(.dark) .code-tok-num { color: #098658; }
+:root:not(.dark) .code-tok-com { color: #008000; }
+:root:not(.dark) .code-tok-fn { color: #795e26; }
+
+/*
+ * Open-with menu rows. The popover fill equals the accent fill in Zero, so a
+ * plain accent hover would be invisible — tint with the foreground instead,
+ * which reads on every theme, dark or light.
+ */
+.open-menu-row { transition: background-color 120ms ease; }
+.open-menu-row:hover { background-color: color-mix(in oklab, var(--foreground) 10%, transparent); }
+
+/*
+ * Approval policy options. Same story as the menu rows: the popover fill
+ * equals the accent fill in Zero, so accent alone cannot mark the chosen
+ * policy — tint with the foreground instead, in every theme.
+ */
+.policy-row { transition: background-color 120ms ease; }
+.policy-row:hover { background-color: color-mix(in oklab, var(--foreground) 8%, transparent); }
+.policy-row-active, .policy-row-active:hover { background-color: color-mix(in oklab, var(--foreground) 14%, transparent); }
 
 /* color-scheme drives native scrollbars, form controls and caret. applyAppearance()
    also sets it inline; these rules keep it right before React mounts. */

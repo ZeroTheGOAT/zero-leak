@@ -177,6 +177,28 @@ fn kind_from_extension(name: &str) -> Option<ArtifactKind> {
     EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, k)| *k)
 }
 
+/// The artifacts root that applies to one workspace. App-created projects are
+/// containers under `projects/<workspace-id>`; their generated outputs stay in
+/// that same container instead of leaking into the global artifact directory.
+/// Legacy externally-added workspaces return `None` and keep the configured
+/// global destination.
+///
+/// Shared by `resolve` (which writes) and `open` (which re-checks the boundary
+/// before handing a path to the shell), so the writer and the boundary can
+/// never disagree about where an artifact is allowed to live.
+fn managed_artifact_root(st: &AppState, workspace_id: Option<&str>) -> Option<PathBuf> {
+    let id = workspace_id?;
+    let ws = st.with_db(|c| db::workspace(c, id)).ok()?;
+    let container = crate::registry::sovereign_root().join("projects").join(id);
+    let container = std::fs::canonicalize(container).ok()?;
+    let workspace = std::fs::canonicalize(ws.path).ok()?;
+    if within(&container, &workspace) {
+        Some(container.join("artifacts"))
+    } else {
+        None
+    }
+}
+
 /// Path inside the artifact folder for a sanitised name, with the folder created
 /// if it does not exist yet.
 ///
@@ -190,21 +212,7 @@ fn resolve(
     workspace_id: Option<&str>,
     session_id: Option<&str>,
 ) -> CoreResult<(PathBuf, PathBuf)> {
-    // App-created projects are containers under `projects/<workspace-id>`.
-    // Their generated outputs stay in that same container instead of leaking
-    // into the global artifact directory. Legacy externally-added workspaces
-    // retain the configured global destination.
-    let managed_root = workspace_id.and_then(|id| {
-        let ws = st.with_db(|c| db::workspace(c, id)).ok()?;
-        let container = crate::registry::sovereign_root().join("projects").join(id);
-        let container = std::fs::canonicalize(container).ok()?;
-        let workspace = std::fs::canonicalize(ws.path).ok()?;
-        if within(&container, &workspace) {
-            Some(container.join("artifacts"))
-        } else {
-            None
-        }
-    });
+    let managed_root = managed_artifact_root(st, workspace_id);
     let root_raw = managed_root.unwrap_or_else(|| PathBuf::from(st.settings().artifact_root));
     if root_raw.as_os_str().is_empty() {
         return Err(CoreError::ExecutionFailed(
@@ -2265,10 +2273,14 @@ pub fn verify(st: &Arc<AppState>, id: &str) -> CoreResult<Artifact> {
 
 /// Opens an artifact in whatever the operating system associates with its type.
 ///
-/// The path comes from the database, but it is re-checked against the artifacts
-/// folder before being handed to the shell: a row could have been written by an
-/// earlier build with a different root, and "open whatever path is in this
-/// column" is not a thing this application should do.
+/// The path comes from the database, but it is re-checked against the folders
+/// this application writes artifacts to before being handed to the shell: a row
+/// could have been written by an earlier build with a different root, and "open
+/// whatever path is in this column" is not a thing this application should do.
+/// There are two legal homes — the configured global destination, and a project
+/// container's artifacts folder for app-created projects — and both are computed
+/// by the same helper `resolve` writes under, so this check cannot drift from
+/// the writer.
 pub fn open(st: &Arc<AppState>, id: &str) -> CoreResult<()> {
     use tauri_plugin_opener::OpenerExt;
 
@@ -2281,16 +2293,22 @@ pub fn open(st: &Arc<AppState>, id: &str) -> CoreResult<()> {
         ))
     })?;
 
-    let root = st.settings().artifact_root;
-    let root = std::fs::canonicalize(&root).map_err(|e| {
+    let configured = PathBuf::from(st.settings().artifact_root);
+    let global_root = std::fs::canonicalize(&configured).map_err(|e| {
         CoreError::ExecutionFailed(format!("The artifacts folder could not be opened ({e})."))
     })?;
-    if !within(&root, &path) {
+    let permitted: Vec<PathBuf> = std::iter::once(global_root)
+        .chain(
+            managed_artifact_root(st, art.workspace_id.as_deref())
+                .and_then(|root| std::fs::canonicalize(root).ok()),
+        )
+        .collect();
+    if !permitted.iter().any(|root| within(root, &path)) {
         return Err(CoreError::Denied(format!(
-            "{} sits outside the artifacts folder, so this application will not hand it to the \
-             shell. Move it under {} or open it from Explorer yourself.",
+            "{} sits outside the folders this application writes artifacts to, so it will not be \
+             handed to the shell. Move it under {} or open it from Explorer yourself.",
             art.path,
-            root.display()
+            configured.display()
         )));
     }
 

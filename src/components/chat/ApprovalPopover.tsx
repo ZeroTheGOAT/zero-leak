@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, ShieldCheck, ShieldHalf, Zap } from 'lucide-react';
+import { ShieldCheck, ShieldHalf, Zap } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import type { ApprovalPolicy } from '../../types';
 
@@ -69,8 +69,8 @@ export const ApprovalPopover: React.FC<{ onClose: () => void }> = ({ onClose }) 
               key={opt.value}
               onClick={() => choose(opt.value)}
               aria-pressed={active}
-              className={`flex w-full items-start space-x-2.5 rounded-lg px-2.5 py-2 text-left transition ${
-                active ? 'bg-[var(--accent)]' : 'hover:bg-[var(--accent)]'
+              className={`flex w-full items-start space-x-2.5 rounded-lg px-2.5 py-2 text-left policy-row ${
+                active ? 'policy-row-active' : ''
               }`}
             >
               <Icon
@@ -80,23 +80,18 @@ export const ApprovalPopover: React.FC<{ onClose: () => void }> = ({ onClose }) 
                 }`}
               />
               <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between">
-                  <span
-                    className={`text-xs text-[var(--popover-foreground)] ${
-                      active ? 'font-medium' : ''
-                    }`}
-                  >
-                    {opt.label}
-                  </span>
-                  {active && (
-                    <Check size={12} className="flex-shrink-0 text-[var(--success)]" />
-                  )}
+                <span
+                  className={`text-xs text-[var(--popover-foreground)] ${
+                    active ? 'font-medium' : ''
+                  }`}
+                >
+                  {opt.label}
                 </span>
                 <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--muted-foreground)]">
                   {opt.detail}
                 </span>
-            </span>
-          </button>
+              </span>
+            </button>
         );
       })}
     </div>

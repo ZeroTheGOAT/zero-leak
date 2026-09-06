@@ -3,6 +3,8 @@ import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { useApp } from './context/AppContext';
 import { TitleBar } from './components/layout/TitleBar';
 import { Sidebar } from './components/layout/Sidebar';
+import { SidebarPeek } from './components/layout/SidebarPeek';
+import { BottomPanel } from './components/layout/BottomPanel';
 import { StatusBar } from './components/layout/StatusBar';
 import { ChatContainer } from './components/chat/ChatContainer';
 import { EmptyState } from './components/chat/EmptyState';
@@ -32,7 +34,31 @@ export const AppContent: React.FC = () => {
     artifacts,
     newSession,
     isCreateProjectOpen,
+    messages,
+    isTranscriptLoaded,
+    isRunning,
+    queuedMessages,
+    isSidebarOpen,
+    sidebarLeaving,
+    showPinnedSummary,
   } = useApp();
+  // Peek-on-hover when the sidebar is collapsed (hover strip + slide-in
+  // overlay) lives in SidebarPeek, which unmounts the moment the docked
+  // sidebar opens — so it always remounts from a clean, hidden state.
+
+  // A fresh chat is the centered start screen: title plus the composer in the
+  // middle of the canvas with its project row attached. The moment the first
+  // text goes out (a message, a live run, or a queued follow-up) the same
+  // composer docks to the bottom and the transcript takes the canvas. A
+  // stored chat whose history is still arriving (e.g. right after a reload)
+  // is not new — it renders the conversation view so the screen never
+  // flashes the start screen on the way back to the open chat.
+  const isNewChat =
+    activeSessionId !== null &&
+    isTranscriptLoaded &&
+    messages.length === 0 &&
+    !isRunning &&
+    queuedMessages.length === 0;
 
   // The panel only renders once something has been opened in it, so "visible"
   // is both flags together — the button has to reflect what is on screen.
@@ -64,8 +90,20 @@ export const AppContent: React.FC = () => {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // Never hijack typing: inputs, textareas, selects and contenteditable
+      // keep their own keys (Ctrl+K in a textarea must not open search).
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target?.isContentEditable ?? false);
+      // Composition (IME) must not trigger shortcuts either.
+      if (e.isComposing || (e.keyCode === 229 && typing)) return;
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
+      // Allow the search modal's own Escape/Tab handling to win.
+      if (typing && e.key.toLowerCase() !== 'k') return;
       const key = e.key.toLowerCase();
 
       if (key === 'k') {
@@ -97,43 +135,108 @@ export const AppContent: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [setIsSearchOpen, openSettings, openTab, togglePanel, newSession]);
 
+  // The peek-on-hover and the close glide both keep a Sidebar mounted; the
+  // row behind the chat screen takes the sidebar's colour only while one is
+  // actually on screen — the rounded notch must read as the sidebar
+  // continuing behind the curve, and must vanish with it.
+  const sidebarMounted = isSidebarOpen || sidebarLeaving;
+
   return (
-    <div className="servergen-shell h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
+    <div className="servergen-shell h-full w-full flex flex-col font-sans overflow-hidden">
       <TitleBar />
 
-      <div className="flex-1 flex overflow-hidden min-h-0">
+      <div
+        className={`flex-1 flex overflow-hidden min-h-0 select-none relative ${
+          sidebarMounted ? 'bg-[var(--sidebar)]' : ''
+        }`}
+      >
         {view === 'settings' ? (
           <SettingsView />
         ) : (
           <>
-            <Sidebar />
+            {isSidebarOpen || sidebarLeaving ? (
+              /* While sidebarLeaving the sidebar is still mounted and gliding
+                 to zero width (see Sidebar's closing prop) — only once that
+                 motion finishes does the collapsed peek layout take over. */
+              <Sidebar closing={sidebarLeaving} />
+            ) : (
+              <SidebarPeek />
+            )}
 
-            {/* Centre: the task, with the composer pinned beneath it */}
-            <main className="flex-1 flex flex-col min-w-0 min-h-0 relative">
+            {/* Centre column: chat + right panel on top, and beneath it the
+                bottom terminal dock — which must span only the chat width,
+                never run under the left sidebar. */}
+            <div className="flex min-w-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 flex-1">
+            {/* Centre: the task, with the composer pinned beneath it.
+                Transcript text stays selectable; only chrome is select-none.
+                The top-left curve: the chat screen is a card in the
+                background colour sitting on the row's sidebar colour, so the
+                corner notch is the sidebar continuing behind the curve — the
+                title bar blends to the sidebar colour in the zero theme, and
+                the border-l traces the curve. Collapsed, the sidebar colour
+                and the border drop away and the screen is flat full-width. */}
+            <main
+              className={`flex-1 flex flex-col min-w-0 min-h-0 relative select-text bg-[var(--background)] rounded-tl-[14px] ${
+                sidebarMounted ? 'border-l border-[var(--border)]' : ''
+              }`}
+            >
               {/* The symbol alone: the panel it opens names its own tabs, so a
-                  label and a count out here would only repeat them. */}
+                  label and a count out here would only repeat them. Solid
+                  card chip with a real edge — it only shows while the panel
+                  is closed (the header toggle takes over once open), which
+                  is also the only time it is needed. */}
+              {!panelVisible && (
               <button
                 onClick={togglePanel}
                 aria-pressed={panelVisible}
                 aria-label={panelHint}
-                className={`absolute top-1.5 right-3 z-30 h-7 w-7 flex items-center justify-center rounded-md border transition ${
+                className={`absolute top-1.5 right-3 z-30 h-8 w-8 flex items-center justify-center rounded-md border shadow-md transition ${
                   panelVisible
                     ? 'bg-[var(--primary-soft)] border-[var(--primary-ring)] text-[var(--primary)]'
-                    : 'bg-[var(--sidebar)] border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)]'
+                    : 'bg-[var(--card)] border-[var(--input)] text-[var(--foreground)] hover:bg-[var(--accent)]'
                 }`}
                 title={panelHint}
               >
-                {panelVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+                {panelVisible ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
               </button>
-              {activeSessionId ? <ChatContainer /> : <EmptyState />}
-              {/* Docked run state — the task list and dev server live beside
-                  the composer, not in the conversation timeline. */}
-              <TaskDock />
-              <DevServerBar />
-              <FloatingInput drafts={drafts} setDrafts={setDrafts} />
-            </main>
+              )}
+              {activeSessionId === null ? (
+                <>
+                  <EmptyState />
+                  <FloatingInput drafts={drafts} setDrafts={setDrafts} layout="docked" />
+                </>
+              ) : isNewChat ? (
+                /* Fresh chat: the centered start screen. Title plus the
+                    composer in the middle of the canvas, project row
+                    attached beneath it — no transcript, no dock. */
+                <div className="flex-1 flex flex-col items-center justify-center min-h-0 overflow-y-auto px-4">
+                  <h1 className="text-2xl font-medium text-[var(--foreground)] text-center">
+                    What should we work on?
+                  </h1>
+                  <div className="w-full max-w-2xl mt-6">
+                    <FloatingInput drafts={drafts} setDrafts={setDrafts} layout="centered" />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <ChatContainer />
+                  {/* Docked run state — the task list and dev server live beside
+                      the composer, not in the conversation timeline. The Tasks
+                      checklist itself obeys View → Toggle Pinned Summary. */}
+                  {showPinnedSummary && <TaskDock />}
+                  <DevServerBar />
+                  <FloatingInput drafts={drafts} setDrafts={setDrafts} layout="docked" />
+                </>
+              )}
+              </main>
+              <RightPanel />
+            </div>
 
-            <RightPanel />
+            {/* View → Toggle Bottom Panel: the sandbox terminal dock, under
+                the chat column only. */}
+            <BottomPanel />
+            </div>
           </>
         )}
       </div>

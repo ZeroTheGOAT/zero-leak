@@ -27,6 +27,7 @@
 //! already being served returns the existing port rather than a second
 //! listener.
 
+use crate::logln;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::TcpListener as StdListener;
@@ -74,8 +75,7 @@ impl Previews {
     /// The live binding for a folder, if it has one.
     pub fn binding(&self, root: &Path) -> Option<(u16, Arc<Notify>)> {
         self.servers
-            .lock()
-            .expect("preview servers lock")
+            .lock().unwrap_or_else(|e| e.into_inner())
             .get(root)
             .map(|p| (p.port, p.shutdown.clone()))
     }
@@ -85,8 +85,7 @@ impl Previews {
     /// previews exactly as it does on spawned servers.
     pub fn remove(&self, root: &Path) -> Option<u16> {
         self.servers
-            .lock()
-            .expect("preview servers lock")
+            .lock().unwrap_or_else(|e| e.into_inner())
             .remove(root)
             .map(|p| p.port)
     }
@@ -217,7 +216,7 @@ async fn serve_with_preferred(
         // the one thing this module exists to prevent.
         st.previews.remove(root);
         shutdown.notify_waiters();
-        eprintln!("[preview] the remembered listener on {port} for {} was gone; binding again.", root.display());
+        logln!("[preview] the remembered listener on {port} for {} was gone; binding again.", root.display());
     }
 
     let folder_exists = root.is_dir();
@@ -307,7 +306,7 @@ async fn serve_with_preferred(
     // "the link stopped working after I reopened the app" bug hid: the row
     // never landed, `restore_all` found nothing, and no line said why.
     if let Err(e) = st.with_db(|conn| crate::db::upsert_preview(conn, &root_str, workspace_id, rel, port)) {
-        eprintln!(
+        logln!(
             "[preview] {root_str} is being served on {port} but could not be remembered ({e}); it will not come back automatically after a restart."
         );
     }
@@ -328,8 +327,7 @@ async fn serve_with_preferred(
     };
     st.previews
         .servers
-        .lock()
-        .expect("preview servers lock")
+        .lock().unwrap_or_else(|e| e.into_inner())
         .insert(root.to_path_buf(), Preview { port, shutdown });
     devserver::register_inprocess(st, status.clone(), kill);
     Ok(PreviewInfo { status, folder_exists, has_index: has_index(root) })
@@ -342,7 +340,7 @@ pub async fn restore_all(st: &Arc<AppState>) {
     let rows = match st.with_db(crate::db::previews) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("[preview] the remembered previews could not be read ({e}); none were re-served.");
+            logln!("[preview] the remembered previews could not be read ({e}); none were re-served.");
             return;
         }
     };
@@ -353,7 +351,7 @@ pub async fn restore_all(st: &Arc<AppState>) {
             continue;
         }
         if let Err(e) = restore(st, &row.workspace_id, &root, &row.rel, row.port).await {
-            eprintln!("[preview] could not re-serve {}: {e}", row.root);
+            logln!("[preview] could not re-serve {}: {e}", row.root);
         }
     }
 }

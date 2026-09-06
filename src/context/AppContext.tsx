@@ -62,6 +62,7 @@ import {
   VRAM_BUDGET_MB,
   VRAM_TOTAL_MB,
 } from '../services/registry';
+import { SIDEBAR_ANIM_MS } from '../components/layout/sidebarMotion';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -297,6 +298,27 @@ interface AppContextValue {
   openSettings: (page?: SettingsPage) => void;
   isSearchOpen: boolean;
   setIsSearchOpen: (v: boolean) => void;
+  /* Shell layout — driven by the ChatGPT-style File/Edit/View menu bar */
+  isSidebarOpen: boolean;
+  setIsSidebarOpen: (v: boolean) => void;
+  /**
+   * True for the short window after a close while the sidebar is still
+   * mounted and shrinking away (see AppContent). The collapsed layout takes
+   * over only once this clears.
+   */
+  sidebarLeaving: boolean;
+  /** Bottom dock hosting the sandbox terminal. View → Toggle Bottom Panel. */
+  isBottomPanelOpen: boolean;
+  setIsBottomPanelOpen: (v: boolean) => void;
+  /** Pinned run summary (the Tasks checklist docked above the composer). */
+  showPinnedSummary: boolean;
+  setShowPinnedSummary: (v: boolean) => void;
+  /** UI zoom factor (1 = actual size). Applied to the shell via CSS zoom. */
+  zoomLevel: number;
+  setZoomLevel: (v: number) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  resetZoom: () => void;
 
   /* Core connection (§15) */
   coreStatus: CoreStatus;
@@ -375,9 +397,22 @@ interface AppContextValue {
   ) => string | null;
   deleteSession: (id: string) => Promise<void>;
   setSessionMemory: (useMemories: boolean, contributeMemories: boolean) => Promise<void>;
+  /**
+   * Attaches an empty personal chat to a project before its first turn. The
+   * next turn carries the workspace id and the core's `touch_session`
+   * persists the same binding, so this stays a local rebind.
+   */
+  setSessionWorkspace: (sessionId: string, workspaceId: string | null) => void;
 
   /* Conversation (§6) */
   messages: ChatMessage[];
+  /**
+   * Whether the open chat's transcript is on screen — either read back from
+   * the core or created empty in this run. False only for the gap between
+   * reopening a stored chat (e.g. after a reload) and its history arriving,
+   * during which the chat is neither new nor yet readable.
+   */
+  isTranscriptLoaded: boolean;
   mode: AgentMode;
   setMode: (m: AgentMode) => void;
   /** The open chat has a turn in flight. Chats run concurrently, so this is
@@ -496,6 +531,7 @@ interface AppContextValue {
   sandboxRuns: SandboxRun[];
   runInSandbox: (command: string) => Promise<void>;
   killRun: (runId: string) => Promise<void>;
+  clearSandboxRuns: () => void;
 
   /* Audit (§12) */
   auditLog: ToolCallRecord[];
@@ -523,6 +559,136 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [view, setView] = useState<ViewName>('workbench');
   const [settingsPage, setSettingsPage] = useState<SettingsPage>('workbench');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  /* Shell layout — menu-bar driven, persisted like the composer mode. */
+  const [isSidebarOpen, setIsSidebarOpenState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('servergen.sidebar-open.v1') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  /* A close is animated: the sidebar stays mounted (sidebarLeaving) while it
+     shrinks away, and only then does the collapsed layout mount. The mirror
+     ref lets us ignore redundant set calls without reading state in a loop. */
+  const sidebarOpenRef = useRef(isSidebarOpen);
+  const [sidebarLeaving, setSidebarLeaving] = useState(false);
+  const sidebarCloseTimer = useRef<number | null>(null);
+  const setIsSidebarOpen = useCallback((v: boolean) => {
+    if (v === sidebarOpenRef.current) return;
+    sidebarOpenRef.current = v;
+    if (v) {
+      // Reopening cancels any in-flight collapse so the sidebar is never
+      // yanked away mid-transition (a fast toggle open glides back in).
+      if (sidebarCloseTimer.current !== null) {
+        window.clearTimeout(sidebarCloseTimer.current);
+        sidebarCloseTimer.current = null;
+      }
+      setSidebarLeaving(false);
+    } else {
+      setSidebarLeaving(true);
+      if (sidebarCloseTimer.current !== null) {
+        window.clearTimeout(sidebarCloseTimer.current);
+        sidebarCloseTimer.current = null;
+      }
+      // Slightly longer than the motion itself so the last frame of the
+      // transition is never cut short by the unmount.
+      sidebarCloseTimer.current = window.setTimeout(() => {
+        sidebarCloseTimer.current = null;
+        setSidebarLeaving(false);
+      }, SIDEBAR_ANIM_MS + 80);
+    }
+    setIsSidebarOpenState(v);
+    try {
+      localStorage.setItem('servergen.sidebar-open.v1', v ? '1' : '0');
+    } catch {
+      /* Storage blocked: the sidebar simply will not survive a reload. */
+    }
+  }, []);
+  useEffect(
+    () => () => {
+      if (sidebarCloseTimer.current !== null) {
+        window.clearTimeout(sidebarCloseTimer.current);
+      }
+    },
+    [],
+  );
+  const [isBottomPanelOpen, setIsBottomPanelOpenState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('servergen.bottom-panel-open.v1') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const setIsBottomPanelOpen = useCallback((v: boolean) => {
+    setIsBottomPanelOpenState(v);
+    try {
+      localStorage.setItem('servergen.bottom-panel-open.v1', v ? '1' : '0');
+    } catch {
+      /* Storage blocked: the dock simply will not survive a reload. */
+    }
+  }, []);
+  const [showPinnedSummary, setShowPinnedSummaryState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('servergen.pinned-summary.v1') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const setShowPinnedSummary = useCallback((v: boolean) => {
+    setShowPinnedSummaryState(v);
+    try {
+      localStorage.setItem('servergen.pinned-summary.v1', v ? '1' : '0');
+    } catch {
+      /* Storage blocked: the preference simply will not survive a reload. */
+    }
+  }, []);
+  const [zoomLevel, setZoomLevelState] = useState<number>(() => {
+    try {
+      const stored = Number(localStorage.getItem('servergen.ui-zoom.v1'));
+      if (Number.isFinite(stored) && stored >= 0.5 && stored <= 2) return stored;
+    } catch {
+      /* fall through to default */
+    }
+    return 1;
+  });
+  const setZoomLevel = useCallback((v: number) => {
+    const next = Math.min(2, Math.max(0.5, Math.round(v * 100) / 100));
+    setZoomLevelState(next);
+    try {
+      localStorage.setItem('servergen.ui-zoom.v1', String(next));
+    } catch {
+      /* Storage blocked: the zoom simply will not survive a reload. */
+    }
+  }, []);
+  const zoomIn = useCallback(() => {
+    setZoomLevel(Math.min(2, Math.round((zoomLevel + 0.1) * 100) / 100));
+  }, [zoomLevel, setZoomLevel]);
+  const zoomOut = useCallback(() => {
+    setZoomLevel(Math.max(0.5, Math.round((zoomLevel - 0.1) * 100) / 100));
+  }, [zoomLevel, setZoomLevel]);
+  const resetZoom = useCallback(() => {
+    setZoomLevel(1);
+  }, [setZoomLevel]);
+
+  /* CSS `zoom` is honoured by the desktop webview (Chromium) and by Chrome /
+   * Edge in the browser tab. Applied to <body> so menus, sidebar and chat
+   * scale together; reset removes the property entirely (actual size). */
+  useEffect(() => {
+    try {
+      if (Math.abs(zoomLevel - 1) < 0.001) document.body.style.removeProperty('zoom');
+      else (document.body.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(zoomLevel);
+    } catch {
+      /* A webview without zoom support keeps actual size. */
+    }
+    return () => {
+      try {
+        document.body.style.removeProperty('zoom');
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [zoomLevel]);
 
   /* Core */
   const [coreStatus, setCoreStatus] = useState<CoreStatus>({
@@ -567,6 +733,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
+  /**
+   * Whether the session list has been read back from the core at least once.
+   * Until then there is nothing to restore the pre-reload selection from —
+   * and an empty list is a real answer (a fresh machine), not "still loading".
+   */
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  /**
+   * Whether the pre-reload selection has been restored. Guards both the
+   * one-shot restore and the persist effects below: nothing is written to
+   * storage until the saved values have been read, so the startup hydration
+   * can never clobber what it is about to restore.
+   */
+  const restoredSelection = useRef(false);
   /**
    * Sessions whose transcript has been read back from the core, plus the ones
    * started in this session, which have nothing to read back. Kept in a ref
@@ -633,6 +812,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sendRef = useRef<
     ((prompt: string, attachmentPaths?: string[], intoSession?: string, modeOverride?: AgentMode) => Promise<boolean>) | null
   >(null);
+  /** Same assignment pattern as `sendRef`. The done handler must read the
+   *  current workspace's memories without this effect re-subscribing when the
+   *  workspace changes: an unsubscription window is a gap in which a done event
+   *  is lost forever, and the chat it belonged to stays occupied. */
+  const refreshMemoriesRef = useRef<(() => Promise<void>) | null>(null);
 
   /* Permissions — a queue, because concurrent chats can each be asking */
   const [approvalPolicy, setApprovalPolicy] = useState<ApprovalPolicy>(
@@ -730,23 +914,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCoreStatus(status);
     if (status.state === 'unavailable') return;
 
+    // Each slice fails independently and reports which one failed, so the
+    // operator can distinguish "router down" from "never polled".
+    const settle = async <T,>(label: string, fn: () => Promise<T>): Promise<T | null> => {
+      try {
+        return await fn();
+      } catch (e) {
+        pushFailure('execution_failed', `${label} could not be refreshed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
+    };
     const [hw, sov, rt, catalogue, routes, ws, docs, kStats, kList, arts, pol, aud, cfg, sess, dss] =
       await Promise.all([
-        core.telemetry.hardware().catch(() => null),
-        core.telemetry.sovereign().catch(() => null),
-        core.models.list().catch(() => null),
-        core.models.catalogue().catch(() => null),
-        core.models.routes().catch(() => null),
-        core.workspaces.list().catch(() => null),
-        core.documents.list().catch(() => null),
-        core.knowledge.stats().catch(() => null),
-        core.knowledge.list().catch(() => null),
-        core.artifacts.list().catch(() => null),
-        core.sandbox.policy().catch(() => null),
-        core.audit.list().catch(() => null),
-        core.settings.get().catch(() => null),
-        core.sessions.list().catch(() => null),
-        core.devservers.status().catch(() => null),
+        settle('Hardware telemetry', () => core.telemetry.hardware()),
+        settle('Sovereignty counters', () => core.telemetry.sovereign()),
+        settle('Model runtime', () => core.models.list()),
+        settle('Model catalogue', () => core.models.catalogue()),
+        settle('Model routes', () => core.models.routes()),
+        settle('Workspaces', () => core.workspaces.list()),
+        settle('Documents', () => core.documents.list()),
+        settle('Knowledge stats', () => core.knowledge.stats()),
+        settle('Knowledge sources', () => core.knowledge.list()),
+        settle('Artifacts', () => core.artifacts.list()),
+        settle('Sandbox policy', () => core.sandbox.policy()),
+        settle('Audit log', () => core.audit.list()),
+        settle('Settings', () => core.settings.get()),
+        settle('Sessions', () => core.sessions.list()),
+        settle('Dev servers', () => core.devservers.status()),
       ]);
 
     if (hw) setHardware(hw);
@@ -774,7 +968,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // status events for), re-read rather than believed absent.
     if (dss) setDevServers(Object.fromEntries(dss.map((s) => [s.workspaceId, s])));
     // Past conversations, newest first. Opening one fetches its transcript.
-    if (sess) setSessions(sess);
+    if (sess) {
+      setSessions(sess);
+      setSessionsLoaded(true);
+    }
     if (cfg) {
       setSettings(cfg);
       // Their own last choice outranks the default: see the note on `setMode`.
@@ -789,7 +986,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setApprovalPolicy(cfg.approvalPolicy);
       setIsPanelOpen(cfg.showRightPanel);
     }
-  }, []);
+  }, [pushFailure]);
 
   /*
    * Kept out of the hydration batch above on purpose. The replication check
@@ -953,9 +1150,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     void add(
       core.on('sandbox://line', (line) => {
+        // Cap lines per run (tail wins): a runaway `while(true)` must not grow
+        // frontend memory without bound. The backend already caps at 4000 lines;
+        // the UI keeps the last 1000 for rendering.
+        const MAX_SANDBOX_LINES = 1000;
         setSandboxRuns((prev) =>
           prev.map((r) =>
-            r.id === line.runId ? { ...r, output: [...r.output, line] } : r,
+            r.id === line.runId
+              ? { ...r, output: [...r.output, line].slice(-MAX_SANDBOX_LINES) }
+              : r,
           ),
         );
         // A command a tool call started also streams into its chat's
@@ -1006,7 +1209,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [mutateLiveRun]);
 
-  /* The done event needs current refresh callback, so it gets its own effect. */
+  /* The done event is subscribed for the app's whole lifetime. It reads the
+   * current refresh callback through a ref (like `sendRef`): depending on the
+   * callback directly would re-subscribe on every workspace switch, and the
+   * unsubscription window can swallow a done event whose chat then stays
+   * occupied forever. */
   useEffect(() => {
     let unsub: (() => void) | null = null;
     let cancelled = false;
@@ -1125,7 +1332,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .catch(() => {});
         void core.audit.list().then(setAuditLog).catch(() => {});
         void core.documents.list().then(setDocuments).catch(() => {});
-        void refreshMemories();
+        void refreshMemoriesRef.current?.();
       })
       .then((u) => {
         if (cancelled) u();
@@ -1136,7 +1343,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelled = true;
       unsub?.();
     };
-  }, [refreshMemories]);
+    // Lifetime subscription: every value it needs at event time is read
+    // through refs, so there is nothing here that can change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---------------------------------------------------------------- */
   /* Derived                                                          */
@@ -1185,6 +1395,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const anyRunning = runningSessionIds.length > 0;
   /** The open chat's parked follow-ups, in send order. */
   const queuedMessages = activeSessionId ? queuedBySession[activeSessionId] ?? [] : [];
+  /** No entry means the stored transcript has not been read back yet. */
+  const isTranscriptLoaded = activeSessionId ? messagesBySession[activeSessionId] !== undefined : true;
 
   /**
    * The proposals, but only while the task that produced them is the open one.
@@ -1451,6 +1663,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   /**
+   * A reload must land back in the chat that was open — not on the project
+   * welcome screen. The open chat and project are mirrored to local storage
+   * (the same pattern as the persisted composer mode) and, once the session
+   * list has been read back, the saved selection is reopened: transcript
+   * fetch included, exactly as if it had been clicked. Runs once; a later
+   * refresh of the lists (reconnect resync) never yanks the operator away
+   * from where they are.
+   */
+  useEffect(() => {
+    if (restoredSelection.current || !sessionsLoaded) return;
+    restoredSelection.current = true;
+    let savedSessionId: string | null = null;
+    let savedWorkspaceId: string | null = null;
+    try {
+      savedSessionId = localStorage.getItem('servergen.active-session.v1');
+      savedWorkspaceId = localStorage.getItem('servergen.active-workspace.v1');
+    } catch {
+      /* Storage blocked: fall through to the default selection. */
+    }
+    if (savedSessionId && sessions.some((s) => s.id === savedSessionId)) {
+      openSession(savedSessionId);
+    } else if (savedSessionId) {
+      // The open chat was never persisted: a fresh New chat refreshed before
+      // its first turn lives only in memory, so the core has no row for it
+      // and the lookup above misses. Recreate that empty state instead of
+      // dropping to the workspace welcome screen (which is what
+      // activeSessionId === null renders).
+      if (savedWorkspaceId && workspaces.some((w) => w.id === savedWorkspaceId)) {
+        newSession('project', savedWorkspaceId);
+      } else {
+        newSession('personal');
+      }
+    } else if (savedWorkspaceId && workspaces.some((w) => w.id === savedWorkspaceId)) {
+      setActiveWorkspaceId(savedWorkspaceId);
+    }
+  }, [sessionsLoaded, sessions, workspaces, openSession, newSession]);
+
+  // Mirror the selection for the next reload. Guarded by the restore above
+  // so the startup hydration cannot wipe the saved values before they are
+  // read — the auto-picked project on a cold boot is not the operator's
+  // choice until they actually go somewhere.
+  useEffect(() => {
+    if (!restoredSelection.current) return;
+    try {
+      if (activeSessionId) localStorage.setItem('servergen.active-session.v1', activeSessionId);
+      else localStorage.removeItem('servergen.active-session.v1');
+    } catch {
+      /* Storage blocked: the chat simply will not survive a reload. */
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!restoredSelection.current) return;
+    try {
+      if (activeWorkspaceId) localStorage.setItem('servergen.active-workspace.v1', activeWorkspaceId);
+      else localStorage.removeItem('servergen.active-workspace.v1');
+    } catch {
+      /* Storage blocked: the project simply will not survive a reload. */
+    }
+  }, [activeWorkspaceId]);
+
+  /**
    * Forgets a conversation, on disk as well as on screen.
    *
    * The core deletes first. If that fails the sidebar is left alone, because a
@@ -1506,6 +1780,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [activeSessionId, coreStatus.state],
   );
 
+  const setSessionWorkspace = useCallback((sessionId: string, workspaceId: string | null) => {
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === sessionId ? { ...session, workspaceId } : session,
+      ),
+    );
+    setActiveWorkspaceId(workspaceId);
+  }, []);
+
   /* ---------------------------------------------------------------- */
   /* §6  Sending a turn                                               */
   /* ---------------------------------------------------------------- */
@@ -1535,34 +1818,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // elsewhere does not block this one; that is what concurrent chats are.
       // Checked before any bookkeeping so a blocked send leaves nothing behind.
       if (sid && runsRef.current[sid]) return false;
-      // A run without a workspace is legitimate. The core takes `workspaceId`
-      // as optional and refuses individual file tools by name if one is needed
-      // and none is open, which is a better answer than refusing the question.
+      // A run without a workspace is legitimate: plain chat stays
+      // project-free. The core takes `workspaceId` as optional and refuses
+      // individual file tools by name when one is needed and none is open.
+      // No silent scratch folder is conjured here — file work asks the
+      // operator to choose or create a project first (see the composer's
+      // project gate), so "ask normally" never creates a folder behind
+      // their back.
       const storedSession = sid ? sessions.find((session) => session.id === sid) : undefined;
-      let wsId = storedSession ? storedSession.workspaceId : activeWorkspaceId;
-      // An Agent turn with no folder open would run toolless — every write
-      // refused by name. A scratch project under the sovereign root gives it
-      // a sandbox to work in instead. Plan turns skip this: they only read,
-      // and asking a question should not conjure a folder. touch_session
-      // binds the chat to the scratch on the backend side (COALESCE), so one
-      // scratch per chat, not one per turn.
-      if (runMode === 'agent' && !wsId && coreStatus.state !== 'unavailable') {
-        const scratch = await guard('execution_failed', () =>
-          core.workspaces.create(`Scratch ${text.slice(0, 40)}`, []),
-        );
-        if (scratch) {
-          setWorkspaces((prev) => [...prev.filter((w) => w.id !== scratch.id), scratch]);
-          setActiveWorkspaceId(scratch.id);
-          if (sid) {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === sid ? { ...s, workspaceId: scratch.id } : s)),
-            );
-          }
-          wsId = scratch.id;
-        }
-        // Creation refused: the turn still runs, toolless — the core answers
-        // the question rather than dropping it.
-      }
+      const wsId = storedSession ? storedSession.workspaceId : activeWorkspaceId;
       const useMemories = storedSession?.useMemories ?? true;
       const contributeMemories = storedSession?.contributeMemories ?? true;
       if (!sid) {
@@ -1705,6 +1969,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Assigned rather than re-created per render: the done handler reads it at
   // event time, and the current callback is the one that sees current state.
   sendRef.current = send;
+  refreshMemoriesRef.current = refreshMemories;
 
   /**
    * Queues a follow-up for a chat whose turn is still running. Delivered
@@ -1873,31 +2138,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // that covers it — the menu bar and the command palette are both reachable
       // from Settings — has to bring the workbench back or nothing appears to
       // happen at all.
+      // NOTE: no setState inside a setTabs updater (StrictMode double-invokes
+      // updaters). The existing-tab lookup reads `tabs` from the closure, so
+      // `tabs` is a dependency below.
+      const existing = tabs.find(
+        (t) =>
+          t.kind === kind &&
+          (kind !== 'document' || t.documentId === documentId) &&
+          (kind !== 'file' || t.filePath === filePath),
+      );
       setView('workbench');
       setIsPanelOpen(true);
+      if (existing) {
+        setActiveTabId(existing.id);
+        return;
+      }
+      const tab: PanelTab = {
+        id: uid('tab'),
+        kind,
+        title: title ?? kind.charAt(0).toUpperCase() + kind.slice(1),
+        documentId,
+        filePath,
+      };
       setTabs((prev) => {
-        const existing = prev.find(
+        // Re-check inside the updater for concurrent opens; no side-effects here.
+        const dup = prev.find(
           (t) =>
             t.kind === kind &&
             (kind !== 'document' || t.documentId === documentId) &&
             (kind !== 'file' || t.filePath === filePath),
         );
-        if (existing) {
-          setActiveTabId(existing.id);
-          return prev;
-        }
-        const tab: PanelTab = {
-          id: uid('tab'),
-          kind,
-          title: title ?? kind.charAt(0).toUpperCase() + kind.slice(1),
-          documentId,
-          filePath,
-        };
-        setActiveTabId(tab.id);
+        if (dup) return prev;
         return [...prev, tab];
       });
+      setActiveTabId(tab.id);
     },
-    [openSettings],
+    [openSettings, tabs],
   );
 
   /**
@@ -1917,14 +2193,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, []);
 
-  const closeTab = useCallback((id: string) => {
-    setTabs((prev) => {
-      const next = prev.filter((t) => t.id !== id);
-      setActiveTabId((cur) => (cur === id ? next[next.length - 1]?.id ?? null : cur));
+  const closeTab = useCallback(
+    (id: string) => {
+      // No setState inside the updater: compute the next selection from the
+      // current `tabs`/`activeTabId` closure values.
+      const next = tabs.filter((t) => t.id !== id);
+      setTabs(next);
+      if (activeTabId === id) {
+        setActiveTabId(next[next.length - 1]?.id ?? null);
+      }
       if (next.length === 0) setIsPanelOpen(false);
-      return next;
-    });
-  }, []);
+    },
+    [tabs, activeTabId],
+  );
 
   /* ---------------------------------------------------------------- */
   /* Review                                                           */
@@ -2107,20 +2388,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       hydrated.current.delete(id);
       setDocuments((prev) => prev.filter((d) => d.id !== id));
       setActiveDocumentId((cur) => (cur === id ? null : cur));
-      setTabs((prev) => {
-        const next = prev.filter((t) => t.documentId !== id);
-        if (next.length === prev.length) return prev;
-        // Only move the selection if the tab that went was the open one.
-        setActiveTabId((cur) =>
-          prev.some((t) => t.id === cur && t.documentId === id)
-            ? next[next.length - 1]?.id ?? null
-            : cur,
-        );
-        if (next.length === 0) setIsPanelOpen(false);
-        return next;
-      });
+      // Compute tab removal outside any updater (StrictMode-safe).
+      const next = tabs.filter((t) => t.documentId !== id);
+      if (next.length === tabs.length) return;
+      setTabs(next);
+      const closingActive = tabs.some((t) => t.id === activeTabId && t.documentId === id);
+      if (closingActive) {
+        setActiveTabId(next[next.length - 1]?.id ?? null);
+      }
+      if (next.length === 0) setIsPanelOpen(false);
     },
-    [guard],
+    [guard, tabs, activeTabId],
   );
 
   /* ---------------------------------------------------------------- */
@@ -2249,7 +2527,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const cmd = command.trim();
       if (!cmd) return;
       const run = await guard('execution_failed', () => core.sandbox.run(cmd));
-      if (run) setSandboxRuns((prev) => [...prev, run]);
+      // Cap stored runs: the tail (where the latest build error lands) wins.
+      if (run) setSandboxRuns((prev) => [...prev.slice(-49), run]);
       void core.audit.list().then(setAuditLog).catch(() => {});
     },
     [guard],
@@ -2267,6 +2546,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [guard],
   );
 
+  /** §8 — clear the console transcript. Like PowerShell's Clear-Host: a
+   *  still-running job keeps running and its fresh output reappears; only
+   *  stored history is dropped. The audit log is untouched — it stays the
+   *  durable record of everything that ran. */
+  const clearSandboxRuns = useCallback(() => setSandboxRuns([]), []);
+
   /* ---------------------------------------------------------------- */
   /* §12  Audit                                                       */
   /* ---------------------------------------------------------------- */
@@ -2283,157 +2568,308 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateSettings = useCallback(
     async (patch: Partial<AppSettings>) => {
       // Optimistic: the controls stay responsive even with no core attached.
-      setSettings((prev) => ({ ...prev, ...patch }));
+      // Snapshot for rollback so a failed save does not leave unsaved UI state.
+      let prevSnapshot: AppSettings | null = null;
+      setSettings((prev) => {
+        prevSnapshot = prev;
+        return { ...prev, ...patch };
+      });
       if (patch.defaultMode) setMode(patch.defaultMode);
       if (patch.approvalPolicy) setApprovalPolicy(patch.approvalPolicy);
       if (coreStatus.state === 'unavailable') return;
       const saved = await guard('execution_failed', () => core.settings.set(patch));
       if (saved) setSettings(saved);
+      else if (prevSnapshot) setSettings(prevSnapshot);
     },
-    [coreStatus.state, guard],
+    [coreStatus.state, guard, setMode],
   );
 
   /* ---------------------------------------------------------------- */
 
-  const value: AppContextValue = {
-    view,
-    setView,
-    settingsPage,
-    openSettings,
-    isSearchOpen,
-    setIsSearchOpen,
+  /* Memoized so a hardware tick does not re-render every chat consumer. */
+  const value: AppContextValue = useMemo(
+    () => ({
+      view,
+      setView,
+      settingsPage,
+      openSettings,
+      isSearchOpen,
+      setIsSearchOpen,
+      isSidebarOpen,
+      setIsSidebarOpen,
+      sidebarLeaving,
+      isBottomPanelOpen,
+      setIsBottomPanelOpen,
+      showPinnedSummary,
+      setShowPinnedSummary,
+      zoomLevel,
+      setZoomLevel,
+      zoomIn,
+      zoomOut,
+      resetZoom,
 
-    coreStatus,
-    refreshCore,
-    failures,
-    dismissFailure,
+      coreStatus,
+      refreshCore,
+      failures,
+      dismissFailure,
 
-    hardware,
-    sovereign,
-    exposure,
-    refreshExposure,
+      hardware,
+      sovereign,
+      exposure,
+      refreshExposure,
 
-    catalogueModels,
-    modelRuntime,
-    loadedModelIds,
-    addCatalogueModel,
-    routeRules,
-    updateModelRoute,
-    loadModel,
-    evictModel,
+      catalogueModels,
+      modelRuntime,
+      loadedModelIds,
+      addCatalogueModel,
+      routeRules,
+      updateModelRoute,
+      loadModel,
+      evictModel,
 
-    workspaces,
-    activeWorkspaceId,
-    activeWorkspace,
-    setActiveWorkspaceId,
-    addWorkspace,
-    isCreateProjectOpen,
-    setIsCreateProjectOpen,
-    pickProjectSource,
-    createWorkspace,
-    updateWorkspace,
-    openWorkspaceInExplorer,
-    approveWorkspace,
-    removeWorkspace,
+      workspaces,
+      activeWorkspaceId,
+      activeWorkspace,
+      setActiveWorkspaceId,
+      addWorkspace,
+      isCreateProjectOpen,
+      setIsCreateProjectOpen,
+      pickProjectSource,
+      createWorkspace,
+      updateWorkspace,
+      openWorkspaceInExplorer,
+      approveWorkspace,
+      removeWorkspace,
 
-    devServers,
-    activeDevServer,
-    startDevServer,
-    stopDevServer,
-    openDevServerUrl,
+      devServers,
+      activeDevServer,
+      startDevServer,
+      stopDevServer,
+      openDevServerUrl,
 
-    sessions,
-    activeSessionId,
-    activeSession,
-    openSession,
-    newSession,
-    deleteSession,
-    setSessionMemory,
+      sessions,
+      activeSessionId,
+      activeSession,
+      openSession,
+      newSession,
+      deleteSession,
+      setSessionMemory,
+      setSessionWorkspace,
 
-    messages,
-    mode,
-    setMode,
-    isRunning,
-    anyRunning,
-    runningSessionIds,
-    liveSteps,
-    liveActivity,
-    livePlan,
-    livePhase,
-    send,
-    commitEdit,
-    queuedMessages,
-    queueMessage,
-    removeQueued,
-    cancelRun,
+      messages,
+      isTranscriptLoaded,
+      mode,
+      setMode,
+      isRunning,
+      anyRunning,
+      runningSessionIds,
+      liveSteps,
+      liveActivity,
+      livePlan,
+      livePhase,
+      send,
+      commitEdit,
+      queuedMessages,
+      queueMessage,
+      removeQueued,
+      cancelRun,
 
-    approvalPolicy,
-    setApprovalPolicy,
-    pendingPermission: pendingPermissions[0] ?? null,
-    respondToPermission,
+      approvalPolicy,
+      setApprovalPolicy,
+      pendingPermission: pendingPermissions[0] ?? null,
+      respondToPermission,
 
-    pendingQuestion: pendingQuestions[0] ?? null,
-    answerQuestion,
+      pendingQuestion: pendingQuestions[0] ?? null,
+      answerQuestion,
 
-    isPanelOpen,
-    setIsPanelOpen,
-    tabs,
-    activeTabId,
-    setActiveTabId,
-    openTab,
-    closeTab,
+      isPanelOpen,
+      setIsPanelOpen,
+      tabs,
+      activeTabId,
+      setActiveTabId,
+      openTab,
+      closeTab,
 
-    fileChanges: visibleChanges,
-    selectedChangePath,
-    setSelectedChangePath,
-    applyChange,
-    discardChange,
-    applyAllChanges,
-    discardAllChanges,
+      fileChanges: visibleChanges,
+      selectedChangePath,
+      setSelectedChangePath,
+      applyChange,
+      discardChange,
+      applyAllChanges,
+      discardAllChanges,
 
-    documents,
-    activeDocumentId,
-    pickAttachments,
-    ingestFiles,
-    openDocument,
-    openDocumentAt,
-    sourceCitation,
-    workflowDrafts,
-    setWorkflowDrafts,
-    removeDocument,
+      documents,
+      activeDocumentId,
+      pickAttachments,
+      ingestFiles,
+      openDocument,
+      openDocumentAt,
+      sourceCitation,
+      workflowDrafts,
+      setWorkflowDrafts,
+      removeDocument,
 
-    knowledgeStats,
-    knowledgeSources,
-    indexFiles,
-    reindexSource,
-    removeSource,
-    toggleWatching,
+      knowledgeStats,
+      knowledgeSources,
+      indexFiles,
+      reindexSource,
+      removeSource,
+      toggleWatching,
 
-    harnessInfo,
-    memories,
-    globalInstructions,
-    projectInstructions,
-    refreshMemories,
-    addMemory,
-    updateMemory,
-    removeMemory,
-    saveInstructions,
+      harnessInfo,
+      memories,
+      globalInstructions,
+      projectInstructions,
+      refreshMemories,
+      addMemory,
+      updateMemory,
+      removeMemory,
+      saveInstructions,
 
-    artifacts,
-    openArtifact,
-    verifyArtifact,
+      artifacts,
+      openArtifact,
+      verifyArtifact,
 
-    sandboxPolicy,
-    sandboxRuns,
-    runInSandbox,
-    killRun,
+      sandboxPolicy,
+      sandboxRuns,
+      runInSandbox,
+      killRun,
+      clearSandboxRuns,
 
-    auditLog,
-    refreshAudit,
+      auditLog,
+      refreshAudit,
 
-    settings,
-    updateSettings,
-  };
+      settings,
+      updateSettings,
+    }),
+    [
+      view,
+      settingsPage,
+      openSettings,
+      isSearchOpen,
+      isSidebarOpen,
+      setIsSidebarOpen,
+      sidebarLeaving,
+      isBottomPanelOpen,
+      setIsBottomPanelOpen,
+      showPinnedSummary,
+      setShowPinnedSummary,
+      zoomLevel,
+      setZoomLevel,
+      zoomIn,
+      zoomOut,
+      resetZoom,
+      coreStatus,
+      refreshCore,
+      failures,
+      dismissFailure,
+      hardware,
+      sovereign,
+      exposure,
+      refreshExposure,
+      catalogueModels,
+      modelRuntime,
+      loadedModelIds,
+      addCatalogueModel,
+      routeRules,
+      updateModelRoute,
+      loadModel,
+      evictModel,
+      workspaces,
+      activeWorkspaceId,
+      activeWorkspace,
+      addWorkspace,
+      isCreateProjectOpen,
+      pickProjectSource,
+      createWorkspace,
+      updateWorkspace,
+      openWorkspaceInExplorer,
+      approveWorkspace,
+      removeWorkspace,
+      devServers,
+      activeDevServer,
+      startDevServer,
+      stopDevServer,
+      openDevServerUrl,
+      sessions,
+      activeSessionId,
+      activeSession,
+      openSession,
+      newSession,
+      deleteSession,
+      setSessionMemory,
+      setSessionWorkspace,
+      messages,
+      isTranscriptLoaded,
+      mode,
+      setMode,
+      isRunning,
+      anyRunning,
+      runningSessionIds,
+      liveSteps,
+      liveActivity,
+      livePlan,
+      livePhase,
+      send,
+      commitEdit,
+      queuedMessages,
+      queueMessage,
+      removeQueued,
+      cancelRun,
+      approvalPolicy,
+      pendingPermissions,
+      respondToPermission,
+      pendingQuestions,
+      answerQuestion,
+      isPanelOpen,
+      tabs,
+      activeTabId,
+      openTab,
+      closeTab,
+      visibleChanges,
+      selectedChangePath,
+      applyChange,
+      discardChange,
+      applyAllChanges,
+      discardAllChanges,
+      documents,
+      activeDocumentId,
+      pickAttachments,
+      ingestFiles,
+      openDocument,
+      openDocumentAt,
+      sourceCitation,
+      workflowDrafts,
+      removeDocument,
+      knowledgeStats,
+      knowledgeSources,
+      indexFiles,
+      reindexSource,
+      removeSource,
+      toggleWatching,
+      harnessInfo,
+      memories,
+      globalInstructions,
+      projectInstructions,
+      refreshMemories,
+      addMemory,
+      updateMemory,
+      removeMemory,
+      saveInstructions,
+      artifacts,
+      openArtifact,
+      verifyArtifact,
+      sandboxPolicy,
+      sandboxRuns,
+      runInSandbox,
+      killRun,
+      clearSandboxRuns,
+      auditLog,
+      refreshAudit,
+      settings,
+      updateSettings,
+    ],
+  );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 };

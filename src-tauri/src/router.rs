@@ -19,21 +19,17 @@
 //!
 //! ## What the tuning is, and what it is not — all of this was measured
 //!
-//! Qwen3.5-9B Q4_K_M, 4709-token prompt, cold server, this machine (RTX 4060
+//! Gemma 4 E4B Q4_0, 16K local profile, cold server, this machine (RTX 4060
 //! Laptop 8188 MiB, i7-14700HX 20C/28T):
 //!
-//! | flags                                   | pp tok/s | tg tok/s | VRAM     |
+//! | test                                    | pp tok/s | tg tok/s | VRAM     |
 //! |-----------------------------------------|----------|----------|----------|
-//! | `-ngl 999` only                         | 1918.9   | 41.1     | 6947 MiB |
-//! | `+ -t 8 -tb 20 -b 4096 -ub 1024`        | 1881.8   | 41.3     | 7023 MiB |
+//! | `llama-bench -ngl 99 -ctk/ctv q8_0`     | 3704.5   | 70.7     | 4373 MiB |
 //!
-//! The second row is the configuration that reads like "maximum performance".
-//! It is 2% *slower* on prompt processing and costs 76 MiB more VRAM. The reason
-//! is that `-ngl 999` puts every layer on the GPU, so CPU thread counts stop
-//! mattering, and a 4060's SMs are already saturated at the default 512-token
-//! physical batch — a larger `-ub` only enlarges the compute buffer. So those
-//! flags are not set. On this hardware the machine is already at 100% of its
-//! throughput with full offload, and the scarce resource is VRAM, not FLOPs.
+//! The full-offload profile is the measured baseline for the E4B replacement.
+//! The router keeps llama.cpp's default batch and thread settings: on this
+//! hardware, the useful headroom is better spent on the multimodal projector
+//! and KV cache than on hand-tuned buffers.
 //!
 //! What that leaves as the real levers, in order of effect:
 //!   1. `n-gpu-layers = 999` — full offload. Everything else is noise beside it.
@@ -56,6 +52,7 @@
 //! Anything further is per-model and lives in `ModelEntry::preset_options`, as
 //! catalogue data. There is no `match` on a model id anywhere in this file.
 
+use crate::logln;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -293,7 +290,16 @@ pub async fn start(st: &Arc<AppState>) -> CoreResult<CoreStatus> {
         });
     }
 
-    let port = if s.router_port != 0 { s.router_port } else { free_port()? };
+    // Held until just before the child spawns: the reservation keeps other
+    // processes off the port until llama-server can bind it itself. An
+    // operator-pinned port is taken as given — the failure of a fixed port to
+    // bind is the child's to report, in its own words.
+    let (port, _reservation) = if s.router_port != 0 {
+        (s.router_port, None)
+    } else {
+        let r = reserve_port()?;
+        (r.port, Some(r))
+    };
     // 256 bits from the same CSPRNG that backs uuid v4. Loopback is not a
     // boundary on a shared workstation: without this, any other process on the
     // machine could drive the operator's models and read what they return.
@@ -530,7 +536,7 @@ async fn evict_idle(st: &AppState) {
         // One failure does not stop the sweep, and it is not the operator's
         // problem: the model stays resident and the next pass tries again.
         if let Err(e) = unload(st, &id).await {
-            eprintln!("[router] Idle eviction of {id} failed: {}", e.message());
+            logln!("[router] Idle eviction of {id} failed: {}", e.message());
         }
     }
 }
@@ -719,14 +725,35 @@ fn render_preset_ini(entries: &[ModelEntry]) -> (String, Vec<(String, String)>) 
     (out, skipped)
 }
 
-fn free_port() -> CoreResult<u16> {
+/// Picks a port and keeps the reservation alive until the caller is about to
+/// hand it to llama-server.
+///
+/// The plain `free_port` has a window between dropping the listener and the
+/// child binding where another process can claim the port — a race whose
+/// failure mode is a boot timeout that sends the operator looking at VRAM when
+/// the problem is a taken port. Holding the socket until just before spawn
+/// closes almost all of that window, because the OS will not hand a bound port
+/// to another asker while our listener exists. The listener is bound on the
+/// current thread and released on drop, so the reservation lasts exactly as
+/// long as this value does — hence the guard type rather than a bare number.
+///
+/// The residual window (between `drop` and the child's own bind, ~tens of
+/// milliseconds) is closed the honest way instead: the boot health check below
+/// turns a stolen port into a clear "did not answer" error with the log tail,
+/// and `start` can be called again, which picks a fresh port.
+struct PortReservation {
+    port: u16,
+    _listener: std::net::TcpListener,
+}
+
+fn reserve_port() -> CoreResult<PortReservation> {
     let l = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
         CoreError::ExecutionFailed(format!("Could not reserve a loopback port for the router: {e}"))
     })?;
     let port = l.local_addr().map(|a| a.port()).map_err(|e| {
         CoreError::ExecutionFailed(format!("Could not read the reserved port: {e}"))
     })?;
-    Ok(port)
+    Ok(PortReservation { port, _listener: l })
 }
 
 /* ------------------------------------------------------------------ */
@@ -902,7 +929,7 @@ pub async fn ensure_loaded(st: &AppState, model_id: &str) -> CoreResult<()> {
     // the wait below rather than asking again — the caller wants the model
     // resident, and it is on its way there.
     let joining = state == Some(ModelState::Loading);
-    let before = free_vram_mb();
+    let before = free_vram_mb().await;
     let started = Instant::now();
 
     if !joining {
@@ -951,10 +978,24 @@ pub async fn ensure_loaded(st: &AppState, model_id: &str) -> CoreResult<()> {
         refresh_models(st).await?;
         match st.models.read().ok().and_then(|m| m.get(model_id).map(|r| r.state)) {
             Some(ModelState::Loaded) => break,
-            Some(ModelState::Unloaded) if !joining && started.elapsed() > Duration::from_secs(3) => {
-                // The child exited instead of becoming resident.
+            Some(ModelState::Unloaded) if started.elapsed() > Duration::from_secs(3) => {
+                // The child exited instead of becoming resident. This is just as
+                // conclusive for a joiner: a joiner has seen `Loading` by
+                // definition, so a later `Unloaded` can only mean the load it
+                // joined ended without success, and polling on to the full
+                // LOAD_TIMEOUT would report a four-minute stall over a failure
+                // that was already on record. The grace period exists for the
+                // owner's registration window — the router's model list needs a
+                // moment to name a child that was only just spawned.
+                let recorded = st
+                    .models
+                    .read()
+                    .ok()
+                    .and_then(|m| m.get(model_id).and_then(|r| r.last_error.clone()))
+                    .unwrap_or_else(|| "the router reported it as unloaded".to_string());
                 let msg = format!(
-                    "{} did not become resident; the router reported it as unloaded. Nothing else was evicted to make room a second time.",
+                    "{} did not become resident: {recorded}. Nothing else was evicted to make \
+                     room a second time.",
                     entry.display_name
                 );
                 st.set_model_state(model_id, |m| {
@@ -980,7 +1021,7 @@ pub async fn ensure_loaded(st: &AppState, model_id: &str) -> CoreResult<()> {
     let load_ms = started.elapsed().as_millis() as u64;
     // A measured delta, or nothing. An estimate presented as a measurement in a
     // panel labelled "resident VRAM" would be a lie the operator cannot check.
-    let resident = match (before, free_vram_mb()) {
+    let resident = match (before, free_vram_mb().await) {
         (Some(b), Some(a)) if b > a => Some(b - a),
         _ => None,
     };
@@ -1051,7 +1092,30 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
     // including a model a concurrent chat is generating from.
     let cap = st.settings().max_resident_models.max(1) as usize;
 
+    // Bounded: each pass evicts exactly one victim, so the loop cannot need
+    // more passes than there are resident models plus one. A router that
+    // reports an unload succeeded while the model stays resident (or a
+    // concurrent load re-filling between passes) would otherwise spin here
+    // forever — a turn that hangs with no error and no progress. The bound is
+    // generous rather than exact because a concurrent load is legitimate churn,
+    // not failure; but a ceiling that can never be hit in a healthy system is
+    // the difference between "slower" and "stuck".
+    let max_passes = cap + st.models.read().map(|m| m.len()).unwrap_or(0) + 2;
+    let mut passes = 0usize;
+
     loop {
+        passes += 1;
+        if passes > max_passes {
+            return Err(CoreError::InsufficientVram(format!(
+                "{} needed about {} MiB, and after {} admission passes the resident set was not \
+                 shrinking as expected — a model may be failing to unload while still reporting \
+                 success. Nothing further was evicted. Check the router's status in the Models \
+                 panel and restart it if it is wedged.",
+                want.display_name,
+                want.estimated_vram_mb,
+                passes - 1,
+            )));
+        }
         // Recomputed each pass: an eviction changes the set, and a run may have
         // started or finished since the last pass.
         //
@@ -1132,18 +1196,28 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
 
 /// Free VRAM in MiB from the driver, or `None` if it cannot be read. Never a
 /// guess: callers treat `None` as "unmeasured", not as zero.
-fn free_vram_mb() -> Option<u32> {
-    let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()?
-        .trim()
-        .parse()
-        .ok()
+///
+/// Off the async runtime: `nvidia-smi` is a process spawn plus a driver query,
+/// which can take tens of milliseconds, and `ensure_loaded` calls this on the
+/// hot path to every first request to a model. Blocking a runtime thread there
+/// is exactly the stall the rest of this module works to avoid.
+async fn free_vram_mb() -> Option<u32> {
+    tokio::task::spawn_blocking(|| {
+        let out = Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /* ------------------------------------------------------------------ */
@@ -1196,6 +1270,20 @@ fn wire_messages(history: &[ChatMessage]) -> Vec<Value> {
 /// reassembling a partial `arguments` string from deltas is a way to corrupt a
 /// tool call for no benefit. The turn the user actually watches — the final
 /// answer — has no tools, so it streams.
+///
+/// Cancellation: Stop sets the run flag and the waits below abort within
+/// ~100 ms. Dropping the in-flight HTTP future cancels the request, so the
+/// run reaches `agent://done` instead of generating to completion while the
+/// operator watches a dead Stop button.
+async fn wait_for_cancel(st: &AppState, run_id: &str) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if st.is_run_cancelled(run_id) {
+            return;
+        }
+    }
+}
+
 pub async fn chat(
     st: &AppState,
     req: ChatRequest,
@@ -1239,8 +1327,25 @@ pub async fn chat(
     let resp = rb.send().await?;
     let resp = check_status(resp).await?;
 
+    // Captured before the wait: the task-local names the agent run whose
+    // generation this is, if any. Console-side calls have none and wait as
+    // before.
+    let cancel_run_id: Option<String> =
+        crate::state::current_run().map(|(run_id, _)| run_id);
+
     let out = if stream {
         read_stream(resp, on_delta.expect("sink present"), st, dest, &req.model_id).await?
+    } else if let Some(run_id) = cancel_run_id {
+        tokio::select! {
+            res = resp.bytes() => {
+                let bytes = res?;
+                st.count_request(dest, bytes.len() as u64);
+                parse_completion(&serde_json::from_slice(&bytes)?, &req.model_id)?
+            }
+            _ = wait_for_cancel(st, &run_id) => {
+                return Err(CoreError::Denied("The run was cancelled.".into()));
+            }
+        }
     } else {
         let bytes = resp.bytes().await?;
         st.count_request(dest, bytes.len() as u64);
@@ -1267,9 +1372,35 @@ async fn read_stream(
     let mut buf = String::new();
     let mut bytes_seen = 0u64;
     let mut body = resp.bytes_stream();
+    // Same task-local as above: abort the stream promptly when Stop lands
+    // mid-answer instead of draining it to the end.
+    let cancel_run_id: Option<String> =
+        crate::state::current_run().map(|(run_id, _)| run_id);
 
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
+    loop {
+        // A plain `body.next().await` parks until the next token, which is
+        // exactly where Stop used to hang. A 100 ms window keeps streaming
+        // smooth and still notices a cancel almost immediately.
+        let next = tokio::time::timeout(Duration::from_millis(100), body.next()).await;
+        let chunk = match next {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => {
+                if let Some(ref run_id) = cancel_run_id {
+                    if st.is_run_cancelled(run_id) {
+                        return Err(CoreError::Denied("The run was cancelled.".into()));
+                    }
+                }
+                continue;
+            }
+        };
+        {
+            let chunk = chunk?;
+            if let Some(ref run_id) = cancel_run_id {
+                if st.is_run_cancelled(run_id) {
+                    return Err(CoreError::Denied("The run was cancelled.".into()));
+                }
+            }
         bytes_seen += chunk.len() as u64;
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -1318,6 +1449,7 @@ async fn read_stream(
             {
                 out.tokens_per_sec = tps as f32;
             }
+        }
         }
     }
 
@@ -1542,29 +1674,56 @@ fn router_addr(st: &AppState) -> CoreResult<(u16, String)> {
 /// keeps the core from being welded to llama.cpp: a model whose catalogue entry
 /// points at an approved private server goes there instead, through the same
 /// §11 classification as everything else.
+///
+/// A model's own `server_url` wins over the global setting, so an org that
+/// splits models across servers gets the server its catalogue names — the
+/// global setting is the single-server deployment, not a routing rule. The
+/// credential is read here from the env var the entry names, because the
+/// catalogue is a file on disk whose whole job is to be readable and a token in
+/// it would be a token in clear text; an unset variable sends no credential and
+/// the server's own 401 is the honest answer.
 fn endpoint(st: &AppState, model_id: &str) -> CoreResult<(String, Option<String>, Destination)> {
-    let location = {
+    let entry = {
         let reg = st.registry.read().map_err(|_| lock_err("registry"))?;
-        reg.require(model_id)?.location
+        reg.require(model_id)?.clone()
     };
 
-    match location {
+    match entry.location {
         ModelLocation::ThisDevice => {
             let (port, key) = router_addr(st)?;
             Ok((format!("http://127.0.0.1:{port}"), Some(key), Destination::Loopback))
         }
         ModelLocation::PrivateServer => {
             let s = st.settings();
-            if !s.allow_private_server || s.private_server_url.is_empty() {
-                return Err(CoreError::PrivateServerUnreachable(format!(
-                    "{model_id} is configured to run on a private server, but no approved server is set in Settings. The request was not sent anywhere else."
-                )));
-            }
-            let base = s.private_server_url.trim_end_matches('/').to_string();
+            let base = match &entry.server_url {
+                Some(url) if !url.trim().is_empty() => {
+                    // The model's own server, classified exactly as the global
+                    // one would be — a per-model URL is not a way around §11.
+                    url.trim().trim_end_matches('/').to_string()
+                }
+                _ => {
+                    if !s.allow_private_server || s.private_server_url.is_empty() {
+                        return Err(CoreError::PrivateServerUnreachable(format!(
+                            "{model_id} is configured to run on a private server, but neither it \
+                             nor Settings names which one. The request was not sent anywhere else."
+                        )));
+                    }
+                    s.private_server_url.trim_end_matches('/').to_string()
+                }
+            };
             let dest = st.classify_url(&base)?;
-            Ok((base, None, dest))
+            let key = entry.server_api_key_env.as_deref().and_then(credential_from_env);
+            Ok((base, key, dest))
         }
     }
+}
+
+/// Reads one credential from the environment, trimming the newline a shell's
+/// `set VAR=...` or a `.env` file leaves behind. `None` means unset or empty:
+/// the request goes out unauthenticated and the server says so, which is a
+/// better answer than a local guess about a key the core was never given.
+fn credential_from_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 async fn get_json(st: &AppState, url: &str, key: Option<&str>) -> CoreResult<Value> {
@@ -1637,7 +1796,7 @@ mod history {
     use super::*;
 
     /// The regression this guards. When an assistant turn's calls were dropped
-    /// and replaced with the sentence "Calling: write_file", Qwen3.5 read that
+    /// and replaced with the sentence "Calling: write_file", Gemma 4 E4B read that
     /// sentence back out of its own history and produced it as the answer —
     /// announcing the write instead of performing it, twice in a row, with the
     /// operator left holding an empty file. Structural calls cannot be imitated
@@ -1690,7 +1849,7 @@ mod reasoning_split {
     #[test]
     fn reasoning_lands_in_its_own_field() {
         let v = json!({
-            "model": "qwen3.5-9b",
+            "model": "gemma-4-e4b",
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -1700,7 +1859,7 @@ mod reasoning_split {
                 "finish_reason": "stop"
             }]
         });
-        let out = parse_completion(&v, "qwen3.5-9b").expect("parses");
+        let out = parse_completion(&v, "gemma-4-e4b").expect("parses");
         assert_eq!(out.text, "TP-04 measures 8.2 mm.");
         assert_eq!(out.reasoning, "the report page 3 says 8.2, not 82");
         assert!(!out.text.contains("report page"), "reasoning never enters the answer");
@@ -1711,13 +1870,13 @@ mod reasoning_split {
     #[test]
     fn no_reasoning_field_is_an_empty_string_not_an_error() {
         let v = json!({
-            "model": "qwen3.5-9b",
+            "model": "gemma-4-e4b",
             "choices": [{
                 "message": { "role": "assistant", "content": "11.9 mm." },
                 "finish_reason": "stop"
             }],
         });
-        let out = parse_completion(&v, "qwen3.5-9b").expect("parses");
+        let out = parse_completion(&v, "gemma-4-e4b").expect("parses");
         assert_eq!(out.reasoning, "");
         assert_eq!(out.text, "11.9 mm.");
     }
@@ -1737,13 +1896,13 @@ mod idle_eviction {
 
     #[test]
     fn a_model_idle_past_the_cutoff_is_released() {
-        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(500))];
-        assert_eq!(idle_victims(&models, &none(), 1_000), vec!["qwen3.5-9b".to_string()]);
+        let models = [model("gemma-4-e4b", ModelState::Loaded, Some(500))];
+        assert_eq!(idle_victims(&models, &none(), 1_000), vec!["gemma-4-e4b".to_string()]);
     }
 
     #[test]
     fn a_model_used_since_the_cutoff_is_kept() {
-        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(1_500))];
+        let models = [model("gemma-4-e4b", ModelState::Loaded, Some(1_500))];
         assert!(idle_victims(&models, &none(), 1_000).is_empty());
     }
 
@@ -1753,8 +1912,8 @@ mod idle_eviction {
     /// touched when it starts.
     #[test]
     fn a_model_a_live_run_is_using_is_never_released() {
-        let models = [model("qwen3.5-9b", ModelState::Loaded, Some(0))];
-        let in_use: HashSet<String> = ["qwen3.5-9b".to_string()].into_iter().collect();
+        let models = [model("gemma-4-e4b", ModelState::Loaded, Some(0))];
+        let in_use: HashSet<String> = ["gemma-4-e4b".to_string()].into_iter().collect();
         assert!(idle_victims(&models, &in_use, 1_000).is_empty());
     }
 
@@ -1764,7 +1923,7 @@ mod idle_eviction {
     #[test]
     fn only_a_settled_load_is_a_candidate() {
         for state in [ModelState::Loading, ModelState::Unloading, ModelState::Unloaded, ModelState::Error] {
-            let models = [model("qwen3.5-9b", state, Some(0))];
+            let models = [model("gemma-4-e4b", state, Some(0))];
             assert!(idle_victims(&models, &none(), 1_000).is_empty(), "{state:?} was evicted");
         }
     }
@@ -1781,10 +1940,10 @@ mod idle_eviction {
     fn every_idle_model_goes_in_one_sweep_and_the_busy_one_stays() {
         let models = [
             model("bge-m3", ModelState::Loaded, Some(10)),
-            model("qwen3.5-9b", ModelState::Loaded, Some(20)),
+            model("gemma-4-e4b", ModelState::Loaded, Some(20)),
             model("olmocr-2", ModelState::Loaded, Some(30)),
         ];
-        let in_use: HashSet<String> = ["qwen3.5-9b".to_string()].into_iter().collect();
+        let in_use: HashSet<String> = ["gemma-4-e4b".to_string()].into_iter().collect();
         let mut got = idle_victims(&models, &in_use, 1_000);
         got.sort();
         assert_eq!(got, vec!["bge-m3".to_string(), "olmocr-2".to_string()]);
@@ -1822,6 +1981,8 @@ mod preset_ini {
                 gen_tokens_per_sec: None,
                 note: None,
                 preset_options: None,
+                server_url: None,
+                server_api_key_env: None,
             }],
             routing: Vec::new(),
         }

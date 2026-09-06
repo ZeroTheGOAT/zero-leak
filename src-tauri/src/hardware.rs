@@ -89,7 +89,10 @@ fn query_gpu() -> Option<Gpu> {
         return None;
     }
 
-    let mut cmd = std::process::Command::new("nvidia-smi");
+    // Resolve via PATH×PATHEXT sweep so a hijacked PATH entry cannot redirect
+    // this to an attacker binary shadowing the real tool.
+    let resolved = crate::sandbox::resolve_program("nvidia-smi")?;
+    let mut cmd = std::process::Command::new(&resolved);
     cmd.args([
         "--query-gpu=name,memory.used,memory.total,utilization.gpu",
         "--format=csv,noheader,nounits",

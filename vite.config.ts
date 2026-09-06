@@ -11,4 +11,21 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
   },
+  build: {
+    // Vendor split: React + Tauri API change rarely, app code changes often.
+    // Separate chunks keep the main bundle under the warning limit and let the
+    // desktop webview cache the vendor chunk across app updates.
+    chunkSizeWarningLimit: 600,
+    rolldownOptions: {
+      output: {
+        advancedChunks: {
+          groups: [
+            { name: 'vendor-react', test: /node_modules\/(react|react-dom|scheduler)/ },
+            { name: 'vendor-ui', test: /node_modules\/(lucide-react|clsx|tailwind-merge)/ },
+            { name: 'vendor-tauri', test: /node_modules\/@tauri-apps/ },
+          ],
+        },
+      },
+    },
+  },
 })

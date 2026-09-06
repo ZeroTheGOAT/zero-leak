@@ -359,6 +359,14 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
     if (first) setSide(first);
   }, [doc, shape]);
 
+  // Hooks before the early return below: conditional hooks break rules-of-hooks.
+  const pageBlocks = useMemo(() => doc?.blocks.filter((b) => b.bbox.page === page) ?? [], [doc?.blocks, page]);
+  const pageTables = useMemo(() => doc?.tables.filter((t) => t.page === page) ?? [], [doc?.tables, page]);
+  const lowConfidence = useMemo(
+    () => doc?.blocks.filter((b) => (b.confidence ?? 1) < 0.7).length ?? 0,
+    [doc?.blocks],
+  );
+
   if (!doc) {
     // Nothing to show for this tab. If the core has read files before, that
     // list is more useful than a dead end with a picker button on it.
@@ -378,9 +386,6 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
   }
 
   const model = modelById(doc.modelId);
-  const pageBlocks = doc.blocks.filter((b) => b.bbox.page === page);
-  const pageTables = doc.tables.filter((t) => t.page === page);
-  const lowConfidence = doc.blocks.filter((b) => (b.confidence ?? 1) < 0.7).length;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">

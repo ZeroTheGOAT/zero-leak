@@ -24,6 +24,8 @@ import {
   type UnlistenFn,
 } from './transport';
 export { CoreUnavailable, isDesktopShell, transport } from './transport';
+import { IMAGE_EXTENSIONS, basename } from './paths';
+export { IMAGE_EXTENSIONS, basename } from './paths';
 import type {
   AgentMode,
   AgentStep,
@@ -49,6 +51,7 @@ import type {
   McpToolSummary,
   ModelEntry,
   ModelRuntime,
+  OpenWithEntry,
   RouteRule,
   PermissionDecision,
   PermissionRequest,
@@ -190,6 +193,14 @@ export const files = {
   write: (path: string, content: string) => call<FilePreview>('fs_write', { path, content }),
   /** Reveal in Explorer. Never opens a network location. */
   reveal: (path: string) => call<void>('fs_reveal', { path }),
+  /** Open in whatever the machine registered as the default handler. */
+  openDefault: (path: string) => call<void>('fs_open_default', { path }),
+  /** Installed applications the machine offers for a file, default first. */
+  openWithList: (path: string) => call<OpenWithEntry[]>('fs_open_with_list', { path }),
+  /** Launch one installed program with a file. No shell is involved. */
+  openWith: (path: string, exe: string) => call<void>('fs_open_with', { path, exe }),
+  /** Save dialog plus copy. Answers the destination path, or null if cancelled. */
+  saveCopyAs: (path: string) => call<string | null>('fs_save_copy_as', { path }),
 };
 
 /* ------------------------------------------------------------------ */
@@ -321,20 +332,9 @@ export interface StartTurnInput {
   contributeMemories: boolean;
 }
 
-const IMAGE_EXTENSIONS = new Set([
-  'png',
-  'jpg',
-  'jpeg',
-  'webp',
-  'bmp',
-  'tif',
-  'tiff',
-  'gif',
-]);
-
 /** Build a typed local input without opening or reading the selected file. */
 export const localTurnInput = (path: string): TurnInput => {
-  const fileName = path.split(/[\\/]/).pop() ?? path;
+  const fileName = basename(path);
   const extension = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() ?? '' : '';
   return IMAGE_EXTENSIONS.has(extension)
     ? { type: 'localImage', path }

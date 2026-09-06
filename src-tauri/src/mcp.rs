@@ -5,12 +5,10 @@
 //! normal execute-risk approval gate before this module is reached.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout, Command};
 
 use crate::error::{CoreError, CoreResult};
 use crate::types::{AppSettings, McpServerConfig, McpToolSummary};
@@ -34,7 +32,7 @@ fn server<'a>(settings: &'a AppSettings, id: &str) -> CoreResult<&'a McpServerCo
     Ok(server)
 }
 
-async fn send(stdin: &mut ChildStdin, message: &Value) -> CoreResult<()> {
+async fn send(stdin: &mut tokio::process::ChildStdin, message: &Value) -> CoreResult<()> {
     let body = serde_json::to_vec(message)?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     stdin.write_all(header.as_bytes()).await?;
@@ -88,8 +86,8 @@ async fn receive<R: AsyncBufRead + Unpin>(reader: &mut R) -> CoreResult<Value> {
 }
 
 async fn request(
-    stdin: &mut ChildStdin,
-    stdout: &mut BufReader<ChildStdout>,
+    stdin: &mut tokio::process::ChildStdin,
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
     id: u64,
     method: &str,
     params: Value,
@@ -118,11 +116,22 @@ async fn session(
     method: &str,
     params: Value,
 ) -> CoreResult<Value> {
-    let mut child = Command::new(&config.command)
+    // Contained in a job object like every other child: bounds memory/processes
+    // and kills the tree with the app (KILL_ON_JOB_CLOSE). tokio has no
+    // suspended-spawn, so containment happens immediately after spawn (tiny
+    // race, documented) rather than before first instruction as in
+    // `winproc::spawn_contained`.
+    let job = crate::winproc::Job::create(crate::winproc::JobLimits::sandbox(1024, 8)).map_err(|error| {
+        CoreError::ExecutionFailed(format!(
+            "The MCP server '{}' job could not be created ({error}).",
+            config.name
+        ))
+    })?;
+    let mut child = tokio::process::Command::new(&config.command)
         .args(&config.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
@@ -131,6 +140,20 @@ async fn session(
                 config.name
             ))
         })?;
+    // Contain now; the handle is held to the end of the session so the tree
+    // dies with it even if `kill` below is skipped by an early return.
+    // tokio's `raw_handle` is Option<*mut c_void> on this version.
+    if let Some(handle) = child.raw_handle() {
+        if !handle.is_null() {
+            // A containment failure refuses to run rather than running
+            // uncontained.
+            job.assign_raw(handle as isize).map_err(|e| {
+                let _ = child.start_kill();
+                e
+            })?;
+        }
+    }
+    let _job = std::sync::Arc::new(job);
     let mut stdin = child.stdin.take().ok_or_else(|| {
         CoreError::ExecutionFailed("The MCP server did not open an input channel.".into())
     })?;

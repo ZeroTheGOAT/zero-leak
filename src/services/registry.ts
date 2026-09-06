@@ -17,8 +17,15 @@ import type {
   ToolDescriptor,
 } from '../types';
 
-/** Root the registry resolves weights against. Overridden by settings. */
-export const MODELS_ROOT = 'C:/Users/harih/OneDrive/Documents/ocr/models';
+/**
+ * Root the fallback catalogue resolves weights against — the installed layout
+ * (`SOVEREIGN_HOME`, default `C:/sovereign`), same as the core's
+ * `detect_models_root`. Both this and MODEL_REGISTRY are first-paint seeds
+ * only: the core's own catalogue and settings replace them as soon as it
+ * answers. No development-checkout path belongs here; a shipped bundle that
+ * knows one machine's home directory is wrong on every other machine.
+ */
+export const MODELS_ROOT = 'C:/sovereign/models';
 
 /** llama.cpp build directory, deliberately outside any syncing folder. */
 export const RUNTIME_ROOT = 'C:/sovereign/runtime/llama.cpp';
@@ -46,24 +53,24 @@ export const ROUTER_BIND_HOST = '127.0.0.1';
 
 export const MODEL_REGISTRY: ModelEntry[] = [
   {
-    id: 'qwen3.5-9b',
-    displayName: 'Qwen3.5 9B',
+    id: 'gemma-4-e4b',
+    displayName: 'Gemma 4 E4B',
     backend: 'llama.cpp',
     location: 'this_device',
-    source: `${MODELS_ROOT}/qwen3.5-9b/Qwen_Qwen3.5-9B-Q4_K_M.gguf`,
-    projector: `${MODELS_ROOT}/qwen3.5-9b/mmproj-Qwen_Qwen3.5-9B-f16.gguf`,
-    architecture: 'qwen35',
-    quantization: 'Q4_K_M',
+    source: `${MODELS_ROOT}/gemma-4-e4b/gemma-4-E4B_q4_0-it.gguf`,
+    projector: `${MODELS_ROOT}/gemma-4-e4b/gemma-4-E4B-it-mmproj.gguf`,
+    architecture: 'gemma4',
+    quantization: 'Q4_0',
     contextSize: 16384,
-    trainedContext: 262144,
+    trainedContext: 131072,
     kvCacheType: 'q8_0',
-    capabilities: ['general', 'reasoning', 'coding', 'vision', 'drawings', 'documents', 'tools'],
-    estimatedVramMb: 6883,
-    fileSizeBytes: 6169341984 + 918165952,
+    capabilities: ['general', 'reasoning', 'vision', 'drawings', 'documents', 'tools'],
+    estimatedVramMb: 4373,
+    fileSizeBytes: 5154941280 + 991552256,
     priority: 'primary',
-    promptTokensPerSec: 2011,
-    genTokensPerSec: 42.8,
-    note: 'Reads engineering drawings and P&IDs more accurately than the dedicated OCR models — it recovered line tag 8"-P-2103-A2A that both OCR models misread.',
+    promptTokensPerSec: 3704.5,
+    genTokensPerSec: 70.7,
+    note: 'Google Gemma 4 E4B instruction-tuned QAT model. The 16K local profile was verified with the matching multimodal projector; Extended Thinking enables its native reasoning mode.',
   },
   {
     id: 'nemotron-3-nano-4b',
@@ -176,7 +183,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     priority: 'disabled',
     promptTokensPerSec: 2390.5,
     genTokensPerSec: 50.4,
-    note: 'Not routed to. On the P&ID it produced no answer at all — an unclosed reasoning block consumed the whole budget. Qwen3.5-9B covers the same ground correctly. Kept in the registry so the decision stays visible and reversible.',
+    note: 'Not routed to. On the P&ID it produced no answer at all — an unclosed reasoning block consumed the whole budget. Gemma 4 E4B covers the general vision path correctly. Kept in the registry so the decision stays visible and reversible.',
   },
 ];
 
@@ -218,14 +225,14 @@ export const ROUTING_RULES: RouteRule[] = [
     label: 'Handwritten notes / poor-quality scan',
     basis: 'rule',
     modelId: 'olmocr-2',
-    fallbackModelId: 'qwen3.5-9b',
+    fallbackModelId: 'gemma-4-e4b',
     detail: 'Chosen when OCR confidence falls below threshold or the user marks the file as handwritten.',
   },
   {
     kind: 'engineering_drawing',
     label: 'Engineering drawing / P&ID',
     basis: 'rule',
-    modelId: 'qwen3.5-9b',
+    modelId: 'gemma-4-e4b',
     fallbackModelId: 'olmocr-2',
     detail: 'OCR tag extraction plus vision reasoning over topology, in one pass.',
   },
@@ -233,7 +240,7 @@ export const ROUTING_RULES: RouteRule[] = [
     kind: 'photograph',
     label: 'Equipment photograph',
     basis: 'file_type',
-    modelId: 'qwen3.5-9b',
+    modelId: 'gemma-4-e4b',
     detail: 'Uses the model\u2019s own f16 projector.',
   },
   {
@@ -241,7 +248,7 @@ export const ROUTING_RULES: RouteRule[] = [
     label: 'Source code',
     basis: 'file_type',
     modelId: 'nemotron-cascade-8b',
-    fallbackModelId: 'qwen3.5-9b',
+    fallbackModelId: 'gemma-4-e4b',
     detail: 'Matched on extension against the known source-file set.',
   },
   {
@@ -249,20 +256,20 @@ export const ROUTING_RULES: RouteRule[] = [
     label: 'Input over 14k tokens',
     basis: 'token_budget',
     modelId: 'nemotron-3-nano-4b',
-    detail: 'The 9B fits 16k; this fits 65k in the same preset and 195k at f16.',
+    detail: 'Gemma E4B fits the 16k local profile; this fits 65k in the same preset and 195k at f16.',
   },
   {
     kind: 'knowledge_query',
     label: 'Question against indexed knowledge',
     basis: 'rule',
-    modelId: 'qwen3.5-9b',
+    modelId: 'gemma-4-e4b',
     detail: 'BGE-M3 retrieval, then reasoning over the retrieved passages with citations.',
   },
   {
     kind: 'reasoning',
     label: 'General reasoning / mixed task',
     basis: 'classifier',
-    modelId: 'qwen3.5-9b',
+    modelId: 'gemma-4-e4b',
     fallbackModelId: 'nemotron-cascade-8b',
     detail: 'The only path that may consult a lightweight classifier, and only when rules cannot decide.',
   },
@@ -303,8 +310,10 @@ export const TOOL_CATALOGUE: ToolDescriptor[] = [
   { name: 'generate_xlsx', label: 'Generate XLSX', risk: 'write', requiresApproval: true, summary: 'Produce a workbook, then verify it opens.' },
   { name: 'generate_pptx', label: 'Generate PPTX', risk: 'write', requiresApproval: true, summary: 'Produce a deck, then verify it opens.' },
   { name: 'generate_pdf', label: 'Generate PDF', risk: 'write', requiresApproval: true, summary: 'Produce a PDF, then verify page count and text.' },
+  { name: 'generate_text', label: 'Generate text file', risk: 'write', requiresApproval: true, summary: 'Write a script, note or Markdown file into the artifacts folder.' },
   { name: 'execute_python', label: 'Run Python', risk: 'execute', requiresApproval: true, summary: 'Run a script in the sandbox. No network, memory-capped, timed out.' },
   { name: 'run_command', label: 'Run command', risk: 'execute', requiresApproval: true, summary: 'Run an allow-listed command in the sandbox working directory.' },
+  { name: 'start_dev_server', label: 'Start dev server', risk: 'execute', requiresApproval: true, summary: 'Run the workspace’s dev script as a persistent process and return its verified localhost URL. Outlives the run that started it.' },
   { name: 'serve_folder', label: 'Host folder', risk: 'read', requiresApproval: false, summary: 'Serve a workspace folder on a loopback URL in the operator’s browser. Read-only; loopback only.' },
   { name: 'check_page', label: 'Check page', risk: 'read', requiresApproval: false, summary: 'Fetch, render and visually inspect the workspace’s served page. Loopback only; verifies the build instead of trusting a URL.' },
 ];
@@ -318,20 +327,21 @@ export const toolByName = (name: string): ToolDescriptor | undefined =>
 
 export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = {
   workingDir: 'C:/sovereign/sandbox',
-  networkEnabled: false,
+  // Egress follows the operator's Settings choice — default on. Mirrors
+  // registry.rs; shown only until the core answers `sandbox_policy`.
+  networkEnabled: true,
   timeoutSec: 1800,
   maxMemoryMb: 4096,
   maxProcesses: 8,
-  // Mirrors `default_sandbox_policy()` in registry.rs. Shown only until the
-  // core answers `sandbox_policy`, so a mismatch would flash a list of
-  // commands the sandbox does not actually accept. `dir` and `type` were
-  // dropped from both: they are interpreter builtins with no file to start.
-  allowedCommands: ['python', 'pip', 'git', 'node', 'npm', 'npx', 'cargo', 'findstr', 'where', 'tree'],
+  allowedCommands: [
+    'python', 'pip', 'git', 'node', 'npm', 'npx', 'cargo', 'curl', 'wget',
+    'findstr', 'where', 'tree',
+  ],
   deniedCommands: [
     'del', 'rmdir', 'rd', 'rm', 'Remove-Item', 'format', 'diskpart', 'vssadmin',
     'reg', 'schtasks', 'sc', 'net', 'netsh', 'bcdedit',
     'takeown', 'icacls', 'cipher', 'wmic', 'powershell -enc',
-    'Invoke-WebRequest', 'Invoke-Expression', 'curl', 'wget', 'certutil',
+    'Invoke-Expression',
   ],
 };
 
@@ -351,10 +361,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   allowPrivateServer: false,
   privateServerUrl: '',
   privateServerName: '',
-  blockPublicInternet: true,
+  blockPublicInternet: false,
   allowReplicatedStore: false,
 
-  webSearchMode: 'disabled',
+  webSearchMode: 'direct',
   webSearchProvider: 'brave',
   webSearchApiKeyEnv: 'BRAVE_SEARCH_API_KEY',
   mcpServers: [],
@@ -364,7 +374,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   guardRules: [],
 
   sandboxRoot: DEFAULT_SANDBOX_POLICY.workingDir,
-  sandboxNetwork: false,
+  sandboxNetwork: true,
   sandboxTimeoutSec: 1800,
   sandboxMaxMemoryMb: 4096,
 

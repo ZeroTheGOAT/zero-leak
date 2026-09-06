@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FileCheck,
   File,
@@ -9,6 +9,7 @@ import {
   Maximize2,
   Minimize2,
   Package,
+  PanelRightClose,
   Plus,
   ScrollText,
   Server,
@@ -19,7 +20,7 @@ import { useApp } from '../../context/AppContext';
 import type { PanelTabKind } from '../../types';
 import { DiffReviewer } from './DiffReviewer';
 import { SandboxConsole } from './SandboxConsole';
-import { FileExplorerView } from './FileExplorerView';
+import { FileExplorerView, iconFor as fileTypeIcon } from './FileExplorerView';
 import { DocumentViewer } from './DocumentViewer';
 import { KnowledgeView } from './KnowledgeView';
 import { MemoryView } from './MemoryView';
@@ -107,17 +108,33 @@ const ORDER: PanelTabKind[] = [
 ];
 
 export const RightPanel: React.FC = () => {
-  const { isPanelOpen, setIsPanelOpen, tabs, activeTabId, setActiveTabId, openTab, closeTab } =
-    useApp();
+  const {
+    isPanelOpen,
+    setIsPanelOpen,
+    tabs,
+    activeTabId,
+    setActiveTabId,
+    openTab,
+    closeTab,
+    activeWorkspaceId,
+    artifacts,
+  } = useApp();
 
   const [addOpen, setAddOpen] = useState(false);
   const [panelWidth, setPanelWidth] = useState(560);
+  const [expanded, setExpanded] = useState(false);
   const [resizing, setResizing] = useState(false);
   const resizeStart = useRef<{ x: number; width: number } | null>(null);
   const addRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
+  // Drag sizing never eats the chat screen: the panel may grow to at most
+  // 60% of the window, so the composer's action row (planning, approvals,
+  // documents, local models…) is never squeezed off. Past that, a deliberate
+  // Expand from the header opens the panel at full width instead.
+  const MAX_PANEL_FRACTION = 0.6;
   const clampWidth = (width: number) =>
-    Math.min(Math.max(340, width), Math.max(340, window.innerWidth - 360));
+    Math.min(Math.max(340, width), Math.max(340, Math.floor(window.innerWidth * MAX_PANEL_FRACTION)));
 
   const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -130,7 +147,7 @@ export const RightPanel: React.FC = () => {
     const move = (event: PointerEvent) => {
       if (!resizeStart.current) return;
       const width = resizeStart.current.width + resizeStart.current.x - event.clientX;
-      setPanelWidth(Math.min(Math.max(340, width), Math.max(340, window.innerWidth - 360)));
+      setPanelWidth(clampWidth(width));
     };
     const end = () => {
       resizeStart.current = null;
@@ -158,31 +175,86 @@ export const RightPanel: React.FC = () => {
     return () => document.removeEventListener('mousedown', onDown);
   }, [addOpen]);
 
+  // Expanding covers the chat with the panel; drop any focus that landed in
+  // the composer so keystrokes never keep going to an invisible input.
+  useEffect(() => {
+    if (!expanded) return;
+    (document.activeElement as HTMLElement | null)?.blur?.();
+  }, [expanded]);
+
+  // Keep the active tab (and its close button) in view, so opening or
+  // selecting the last tab never strands it off-screen behind a manual scroll.
+  useEffect(() => {
+    if (!activeTabId) return;
+    tabRefs.current.get(activeTabId)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeTabId, tabs.length]);
+
+  // The panel only renders once something has been opened in it, so "visible"
+  // is both flags together — the header toggle reads it for its pressed state.
+  const panelVisible = isPanelOpen && tabs.length > 0;
+
+  const togglePanel = useCallback(() => {
+    if (panelVisible) {
+      setIsPanelOpen(false);
+      return;
+    }
+    if (tabs.length === 0) {
+      // First open: the project's own files when a folder is open, since that
+      // is what "show me everything" means with a workspace loaded. Artifacts
+      // otherwise, which is all there is to show without one.
+      if (activeWorkspaceId) openTab('files', 'Files');
+      else openTab('artifacts', 'Artifacts');
+      return;
+    }
+    setIsPanelOpen(true);
+  }, [panelVisible, tabs.length, activeWorkspaceId, openTab, setIsPanelOpen]);
+
+  const panelHint = panelVisible
+    ? 'Hide the side panel'
+    : artifacts.length > 0
+      ? `Show the side panel — files, changes and ${artifacts.length} artifact${
+          artifacts.length === 1 ? '' : 's'
+        }`
+      : 'Show the side panel — files, changes and artifacts';
+
   if (!isPanelOpen || tabs.length === 0) return null;
 
   const current = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
-  const wide = panelWidth >= 700;
 
   return (
     <aside
-      className={`relative border-l border-[var(--border)] bg-[var(--card)] flex flex-col h-full min-h-0 select-none flex-shrink-0 ${
-        resizing ? '' : 'transition-[width] duration-200'
-      }`}
-      style={{ width: panelWidth }}
+      className={`border-l border-[var(--border)] bg-[var(--card)] flex flex-col min-h-0 select-none ${
+        // Expanded: lift out of the flex row and cover it edge to edge. The
+        // composer and its action row float above the chat column, so a
+        // collapsed chat can still paint them over the panel — only full
+        // cover in front of everything inside the row hides the chat.
+        expanded ? 'absolute inset-y-0 right-0 z-[60]' : 'relative h-full flex-shrink-0'
+      } ${resizing ? '' : 'transition-[width] duration-200'}`}
+      style={{ width: expanded ? '100%' : panelWidth }}
     >
-      <div
-        role="separator"
-        aria-label="Resize right panel"
-        aria-orientation="vertical"
-        onPointerDown={beginResize}
-        onDoubleClick={() => setPanelWidth(560)}
-        className={`absolute -left-1 top-0 bottom-0 z-[80] w-2 cursor-col-resize touch-none transition-colors ${
-          resizing ? 'bg-[var(--primary-ring)]' : 'hover:bg-[var(--primary-ring)]'
-        }`}
-        title="Drag left or right to resize"
-      />
-      <div className="h-11 px-2 border-b border-[var(--border)] flex items-center bg-[var(--card)] relative z-50">
-        <div className="flex items-center space-x-1 overflow-x-auto scrollbar-none py-1 min-w-0">
+      {/* Drag handle only while docked — an expanded panel fills the row, so
+          there is nothing beside it to resize against. */}
+      {!expanded && (
+        <div
+          role="separator"
+          aria-label="Resize right panel"
+          aria-orientation="vertical"
+          onPointerDown={beginResize}
+          onDoubleClick={() => setPanelWidth(560)}
+          className="group/split absolute -left-1 top-0 bottom-0 z-[80] w-2 cursor-col-resize touch-none"
+          title="Drag left or right to resize — up to 60% of the window"
+        >
+          {/* Slim 1px line that only brightens a touch on hover — never a band. */}
+          <div
+            aria-hidden="true"
+            className={`mx-auto h-full w-px transition-colors ${
+              resizing ? 'bg-[var(--muted-foreground)]' : 'bg-transparent group-hover/split:bg-[var(--muted-foreground)]'
+            }`}
+          />
+        </div>
+      )}
+      <div className="h-11 px-2 flex items-center bg-[var(--background)] border-b border-[var(--border)] relative">
+        <div className="flex items-center gap-1 overflow-x-auto py-1 min-w-0 max-w-full shrink [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" role="tablist" aria-label="Side panel tabs">
           {tabs.map((tab) => {
             const meta = TAB_META[tab.kind];
             const Icon = meta.icon;
@@ -190,23 +262,56 @@ export const RightPanel: React.FC = () => {
             return (
               <div
                 key={tab.id}
-                className={`flex items-center space-x-1.5 pl-2 pr-1 py-1.5 rounded-lg text-[11.5px] transition flex-shrink-0 border ${
+                ref={(el) => {
+                  if (el) tabRefs.current.set(tab.id, el);
+                  else tabRefs.current.delete(tab.id);
+                }}
+                role="tab"
+                aria-selected={active}
+                aria-label={tab.title}
+                onClick={() => setActiveTabId(tab.id)}
+                className={`group flex min-w-[96px] shrink-0 cursor-pointer items-center gap-1.5 overflow-hidden pl-2 pr-1.5 py-1.5 rounded-[10px] text-[11.5px] border transition ${
                   active
-                    ? 'bg-[var(--card)] text-[var(--foreground)] border-[var(--border)] font-medium'
-                    : 'bg-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] border-transparent'
+                    ? 'bg-[var(--card)] border-[var(--border)] text-[var(--foreground)] font-medium'
+                    : 'bg-transparent border-transparent text-[var(--muted-foreground)] hover:bg-[var(--card)] hover:border-[var(--border)] hover:text-[var(--foreground)]'
                 }`}
               >
                 <button
                   onClick={() => setActiveTabId(tab.id)}
-                  className="flex items-center space-x-1.5 min-w-0"
+                  aria-label={`Show ${tab.title} panel`}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden"
                   title={meta.hint}
                 >
-                  <Icon size={12} className={`${meta.tone} flex-shrink-0`} />
-                  <span className="truncate max-w-[110px]">{tab.title}</span>
+                  {tab.kind === 'file' && tab.filePath ? (
+                    fileTypeIcon(
+                      {
+                        name: tab.filePath.split(/[\\/]/).pop() ?? tab.filePath,
+                        relPath: '',
+                        isDir: false,
+                        sizeBytes: 0,
+                        modifiedAt: 0,
+                      },
+                      false,
+                    )
+                  ) : (
+                    <Icon size={12} className={`${meta.tone} flex-shrink-0`} />
+                  )}
+                  <span className="truncate min-w-0 max-w-[140px]">{tab.title}</span>
                 </button>
                 <button
-                  onClick={() => closeTab(tab.id)}
-                  className="p-0.5 rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--popover)] transition flex-shrink-0"
+                  onClick={(e) => {
+                    // Closing a tab is not selecting it — never let the click
+                    // fall through to the pill's own handler.
+                    e.stopPropagation();
+                    closeTab(tab.id);
+                  }}
+                  aria-label={`Close ${tab.title} tab`}
+                  tabIndex={active ? 0 : -1}
+                  className={`p-0.5 rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--popover)] transition flex-shrink-0 ${
+                    active
+                      ? 'opacity-100'
+                      : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus-visible:opacity-100 pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto focus:pointer-events-auto'
+                  }`}
                   title="Close tab"
                 >
                   <X size={11} />
@@ -216,7 +321,7 @@ export const RightPanel: React.FC = () => {
           })}
         </div>
 
-        <div ref={addRef} className="relative flex-shrink-0 mx-1">
+        <div ref={addRef} className="relative flex-shrink-0 mr-1">
           <button
             onClick={() => setAddOpen(!addOpen)}
             className={`p-1.5 rounded-lg transition ${
@@ -258,19 +363,27 @@ export const RightPanel: React.FC = () => {
         </div>
 
         <div className="flex items-center space-x-1 text-[var(--muted-foreground)] flex-shrink-0 ml-auto">
+          {/* Expand — the drag handle stops at 60% of the window so the chat
+              screen keeps its action row; wanting more than that is a choice,
+              made here: full width, and Restore brings the docked width back. */}
           <button
-            onClick={() => setPanelWidth(clampWidth(wide ? 560 : 760))}
+            onClick={() => setExpanded((v) => !v)}
             className="p-1.5 hover:text-[var(--foreground)] hover:bg-[var(--card)] rounded-lg transition"
-            title={wide ? 'Narrow' : 'Widen'}
+            title={expanded ? 'Restore — back to the docked width' : 'Expand — panel at full width'}
+            aria-pressed={expanded}
           >
-            {wide ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+            {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
+          {/* Filled-box panel toggle at the far right, like the reference —
+              it closes the panel from here; the floating chip reopens it. */}
           <button
-            onClick={() => setIsPanelOpen(false)}
-            className="p-1.5 hover:text-[var(--foreground)] hover:bg-[var(--card)] rounded-lg transition"
-            title="Close panel"
+            onClick={togglePanel}
+            aria-pressed={panelVisible}
+            aria-label={panelHint}
+            className="p-2 rounded-[10px] bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--accent)] transition flex-shrink-0"
+            title={panelHint}
           >
-            <X size={14} />
+            <PanelRightClose size={14} />
           </button>
         </div>
       </div>

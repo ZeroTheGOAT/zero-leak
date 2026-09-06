@@ -203,7 +203,17 @@ async fn run_checks(st: &std::sync::Arc<AppState>, url: &str) -> CoreResult<Repo
     }
 
     // ---- render, then let the vision model read the picture ----
-    let screenshot = match render(url) {
+    // `render` polls its child with blocking sleeps for up to RENDER_TIMEOUT,
+    // so it belongs on the blocking pool: called inline it would park an async
+    // worker — and with it every other chat's turn — for as long as the page
+    // takes to paint.
+    let rendered = tokio::task::spawn_blocking({
+        let url = url.to_string();
+        move || render(&url)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("the renderer task failed ({e})")));
+    let screenshot = match rendered {
         Ok(bytes) => match vision_critique(st, &bytes).await {
             Ok(findings) => Screenshot::Critiqued(findings),
             Err(why) => Screenshot::RenderedNotCritiqued(why),
@@ -216,11 +226,11 @@ async fn run_checks(st: &std::sync::Arc<AppState>, url: &str) -> CoreResult<Repo
 
 /// Shows the rendered page to the local vision model and asks what is wrong
 /// with it. Whichever vision-capable model the router picks for a photograph
-/// (qwen3.5-9b with its own projector, minicpm-v as an alternative) — the
+/// (Gemma 4 E4B with its own projector, MiniCPM-V as an alternative) — the
 /// question is about layout and completeness, not transcription.
 async fn vision_critique(st: &std::sync::Arc<AppState>, png: &[u8]) -> Result<String, String> {
     let decision = {
-        let reg = st.registry.read().expect("registry lock");
+        let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
         reg.route(crate::registry::TaskKind::Photograph, None)
     };
     let model_id = decision.model_id.ok_or_else(|| {

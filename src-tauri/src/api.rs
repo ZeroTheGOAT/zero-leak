@@ -51,6 +51,7 @@ pub const COMMANDS: &[&str] = &[
     "transcription_status", "transcription_run",
     "workspace_list", "workspace_add", "workspace_source_pick", "workspace_create", "workspace_update", "workspace_approve", "workspace_remove",
     "fs_list", "fs_read", "fs_preview", "fs_write", "fs_reveal",
+    "fs_open_default", "fs_open_with_list", "fs_open_with", "fs_save_copy_as",
     "devserver_start", "devserver_stop", "devserver_status", "devserver_open",
     "document_ingest", "document_get", "document_page_image", "document_list", "document_pick", "document_remove",
     "knowledge_stats", "knowledge_list", "knowledge_index", "knowledge_reindex",
@@ -61,8 +62,8 @@ pub const COMMANDS: &[&str] = &[
     "sandbox_policy", "sandbox_run", "sandbox_kill", "sandbox_history",
     "audit_list", "store_gate_list",
     "vault_status", "vault_event_list", "vault_enable", "vault_disable",
-    "turn_start", "agent_start", "agent_cancel", "permission_respond", "change_apply", "change_discard",
-    "session_list", "session_history", "session_delete", "session_memory",
+    "turn_start", "agent_start", "agent_cancel", "permission_respond", "question_answer", "change_apply", "change_discard", "change_apply_all", "change_discard_all",
+    "session_list", "session_history", "session_truncate", "session_delete", "session_memory", "attachment_stage",
     "settings_get", "settings_set",
     "window_minimize", "window_toggle_maximize", "window_close", "app_quit",
 ];
@@ -133,29 +134,36 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         /* ---- §1 / §2 models and router ---- */
         "model_list" => ok(router::list_models(st).await?),
         "model_catalogue_list" => {
-            let models = st.registry.read().expect("registry lock").all().to_vec();
+            let models = st.registry.read().unwrap_or_else(|e| e.into_inner()).all().to_vec();
             ok(models)
         }
         "model_catalogue_add" => {
             let model = arg::<ModelEntry>(args, "model")?;
             let models_root = st.settings().models_directory;
-            let models = st
-                .registry
-                .write()
-                .expect("registry lock")
-                .upsert_local_model(model, &models_root)?;
+            // The location decides the arm: a local entry goes through the
+            // filesystem-path rules, a server entry through the URL and
+            // env-var rules. Each refuses what it cannot validate.
+            let models = match model.location {
+                ModelLocation::ThisDevice => st
+                    .registry
+                    .write().unwrap_or_else(|e| e.into_inner())
+                    .upsert_local_model(model, &models_root)?,
+                ModelLocation::PrivateServer => st
+                    .registry
+                    .write().unwrap_or_else(|e| e.into_inner())
+                    .upsert_server_model(model, &models_root)?,
+            };
             ok(models)
         }
         "model_routing_list" => {
-            let rules = st.registry.read().expect("registry lock").routes().to_vec();
+            let rules = st.registry.read().unwrap_or_else(|e| e.into_inner()).routes().to_vec();
             ok(rules)
         }
         "model_routing_set" => {
             let models_root = st.settings().models_directory;
             let rules = st
                 .registry
-                .write()
-                .expect("registry lock")
+                .write().unwrap_or_else(|e| e.into_inner())
                 .set_route(
                     arg::<registry::TaskKind>(args, "kind")?,
                     arg::<String>(args, "modelId")?,
@@ -262,6 +270,17 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
             &opt::<String>(args, "content")?.unwrap_or_default(),
         )?),
         "fs_reveal" => ok(fsops::reveal(st, &arg::<String>(args, "path")?)?),
+        // Outward opens. The file clears the workspace boundary in each of
+        // these; the program it opens inside is the operator's explicit
+        // choice, launched directly with no shell in between.
+        "fs_open_default" => ok(fsops::open_default(st, &arg::<String>(args, "path")?)?),
+        "fs_open_with_list" => ok(fsops::open_with_list(st, &arg::<String>(args, "path")?)?),
+        "fs_open_with" => ok(fsops::open_with(
+            st,
+            &arg::<String>(args, "path")?,
+            &arg::<String>(args, "exe")?,
+        )?),
+        "fs_save_copy_as" => ok(fsops::save_copy_as(st.clone(), &arg::<String>(args, "path")?).await?),
 
         /* ---- persistent dev servers ---- */
         "devserver_start" => {
@@ -715,6 +734,37 @@ mod command_table {
         assert!(missing.is_empty(), "in COMMANDS but not dispatched: {missing:?}");
     }
 
+    /// The other direction of the test above: an arm that exists in `dispatch`
+    /// but not in `COMMANDS` is a command the frontend really can call while
+    /// the table denies it exists — a typo of it gets a did-you-mean for a
+    /// wrong name, and "every command the UI may ask the core to do" quietly
+    /// stops being true. Five such arms had accumulated when this test was
+    /// written. Arms are recognised by their rustfmt shape: exactly eight
+    /// spaces, a quoted name, then ` =>` — a nested match inside an arm body
+    /// indents deeper and cannot be mistaken for one.
+    #[test]
+    fn every_dispatch_arm_is_listed() {
+        let src = include_str!("api.rs");
+        let (_, body) = src.split_once("pub async fn dispatch").expect("dispatch exists");
+        let arms: Vec<&str> = body
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("        \"")?;
+                let (name, _) = rest.split_once("\" =>")?;
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    .then_some(name)
+            })
+            .collect();
+        assert!(!arms.is_empty(), "no arms were extracted; this test has rotted");
+        let missing: Vec<&str> = arms
+            .iter()
+            .copied()
+            .filter(|a| !COMMANDS.contains(a))
+            .collect();
+        assert!(missing.is_empty(), "dispatched but not in COMMANDS: {missing:?}");
+    }
+
     #[test]
     fn no_duplicates() {
         let mut seen: Vec<&str> = COMMANDS.to_vec();
@@ -756,20 +806,19 @@ mod command_table {
 fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     let before = st.settings();
     let current = serde_json::to_value(&before)?;
-    let mut merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
-    // This deployment's sovereign boundary is fixed, including legacy settings.
-    merged.block_public_internet = true;
-    merged.sandbox_network = false;
-    merged.web_search_mode = WebSearchMode::Disabled;
+    let merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    // Egress follows the operator's settings. Nothing clamps it back here —
+    // §11 keeps counting and auditing public traffic regardless, so a network
+    // that was switched on remains visible in the status bar and the audit log.
 
     st.with_db(|conn| db::save_settings(conn, &merged))?;
-    *st.settings.write().expect("settings lock") = merged.clone();
+    *st.settings.write().unwrap_or_else(|e| e.into_inner()) = merged.clone();
 
     // The catalogue resolves `${MODELS_ROOT}` against the settings, so a change
     // to the models directory has to be reloaded rather than waiting for a
     // restart.
     if let Ok(reg) = registry::Registry::load_or_seed(&registry::config_dir(), &merged.models_directory) {
-        *st.registry.write().expect("registry lock") = reg;
+        *st.registry.write().unwrap_or_else(|e| e.into_inner()) = reg;
         // Moving the folder has to re-render `models.ini` too: it records
         // absolute weight paths, and the offline/air-gapped setup reads it back
         // to rehydrate the catalogue. Reloading the catalogue repoints the

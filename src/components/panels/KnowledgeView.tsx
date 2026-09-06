@@ -162,11 +162,12 @@ export const KnowledgeView: React.FC = () => {
                     */}
                     <div
                       className={`flex items-center space-x-0.5 flex-shrink-0 transition ${
-                        confirmRemove === s.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                        confirmRemove === s.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100'
                       }`}
                     >
                       <button
                         onClick={() => void reindexSource(s.id)}
+                        aria-label={`Re-index ${s.path}`}
                         className="p-1 rounded text-[var(--muted-foreground)] hover:bg-[var(--border)] hover:text-[var(--foreground)]"
                         title="Re-index this file"
                       >

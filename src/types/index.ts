@@ -84,6 +84,19 @@ export interface ModelEntry {
   genTokensPerSec?: number;
   /** Why this model is disabled or constrained. Shown verbatim in the UI. */
   note?: string;
+  /**
+   * The server this model is served by, when location is 'private_server'.
+   * Absent means the global private-server setting in Settings applies —
+   * the single-server deployment.
+   */
+  serverUrl?: string;
+  /**
+   * The NAME of the environment variable holding the bearer token for
+   * serverUrl. Never the token itself: the catalogue is a readable file and
+   * a credential in it would be a credential in clear text. The operator sets
+   * the variable in the launch environment.
+   */
+  serverApiKeyEnv?: string;
 }
 
 /** Live per-model runtime state, kept separate from static registry metadata. */
@@ -346,6 +359,7 @@ export type ToolName =
   | 'generate_xlsx'
   | 'generate_pptx'
   | 'generate_pdf'
+  | 'generate_text'
   | 'analyze_data'
   | 'inspect_artifact'
   | 'web_search'
@@ -408,7 +422,10 @@ export interface ToolDescriptor {
 /** Every tool call is logged. This is the audit record shape. */
 export interface ToolCallRecord {
   id: string;
-  tool: ToolName;
+  /** Raw wire name. Rows written by earlier builds can name a tool this build
+   *  no longer knows; the audit view shows the name it cannot resolve rather
+   *  than relabelling it. */
+  tool: string;
   argsSummary: string;
   status: 'ok' | 'denied' | 'failed';
   startedAt: number;
@@ -1114,4 +1131,17 @@ export interface FilePreview {
   /** Base64 bytes when the file is small enough to display inline. */
   contentBase64?: string;
   tooLarge: boolean;
+}
+
+/**
+ * One installed application the machine offers for a file, read from its own
+ * file-association registrations — never invented.
+ */
+export interface OpenWithEntry {
+  /** Display name from the registration, or the executable's own stem. */
+  name: string;
+  /** Absolute path of the executable, for `fs_open_with`. */
+  exe: string;
+  /** True for the extension's registered default handler. */
+  recommended: boolean;
 }

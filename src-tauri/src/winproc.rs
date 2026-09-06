@@ -25,6 +25,7 @@
 //! handled separately, by not giving the child any reachable endpoint and by the
 //! command deny list — not by the job.
 
+use crate::logln;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
@@ -92,7 +93,10 @@ unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 
 impl Job {
-    fn create(limits: JobLimits) -> CoreResult<Self> {
+    /// Public so out-of-band children (MCP servers on tokio) can be contained
+    /// after spawn. Prefer `spawn_contained` (suspended-then-resumed, no race)
+    /// for new code; this exists for async pipes that std cannot hand over.
+    pub fn create(limits: JobLimits) -> CoreResult<Self> {
         // SAFETY: a null name creates an unnamed job; the handle is checked.
         let handle = unsafe { CreateJobObjectW(None, None) }
             .map_err(|e| CoreError::ExecutionFailed(format!("Could not create a job object: {e}")))?;
@@ -145,19 +149,25 @@ impl Job {
                 )
             };
             if let Err(e) = ok {
-                eprintln!("[winproc] UI restrictions were not applied: {e}");
+                logln!("[winproc] UI restrictions were not applied: {e}");
             }
         }
 
         Ok(Self { handle })
     }
 
-    fn assign(&self, child: &Child) -> CoreResult<()> {
-        let process = HANDLE(child.as_raw_handle() as _);
+    /// Contain an already-running std child. See `create` for when this is used.
+    pub fn assign(&self, child: &Child) -> CoreResult<()> {
+        self.assign_raw(child.as_raw_handle() as isize)
+    }
+
+    /// Contain a tokio child (or any raw process handle) after spawn.
+    pub fn assign_raw(&self, raw: isize) -> CoreResult<()> {
+        let process = HANDLE(raw as _);
         // SAFETY: both handles are live for the duration of the call.
         unsafe { AssignProcessToJobObject(self.handle, process) }.map_err(|e| {
             CoreError::ExecutionFailed(format!(
-                "Could not place the child process in its job object, so it was not started: {e}"
+                "Could not place the child process in its job object: {e}"
             ))
         })
     }

@@ -367,19 +367,19 @@ mod tests {
     /// Reads the geometry off the real shipped weights, so a change in how GGUF
     /// metadata is laid out (a new converter, a re-download) breaks the build
     /// loudly instead of silently leaving every model at its catalogue window.
-    /// Ignored by default because the 6 GiB files need not be present on every
+    /// Ignored by default because the multi-GiB files need not be present on every
     /// developer machine; run it explicitly on a machine with the weights.
     #[test]
-    #[ignore = "needs the real weights under ../../models; run: cargo test --bin servergen-ai -- --ignored gguf::real_qwen"]
-    fn real_qwen_and_cascade_geometry_are_readable() {
+    #[ignore = "needs the real weights under ../../models; run: cargo test --bin servergen-ai -- --ignored gguf::real_gemma_and_cascade"]
+    fn real_gemma_and_cascade_geometry_are_readable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models");
-        let qwen = root.join("qwen3.5-9b/Qwen_Qwen3.5-9B-Q4_K_M.gguf");
-        let g = kv_geometry(&qwen).unwrap_or_else(|| {
-            panic!("qwen header not parsed at {}", qwen.display())
+        let gemma = root.join("gemma-4-e4b/gemma-4-E4B_q4_0-it.gguf");
+        let g = kv_geometry(&gemma).unwrap_or_else(|| {
+            panic!("Gemma header not parsed at {}", gemma.display())
         });
-        assert_eq!((g.layers, g.heads, g.key_len, g.value_len), (33, 4, 256, 256));
+        assert_eq!((g.layers, g.heads, g.key_len, g.value_len), (42, 2, 512, 512));
         let mb = g.kv_mb_per_token("q8_0").unwrap();
-        assert!((0.06..0.08).contains(&mb), "qwen q8_0 KV should be ~70 KiB/token, got {mb}");
+        assert!((0.08..0.10).contains(&mb), "Gemma q8_0 KV should be ~89 KiB/token, got {mb}");
 
         let cascade = root.join("nemotron-cascade-8b/nvidia_Nemotron-Cascade-8B-Q4_K_M.gguf");
         let g = kv_geometry(&cascade).unwrap_or_else(|| {

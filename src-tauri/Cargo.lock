@@ -5179,6 +5179,7 @@ dependencies = [
  "walkdir",
  "windows 0.61.3",
  "winreg 0.52.0",
+ "zeroize",
  "zip",
 ]
 

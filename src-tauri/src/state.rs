@@ -8,6 +8,7 @@
 //! than counted. That is also why the status bar can distinguish "this device"
 //! from "private server" instead of showing one undifferentiated number.
 
+use crate::logln;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -105,7 +106,7 @@ impl RunHandle {
     /// a model goes through, so tool-driven reads (OCR, vision) are covered
     /// without their call sites knowing about it.
     pub fn note_model(&self, model_id: &str) {
-        let mut m = self.models.lock().expect("run models lock");
+        let mut m = self.models.lock().unwrap_or_else(|e| e.into_inner());
         if !m.iter().any(|id| id == model_id) {
             m.push(model_id.to_string());
         }
@@ -114,7 +115,7 @@ impl RunHandle {
     /// The models this run has noted, snapshot for a decision made elsewhere
     /// (`make_room` reads every live run's set at once).
     pub fn noted_models(&self) -> Vec<String> {
-        self.models.lock().expect("run models lock").clone()
+        self.models.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Replaces the run's published plan. Returns the stored copy so the
@@ -126,7 +127,7 @@ impl RunHandle {
     /// reworded count as new, which is honest — the operator sees what the
     /// model actually changed.
     pub fn set_plan(&self, items: Vec<PlanItem>) -> Vec<PlanItem> {
-        let mut plan = self.plan.lock().expect("run plan lock");
+        let mut plan = self.plan.lock().unwrap_or_else(|e| e.into_inner());
         let previous = plan.clone();
         let mut stored = items;
         for item in stored.iter_mut() {
@@ -144,7 +145,7 @@ impl RunHandle {
     /// permission to act — is a loop, and this is what lets the tool result
     /// name it as one instead of the run discovering it by round 60.
     pub fn current_plan(&self) -> Vec<PlanItem> {
-        self.plan.lock().expect("run plan lock").clone()
+        self.plan.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -328,8 +329,11 @@ pub struct AppState {
     /// the database happens to return first.
     pub pending_changes: Mutex<HashMap<String, PendingRun>>,
 
-    /// Tools the user allowed for the rest of the session.
-    pub session_grants: RwLock<Vec<ToolName>>,
+    /// Tools the user allowed for the rest of the session, with grant time.
+    /// Grants expire after 8h so an "allow for session" cannot outlive the
+    /// workday it was meant for; `needs_approval` prunes expired entries.
+    /// The count is surfaced to the UI via the permission prompt copy.
+    pub session_grants: RwLock<Vec<(ToolName, i64)>>,
 
     /// Set while the knowledge folder watcher is running.
     pub watching: AtomicBool,
@@ -406,7 +410,7 @@ impl AppState {
     }
 
     pub fn settings(&self) -> AppSettings {
-        self.settings.read().expect("settings lock").clone()
+        self.settings.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /* ---- events ---- */
@@ -421,7 +425,7 @@ impl AppState {
         if let Ok(json) = serde_json::to_string(&payload) {
             if event == "agent://step" || event == "agent://done" {
                 if let Err(error) = crate::evidence::observe(self, event, &json) {
-                    eprintln!("[receipt] Could not persist {event}: {error}");
+                    logln!("[receipt] Could not persist {event}: {error}");
                 }
             }
             let _ = self.events.send(format!(
@@ -441,7 +445,7 @@ impl AppState {
     /// merges it into a map by id, so sending an array would break the reducer.
     pub fn set_model_state(&self, id: &str, f: impl FnOnce(&mut ModelRuntime)) {
         let updated = {
-            let mut m = self.models.write().expect("models lock");
+            let mut m = self.models.write().unwrap_or_else(|e| e.into_inner());
             let entry = m.entry(id.to_string()).or_insert_with(|| ModelRuntime::unloaded(id));
             f(entry);
             entry.clone()
@@ -450,8 +454,8 @@ impl AppState {
     }
 
     pub fn model_runtimes(&self) -> Vec<ModelRuntime> {
-        let m = self.models.read().expect("models lock");
-        let reg = self.registry.read().expect("registry lock");
+        let m = self.models.read().unwrap_or_else(|e| e.into_inner());
+        let reg = self.registry.read().unwrap_or_else(|e| e.into_inner());
         // Registry order, so the Models panel does not reshuffle between polls.
         reg.all()
             .iter()
@@ -461,8 +465,7 @@ impl AppState {
 
     pub fn loaded_ids(&self) -> Vec<String> {
         self.models
-            .read()
-            .expect("models lock")
+            .read().unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|r| r.state == ModelState::Loaded)
             .map(|r| r.id.clone())
@@ -549,7 +552,7 @@ impl AppState {
     ) -> ToolCallRecord {
         let rec = ToolCallRecord {
             id: new_id("tc"),
-            tool,
+            tool: tool.wire(),
             args_summary: args_summary.into(),
             status: status.to_string(),
             started_at,
@@ -572,12 +575,25 @@ impl AppState {
             models: Arc::new(Mutex::new(Vec::new())),
             plan: Arc::new(Mutex::new(Vec::new())),
         };
-        self.runs.lock().expect("runs lock").insert(run_id.to_string(), handle.clone());
+        self.runs.lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), handle.clone());
         handle
     }
 
     pub fn finish_run(&self, run_id: &str) {
-        self.runs.lock().expect("runs lock").remove(run_id);
+        self.runs.lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
+    }
+
+    /// True when Stop has been pressed for this run but its `agent://done`
+    /// has not been emitted yet. Polled by long waits — model streaming,
+    /// sandbox output — so they abort within ~100 ms instead of running to
+    /// completion while the operator watches a dead Stop button.
+    pub fn is_run_cancelled(&self, run_id: &str) -> bool {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_id)
+            .map(|h| h.is_cancelled())
+            .unwrap_or(false)
     }
 
     /// Cancels a run and releases anything waiting on a permission answer for
@@ -588,7 +604,7 @@ impl AppState {
     /// another.
     pub fn cancel_run(&self, run_id: &str) -> bool {
         let found = {
-            let runs = self.runs.lock().expect("runs lock");
+            let runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
             match runs.get(run_id) {
                 Some(h) => {
                     h.cancelled.store(true, Ordering::Relaxed);
@@ -598,7 +614,7 @@ impl AppState {
             }
         };
         let pending: Vec<String> = {
-            let perms = self.permissions.lock().expect("permissions lock");
+            let perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
             perms
                 .iter()
                 .filter(|(_, p)| p.run_id.as_deref() == Some(run_id))
@@ -659,7 +675,7 @@ say what you had finished so far.",
     }
 
     pub fn answer_permission(&self, id: &str, decision: PermissionDecision) -> bool {
-        let tx = self.permissions.lock().expect("permissions lock").remove(id).map(|p| p.tx);
+        let tx = self.permissions.lock().unwrap_or_else(|e| e.into_inner()).remove(id).map(|p| p.tx);
         match tx {
             Some(tx) => tx.send(decision).is_ok(),
             None => false,
@@ -697,8 +713,7 @@ say what you had finished so far.",
             Ok(Ok(answer)) => answer,
             Ok(Err(_)) | Err(_) => {
                 self.questions
-                    .lock()
-                    .expect("questions lock")
+                    .lock().unwrap_or_else(|e| e.into_inner())
                     .retain(|id, _| id != &question.id);
                 "The operator did not answer in time. Proceed with what you already have, and \
 say plainly in your answer which part you were unable to confirm."
@@ -711,7 +726,7 @@ say plainly in your answer which part you were unable to confirm."
     /// Delivers the operator's typed reply. Returns false when the question
     /// is gone (already answered, timed out, or its run cancelled).
     pub fn answer_question(&self, id: &str, answer: &str) -> bool {
-        let tx = self.questions.lock().expect("questions lock").remove(id).map(|q| q.tx);
+        let tx = self.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(id).map(|q| q.tx);
         match tx {
             Some(tx) => tx.send(answer.to_string()).is_ok(),
             None => false,
@@ -722,7 +737,7 @@ say plainly in your answer which part you were unable to confirm."
     /// not leave the loop parked on a channel nobody will fill. The reply is
     /// worded as a fact the model can continue from, not an error to retry.
     pub fn resolve_questions_for_run(&self, run_id: &str, reply: &str) {
-        let mut map = self.questions.lock().expect("questions lock");
+        let mut map = self.questions.lock().unwrap_or_else(|e| e.into_inner());
         let ids: Vec<String> = map
             .iter()
             .filter(|(_, q)| q.run_id == run_id)
@@ -741,8 +756,21 @@ say plainly in your answer which part you were unable to confirm."
     /// inside an approved workspace never prompt — the approval already
     /// happened, at the folder.
     pub fn needs_approval(&self, tool: ToolName) -> bool {
-        if self.session_grants.read().expect("grants lock").contains(&tool) {
-            return false;
+        // Grants expire after 8h; prune on read so a stale grant fails closed.
+        const GRANT_TTL_MS: i64 = 8 * 60 * 60 * 1000;
+        let now = now_ms();
+        {
+            let grants = self.session_grants.read().unwrap_or_else(|e| e.into_inner());
+            if grants.iter().any(|(t, at)| *t == tool && now - *at < GRANT_TTL_MS) {
+                return false;
+            }
+        }
+        // Opportunistic prune (write lock only when something expired).
+        {
+            let mut grants = self.session_grants.write().unwrap_or_else(|e| e.into_inner());
+            let before = grants.len();
+            grants.retain(|(_, at)| now - *at < GRANT_TTL_MS);
+            let _ = before;
         }
         let Some(desc) = crate::registry::tool_by_name(tool) else {
             // Unknown tool: ask. Failing closed is the whole point.
@@ -758,9 +786,12 @@ say plainly in your answer which part you were unable to confirm."
     }
 
     pub fn grant_session(&self, tool: ToolName) {
-        let mut g = self.session_grants.write().expect("grants lock");
-        if !g.contains(&tool) {
-            g.push(tool);
+        let mut g = self.session_grants.write().unwrap_or_else(|e| e.into_inner());
+        let now = now_ms();
+        if let Some(slot) = g.iter_mut().find(|(t, _)| *t == tool) {
+            slot.1 = now;
+        } else {
+            g.push((tool, now));
         }
     }
 }

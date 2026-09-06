@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { HelpCircle, CornerDownLeft } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import type { OperatorQuestion } from '../../types';
@@ -23,6 +23,14 @@ export const QuestionPrompt: React.FC = () => {
 const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q }) => {
   const { answerQuestion } = useApp();
   const [answer, setAnswer] = useState('');
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, []);
 
   const submit = () => {
     const trimmed = answer.trim();
@@ -43,12 +51,36 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
       className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-sm"
       style={{ background: 'color-mix(in oklab, var(--background) 72%, transparent)' }}
     >
-      <div className="w-full max-w-lg overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-question-title"
+        aria-describedby="agent-question-text"
+        onKeyDown={(e) => {
+          if (e.key === 'Tab') {
+            const controls = dialogRef.current?.querySelectorAll<HTMLElement>(
+              'button, textarea, [href], input, select, [tabindex]:not([tabindex="-1"])',
+            );
+            const first = controls?.[0];
+            const last = controls?.[controls.length - 1];
+            if (!first || !last) return;
+            if (e.shiftKey && document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
+        }}
+        className="w-full max-w-lg overflow-hidden rounded-xl border nerve-border bg-[var(--popover)] text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover"
+      >
         {/* Header */}
         <div className="px-4 py-3 border-b flex items-start space-x-3 text-[var(--primary)] border-[var(--border)] bg-[var(--muted)]">
           <HelpCircle size={18} className="flex-shrink-0 mt-0.5" />
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-[var(--popover-foreground)]">
+            <h2 id="agent-question-title" className="text-sm font-semibold text-[var(--popover-foreground)]">
               The agent is asking you
             </h2>
             <p className="text-[11px] mt-0.5">The run is paused until you answer</p>
@@ -56,7 +88,10 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
         </div>
 
         <div className="px-4 py-3 space-y-3">
-          <p className="text-xs leading-relaxed text-[var(--popover-foreground)] whitespace-pre-wrap">
+          <p
+            id="agent-question-text"
+            className="text-xs leading-relaxed text-[var(--popover-foreground)] whitespace-pre-wrap"
+          >
             {q.question}
           </p>
 
@@ -73,6 +108,7 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
               onKeyDown={onKeyDown}
               rows={3}
               autoFocus
+              aria-label="Your answer to the agent's question"
               className="w-full resize-none rounded-md border nerve-border bg-[var(--background)] p-2.5 text-xs leading-relaxed text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:border-[var(--primary)]"
               placeholder="Type your answer — the agent will continue from it"
             />
@@ -88,6 +124,7 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
           <button
             onClick={submit}
             disabled={!answer.trim()}
+            aria-label="Send your answer to the agent"
             className="rounded-md px-3 py-1.5 text-xs font-medium servergen-primary transition hover:brightness-105 disabled:opacity-40 disabled:pointer-events-none"
           >
             Send answer

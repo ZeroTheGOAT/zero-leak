@@ -16,9 +16,12 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
-    /* Correctness. Reliability is the first requirement, so these are on:
-       the type contract in src/types is only worth having if null and
-       index access are actually checked. */
+    /* Correctness. `strict` is on. `noUncheckedIndexedAccess` and
+       `exactOptionalPropertyTypes` stay off for now: enabling them touches
+       ~200 index sites across the transcript/diff panels and is a dedicated
+       migration, not a review fix. Direct `!`/casts were removed instead
+       (main.tsx, StatusBar, FilePreview, SettingsView) and JSON.parse inputs
+       are validated. */
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "exactOptionalPropertyTypes": false,

@@ -121,6 +121,29 @@ pub struct ModelEntry {
     /// stable and does not churn between runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_options: Option<std::collections::BTreeMap<String, String>>,
+    /// The server this model is served by, when `location` is
+    /// `PrivateServer`.
+    ///
+    /// An org splits models across servers — OCR on the vision box, chat
+    /// elsewhere — and a catalogue that says `private_server` while the core
+    /// silently sends every request to one global setting is a lie the
+    /// operator cannot see. When set, this URL is what the request goes to,
+    /// through the same §11 classification as anything else. When absent, the
+    /// global private-server setting stands, which is the single-server
+    /// deployment the app has always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    /// The *name of an environment variable* holding the bearer token for
+    /// `server_url` — never the token itself.
+    ///
+    /// A credential in the catalogue is a credential on disk in clear text,
+    /// next to a file whose whole job is to be readable. The env var is the
+    /// operator's own secret store: they set it in the launch environment, it
+    /// never persists here, and an empty or unset variable means the request
+    /// goes out unauthenticated — which the server will refuse, in its own
+    /// words, rather than the workbench guessing at a key it was never given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_api_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +309,18 @@ pub enum ToolName {
     CheckPage,
 }
 
+impl ToolName {
+    /// The snake_case wire name — the spelling the audit table stores and the
+    /// UI displays. Serialising a unit variant cannot fail; the default only
+    /// exists so this can stay infallible rather than returning `Result`.
+    pub fn wire(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRisk {
@@ -299,7 +334,11 @@ pub enum ToolRisk {
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallRecord {
     pub id: String,
-    pub tool: ToolName,
+    /// The tool's wire name, kept as the raw string the row carries. Rows
+    /// written by earlier builds can name a tool this build no longer knows,
+    /// and an audit view must show what happened rather than relabel it as
+    /// something plausible.
+    pub tool: String,
     pub args_summary: String,
     /// 'ok' | 'denied' | 'failed'
     pub status: String,
@@ -798,6 +837,19 @@ pub struct FilePreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_base64: Option<String>,
     pub too_large: bool,
+}
+
+/// One installed application the machine offers for a file, read from its own
+/// file-association registrations — never invented.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenWithEntry {
+    /// Display name from the registration, or the executable's own stem.
+    pub name: String,
+    /// Absolute path of the executable, for `fs_open_with`.
+    pub exe: String,
+    /// True for the extension's registered default handler.
+    pub recommended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

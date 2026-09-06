@@ -8,23 +8,16 @@
  * an image is the one attachment worth fetching eagerly: documents stay a chip
  * with a name, never a raster.
  */
-import React, { useEffect, useState } from 'react';
+import React, { memo, useEffect, useState } from 'react';
 import { ImageOff } from 'lucide-react';
 import * as core from '../../services/core';
+import { basename, base64ToObjectUrl, isImagePath as sharedIsImage } from '../../services/paths';
 
-/** Mirrors `IMAGE_EXTS` in src-tauri/src/attachments.rs — what pastes, what
- *  thumbnails. */
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'gif']);
-
-export const isImagePath = (path: string): boolean => {
-  const name = path.split(/[\\/]/).pop() ?? '';
-  const dot = name.lastIndexOf('.');
-  if (dot === -1) return false;
-  return IMAGE_EXTS.has(name.slice(dot + 1).toLowerCase());
-};
+/** Re-exported for existing callers; canonical impl lives in services/paths. */
+export const isImagePath = sharedIsImage;
 
 /** The image's file name, for `alt` text when the path has no other name. */
-export const imageName = (path: string): string => path.split(/[\\/]/).pop() ?? path;
+export const imageName = (path: string): string => basename(path);
 
 function readAsDataUrlBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -73,15 +66,7 @@ export const stagePastedImages =
 
 /** Decodes one preview payload into an object URL the <img> can show. */
 function toObjectUrl(contentBase64: string, mimeType: string): string {
-  const raw = atob(contentBase64);
-  const bytes = new Uint8Array(raw.length);
-  for (let offset = 0; offset < raw.length; offset += 65_536) {
-    const end = Math.min(raw.length, offset + 65_536);
-    for (let i = offset; i < end; i += 1) bytes[i] = raw.charCodeAt(i);
-  }
-  return URL.createObjectURL(
-    new Blob([bytes.buffer as ArrayBuffer], { type: mimeType || 'image/png' }),
-  );
+  return base64ToObjectUrl(contentBase64, mimeType);
 }
 
 /**
@@ -94,14 +79,20 @@ export const ImageThumb: React.FC<{
   path: string;
   className?: string;
   onClick?: () => void;
-}> = ({ path, className = '', onClick }) => {
+}> = memo(({ path, className = '', onClick }) => {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  // Reset synchronously during render when the path changes (React-recommended
+  // "adjust state during render" pattern) instead of setState inside an effect.
+  const [seenPath, setSeenPath] = useState(path);
+  if (seenPath !== path) {
+    setSeenPath(path);
+    setUrl(null);
+    setFailed(false);
+  }
   useEffect(() => {
     let alive = true;
     let made: string | null = null;
-    setUrl(null);
-    setFailed(false);
     void core.files.preview(path).then(
       (data) => {
         if (!alive) return;
@@ -130,6 +121,7 @@ export const ImageThumb: React.FC<{
         type="button"
         onClick={onClick}
         title={imageName(path)}
+        aria-label={`Open preview of ${imageName(path)}`}
         className={`${base} ${className}`}
       >
         {url && !failed ? (
@@ -141,7 +133,7 @@ export const ImageThumb: React.FC<{
     );
   }
   return (
-    <div className={`${base} ${className}`} title={imageName(path)}>
+    <div className={`${base} ${className}`} title={imageName(path)} role="img" aria-label={imageName(path)}>
       {url && !failed ? (
         <img src={url} alt={imageName(path)} className="h-full w-full object-cover" draggable={false} />
       ) : (
@@ -149,4 +141,4 @@ export const ImageThumb: React.FC<{
       )}
     </div>
   );
-};
+});

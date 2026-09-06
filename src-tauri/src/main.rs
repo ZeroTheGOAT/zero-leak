@@ -65,6 +65,7 @@ mod guards;
 mod harness;
 mod hardware;
 mod knowledge;
+mod log;
 mod mcp;
 mod preview;
 mod registry;
@@ -178,7 +179,7 @@ fn main() {
             // panel is opened. A mirror failure must not invalidate the canonical
             // SQLite store, so it is reported and startup continues.
             if let Err(e) = harness::sync_memory_files(&st) {
-                eprintln!("Could not refresh memory mirrors: {e}");
+                logln!("Could not refresh memory mirrors: {e}");
                 st.emit_failure(&e);
             }
             app.manage(st.clone());
@@ -200,12 +201,12 @@ fn main() {
                         if mode.open_browser {
                             use tauri_plugin_opener::OpenerExt;
                             if let Err(e) = handle.opener().open_url(url, None::<&str>) {
-                                eprintln!("Could not open the browser automatically: {e}");
+                                logln!("Could not open the browser automatically: {e}");
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Browser access unavailable: {}", e.message());
+                        logln!("Browser access unavailable: {}", e.message());
                         st.emit_failure(&e);
                     }
                 }

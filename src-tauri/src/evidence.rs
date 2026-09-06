@@ -1,5 +1,6 @@
 //! Operator-facing execution evidence. No model-authored success flags.
 //! Receipts are scoped by chat, persisted in SQLite, and exported only on request.
+use crate::logln;
 use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -16,7 +17,19 @@ pub fn classify_destination(settings: &crate::types::AppSettings, address: &str)
     let host = url.host_str().unwrap_or("").trim_matches(['[',']']);
     let ip = host.parse::<std::net::IpAddr>().ok();
     if host == "localhost" || ip.is_some_and(|ip| ip.is_loopback()) { return Ok(Destination::Loopback); }
-    let private = ip.is_some_and(|ip| match ip { std::net::IpAddr::V4(v) => v.is_private(), std::net::IpAddr::V6(v) => (v.segments()[0] & 0xfe00) == 0xfc00 });
+    let private = ip.is_some_and(|ip| match ip {
+        std::net::IpAddr::V4(v) => {
+            // Explicitly enumerate what counts as private. Link-local
+            // (169.254/16), CGNAT (100.64/10) and unspecified are NOT private
+            // for egress purposes — they are denied below by falling through.
+            v.is_private()
+        }
+        std::net::IpAddr::V6(v) => {
+            // Unique-local (fc00::/7) only. IPv4-mapped (::ffff:0:0/96) and
+            // link-local (fe80::/10) are denied by falling through.
+            (v.segments()[0] & 0xfe00) == 0xfc00
+        }
+    });
     if settings.allow_private_server && private {
         if let Ok(configured) = reqwest::Url::parse(&settings.private_server_url) {
             let base = configured.path().trim_end_matches('/');
@@ -244,7 +257,7 @@ pub fn record_network(st: &AppState, destination: &str, outcome: &str, detail: &
     if let Err(e) = st.with_db(|conn| {
         conn.execute("INSERT INTO network_events(at,run_id,destination,outcome,detail) VALUES (?1,?2,?3,?4,?5)",params![now_ms(),run,destination,outcome,detail])?;
         Ok(())
-    }) { eprintln!("[network audit] {e}"); }
+    }) { logln!("[network audit] {e}"); }
 }
 
 fn network_rows(conn: &Connection, run: Option<&str>) -> CoreResult<Vec<Value>> {
@@ -263,7 +276,7 @@ pub async fn readiness(st: &Arc<AppState>) -> CoreResult<Value> {
     add("Sandbox network policy", if settings.sandbox_network {"fail"} else {"pass"}, "Sandbox network access must remain disabled for the demonstration.".into());
     add("Local inference executable", if std::path::Path::new(&settings.llama_server_path).is_file() {"pass"} else {"fail"}, settings.llama_server_path.clone());
     {
-        let reg = st.registry.read().expect("registry lock");
+        let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
         for (label, kind, agent) in [("Document reasoning route", registry::TaskKind::Reasoning, true), ("Coding route",registry::TaskKind::Code,true), ("Scanned document route",registry::TaskKind::ScannedDocument,false)] {
             let route = if agent {reg.route_agent(kind,None)} else {reg.route(kind,None)};
             let ready = route.model_id.as_deref().is_some_and(|id| reg.is_present(id));

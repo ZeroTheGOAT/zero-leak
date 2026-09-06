@@ -39,7 +39,10 @@ pub async fn search(st: &Arc<AppState>, query: &str, limit: usize) -> CoreResult
     }
     let limit = limit.clamp(1, 10);
     match settings.web_search_mode {
-        WebSearchMode::Disabled => unreachable!(),
+        // Reachable on a settings race (mode read twice): deny rather than panic.
+        WebSearchMode::Disabled => Err(CoreError::Denied(
+            "Web search is disabled in Settings → Tools.".into(),
+        )),
         WebSearchMode::Direct => search_direct(st, query, limit).await,
         WebSearchMode::Provider => {
             search_provider(st, query, limit, settings.web_search_provider, &settings.web_search_api_key_env).await
@@ -283,7 +286,7 @@ async fn response_with_type(
     // performs no I/O; public hosts are refused before send or DNS resolution.
     let prepared = request.try_clone().ok_or_else(|| CoreError::Denied("Cannot inspect this request safely.".into()))?.build()?;
     st.classify_url(prepared.url().as_str())?;
-    let response = request.header("User-Agent", USER_AGENT).send().await?;
+    let mut response = request.header("User-Agent", USER_AGENT).send().await?;
     let status = response.status();
     let content_type = response
         .headers()
@@ -291,21 +294,30 @@ async fn response_with_type(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let bytes = response.bytes().await?;
+    // Bounded read: the cap is enforced while the bytes arrive, not after the
+    // whole body is already in memory. A server that streams without end
+    // would otherwise spend unbounded RAM before the refusal fires.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(part) = response.chunk().await? {
+        body.extend_from_slice(&part);
+        if body.len() > MAX_RESPONSE {
+            // What already arrived still crossed the workstation boundary, so
+            // it is counted before the refusal.
+            st.count_public_request(body.len() as u64);
+            return Err(CoreError::ExecutionFailed(format!(
+                "{provider} returned more than 2 MiB, so the response was refused."
+            )));
+        }
+    }
     // Count every completed public response, including a provider error that
     // causes a fallback. Those bytes still crossed the workstation boundary.
-    st.count_public_request(bytes.len() as u64);
+    st.count_public_request(body.len() as u64);
     if !status.is_success() {
         return Err(CoreError::ExecutionFailed(format!(
             "{provider} returned HTTP {status}; no search result was used."
         )));
     }
-    if bytes.len() > MAX_RESPONSE {
-        return Err(CoreError::ExecutionFailed(format!(
-            "{provider} returned more than 2 MiB, so the response was refused."
-        )));
-    }
-    Ok((bytes.to_vec(), content_type))
+    Ok((body, content_type))
 }
 
 async fn search_direct(st: &Arc<AppState>, query: &str, limit: usize) -> CoreResult<String> {

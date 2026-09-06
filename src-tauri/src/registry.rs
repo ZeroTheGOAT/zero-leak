@@ -104,9 +104,10 @@ const MODELS_ROOT_TOKEN: &str = "${MODELS_ROOT}";
 /* Automatic context sizing                                            */
 /* ------------------------------------------------------------------ */
 
-/// The largest window auto-sizing will ever ask llama-server for. Qwen3.5-9b
-/// is trained to 262 144 tokens, and a venue GPU with 24+ GiB could in
-/// principle hold that — but the KV cache alone at 262k is ~17 GiB, and
+/// The largest window auto-sizing will ever ask llama-server for. Gemma 4 E4B
+/// is trained to 131 072 tokens, and a venue GPU with 24+ GiB could in
+/// principle hold that — but a full training-length KV cache still consumes
+/// many GiB, and
 /// "a bigger context" does not mean "reserve the whole card". 65 536 is the
 /// practical target; a card that cannot fit it runs the model as big as it
 /// can, and one that could runs no larger than this.
@@ -264,19 +265,19 @@ pub fn routing_rules() -> Vec<RouteRule> {
             "Native text extraction. No model is loaded and no OCR is run."),
         rule(ScannedDocument, "Scanned or photographed page", FileType, Some("paddleocr-vl-1.6"), Some("olmocr-2"),
             "Printed text with no embedded text layer. 0.87 GiB and 280 tok/s. A page it returns too thin to be a transcription is read again by olmOCR."),
-        rule(Handwriting, "Handwritten notes / poor-quality scan", Rule, Some("olmocr-2"), Some("qwen3.5-9b"),
+        rule(Handwriting, "Handwritten notes / poor-quality scan", Rule, Some("olmocr-2"), Some("gemma-4-e4b"),
             "Chosen when the file is marked handwritten, and reached by escalation when the printed-text reader returns a page of fragments."),
-        rule(EngineeringDrawing, "Engineering drawing / P&ID", Rule, Some("qwen3.5-9b"), Some("olmocr-2"),
+        rule(EngineeringDrawing, "Engineering drawing / P&ID", Rule, Some("gemma-4-e4b"), Some("olmocr-2"),
             "Tag extraction plus vision reasoning over topology, in one pass."),
-        rule(Photograph, "Equipment photograph", FileType, Some("qwen3.5-9b"), None,
+        rule(Photograph, "Equipment photograph", FileType, Some("gemma-4-e4b"), None,
             "Uses the model's own f16 projector."),
-        rule(Code, "Source code", FileType, Some("nemotron-cascade-8b"), Some("qwen3.5-9b"),
+        rule(Code, "Source code", FileType, Some("nemotron-cascade-8b"), Some("gemma-4-e4b"),
             "Matched on extension against the known source-file set."),
         rule(LongContext, "Input over 14k tokens", TokenBudget, Some("nemotron-3-nano-4b"), None,
-            "The 9B fits 16k; this fits 65k in the same preset and 195k at f16."),
-        rule(KnowledgeQuery, "Question against indexed knowledge", Rule, Some("qwen3.5-9b"), None,
+            "Gemma E4B fits the 16k local profile; this fits 65k in the same preset and 195k at f16."),
+        rule(KnowledgeQuery, "Question against indexed knowledge", Rule, Some("gemma-4-e4b"), None,
             "Retrieval first, then reasoning over the retrieved passages with citations."),
-        rule(Reasoning, "General reasoning / mixed task", Classifier, Some("qwen3.5-9b"), Some("nemotron-cascade-8b"),
+        rule(Reasoning, "General reasoning / mixed task", Classifier, Some("gemma-4-e4b"), Some("nemotron-cascade-8b"),
             "The only path that may consult a classifier, and only when rules cannot decide."),
         rule(Embedding, "Indexing / embedding", Rule, Some("bge-m3"), None,
             "Served by llama-server in embedding mode, bound to loopback."),
@@ -379,7 +380,9 @@ pub fn config_dir() -> PathBuf {
 pub fn default_sandbox_policy() -> SandboxPolicy {
     SandboxPolicy {
         working_dir: sovereign_root().join("sandbox").to_string_lossy().replace('\\', "/"),
-        network_enabled: false,
+        // Egress follows the operator's Settings choice, and the default is on.
+        // Either way §11 counts and audits every public byte.
+        network_enabled: true,
         // A read or a version check is done in seconds; a real build is not.
         // `cargo build`, an `npm run build` over a cold cache, a test suite —
         // these run minutes, and a timeout that kills them mid-build costs the
@@ -408,16 +411,17 @@ pub fn default_sandbox_policy() -> SandboxPolicy {
         // vite, tsc, eslint — without a global install, which is what makes
         // `build this app` a runnable request rather than a refusal.
         allowed_commands: [
-                "python", "pip", "git", "node", "npm", "npx", "cargo", "findstr", "where", "tree",
+                "python", "pip", "git", "node", "npm", "npx", "cargo", "curl", "wget",
+                "findstr", "where", "tree",
             ]
             .iter().map(|s| s.to_string()).collect(),
-        // Everything here either destroys data, changes machine state, or pulls
-        // bytes off the network. The deny list is checked before the allow list.
+        // Everything here either destroys data or changes machine state. The
+        // deny list is checked before the allow list.
         denied_commands: [
             "del", "rmdir", "rd", "rm", "Remove-Item", "format", "diskpart", "vssadmin",
             "reg", "schtasks", "sc", "net", "netsh", "bcdedit",
             "takeown", "icacls", "cipher", "wmic", "powershell -enc",
-            "Invoke-WebRequest", "Invoke-Expression", "curl", "wget", "certutil",
+            "Invoke-Expression",
         ].iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -451,19 +455,22 @@ fn holds_weights(dir: &Path) -> bool {
 }
 
 /// Where the weights are, if nothing has told us otherwise: a `models` folder
-/// beside the sovereign root, else beside the executable, else the checked-in
-/// development location.
+/// beside the sovereign root, else beside the executable.
 ///
 /// The one that *holds weights* wins, not the first one that exists. Those came
 /// apart on this very machine: `C:/sovereign/models` is part of the installed
 /// layout and was created empty, so the first-existing rule pointed a fresh
-/// database at an empty folder while all seven models — and the three whisper
-/// weights under `stt/` — sat in the third candidate. The catalogue then loaded
-/// with every path missing, which the Models panel can only report as models not
-/// being installed. A directory that exists but holds nothing is still the right
-/// answer when none of the candidates has weights yet, because it is the folder
-/// the operator is meant to fill; it is the wrong answer when a populated one is
-/// sitting behind it in the list.
+/// database at an empty folder while every model sat elsewhere. The catalogue
+/// then loaded with every path missing, which the Models panel can only report
+/// as models not being installed. A directory that exists but holds nothing is
+/// still the right answer when neither candidate has weights yet, because it is
+/// the folder the operator is meant to fill; it is the wrong answer when a
+/// populated one is sitting behind it in the list.
+///
+/// No development-machine path is probed here: a checkout-specific location
+/// hardcoded into the shipped binary is dead weight on every other machine, and
+/// a developer with a fresh database sets the folder once in Settings like
+/// anybody else.
 pub fn detect_models_root() -> String {
     fn normalised(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
@@ -473,7 +480,6 @@ pub fn detect_models_root() -> String {
         std::env::current_exe().ok()
             .and_then(|p| p.parent().map(|d| d.join("models")))
             .unwrap_or_default(),
-        PathBuf::from("C:/Users/harih/OneDrive/Documents/ocr/models"),
     ];
     if let Some(c) = candidates.iter().find(|c| holds_weights(c)) {
         return normalised(c);
@@ -523,12 +529,12 @@ pub fn default_settings() -> AppSettings {
         allow_private_server: false,
         private_server_url: String::new(),
         private_server_name: String::new(),
-        block_public_internet: true,
+        block_public_internet: false,
         // The store starts locked. It only unlocks on an explicit, audited
         // operator choice in Settings > Sovereignty.
         allow_replicated_store: false,
 
-        web_search_mode: WebSearchMode::Disabled,
+        web_search_mode: WebSearchMode::Direct,
         web_search_provider: WebSearchProvider::Brave,
         web_search_api_key_env: "BRAVE_SEARCH_API_KEY".into(),
         mcp_servers: Vec::new(),
@@ -541,7 +547,7 @@ pub fn default_settings() -> AppSettings {
         guard_rules: Vec::new(),
 
         sandbox_root: sovereign_root().join("sandbox").to_string_lossy().replace('\\', "/"),
-        sandbox_network: false,
+        sandbox_network: true,
         // 600 s, not 120: a real build or test suite (cargo test, npm test) runs
         // minutes, and a sandbox that kills it at two produces a partial output
         // the model will misread as a failure. Long enough to complete, still
@@ -622,6 +628,8 @@ fn entry(
         gen_tokens_per_sec: tg,
         note: note.map(str::to_string),
         preset_options: None,
+        server_url: None,
+        server_api_key_env: None,
     }
 }
 
@@ -647,17 +655,13 @@ pub fn seed_catalogue() -> ModelCatalogue {
         version: 1,
         routing: routing_rules(),
         models: vec![
-            with_opts(entry("qwen3.5-9b", "Qwen3.5 9B", LlamaCpp,
-                "qwen3.5-9b/Qwen_Qwen3.5-9B-Q4_K_M.gguf",
-                Some("qwen3.5-9b/mmproj-Qwen_Qwen3.5-9B-f16.gguf"),
-                "qwen35", "Q4_K_M", 16384, 262144, Some("q8_0"),
-                &[General, Reasoning, Coding, Vision, Drawings, Documents, Tools],
-                6883, 6169341984 + 918165952, Primary, Some(2011.0), Some(42.8),
-                Some("Reads engineering drawings and P&IDs more accurately than the dedicated OCR models — it recovered line tag 8\"-P-2103-A2A that both OCR models misread.")),
-                // llama.cpp warns at load that Qwen-VL needs at least 1024
-                // image tokens for grounding tasks. Reading a tag off a P&ID is
-                // a grounding task, so the floor is set rather than defaulted.
-                &[("image-min-tokens", "1024")]),
+            entry("gemma-4-e4b", "Gemma 4 E4B", LlamaCpp,
+                "gemma-4-e4b/gemma-4-E4B_q4_0-it.gguf",
+                Some("gemma-4-e4b/gemma-4-E4B-it-mmproj.gguf"),
+                "gemma4", "Q4_0", 16384, 131072, Some("q8_0"),
+                &[General, Reasoning, Vision, Drawings, Documents, Tools],
+                4373, 5154941280 + 991552256, Primary, Some(3704.5), Some(70.7),
+                Some("Google Gemma 4 E4B instruction-tuned QAT model. The 16K local profile was verified with the matching multimodal projector; Extended Thinking enables its native reasoning mode.")),
 
             entry("nemotron-3-nano-4b", "Nemotron 3 Nano 4B", LlamaCpp,
                 "nemotron-3-nano-4b/NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf", None,
@@ -706,7 +710,7 @@ pub fn seed_catalogue() -> ModelCatalogue {
                 "qwen3", "Q4_K_M", 8192, 40960, Some("f16"),
                 &[Vision, Documents],
                 4945, 5026714304 + 1095113184, Disabled, Some(2390.5), Some(50.4),
-                Some("Not routed to. On the P&ID it produced no answer at all — an unclosed reasoning block consumed the whole budget. Qwen3.5-9B covers the same ground correctly. Kept so the decision stays visible and reversible.")),
+                Some("Not routed to. On the P&ID it produced no answer at all — an unclosed reasoning block consumed the whole budget. Gemma 4 E4B covers the general vision path correctly. Kept so the decision stays visible and reversible.")),
         ],
     }
 }
@@ -908,6 +912,92 @@ impl Registry {
         // The operator has just changed this model's definition. Any launch-time
         // context override is now stale (it was sized for the old numbers), so
         // drop it; the next preset write recomputes from the edited entry.
+        self.ctx_override.remove(&id);
+
+        self.persist(models_root)?;
+        Ok(self.models.clone())
+    }
+
+    /// Adds or replaces one model served by an approved private server, and
+    /// persists the catalogue the UI is editing.
+    ///
+    /// The mirror of `upsert_local_model`, for the other location. What it
+    /// validates is what a server entry can actually get wrong:
+    ///
+    /// * `server_url` is optional at rest — an entry without one uses the
+    ///   global private-server setting, which is the single-server deployment —
+    ///   but when present it must be a URL, and classification will demand a
+    ///   private IP at request time regardless of what was accepted here.
+    ///   `source` is the model *id the server serves*, not a path, so the
+    ///   filesystem-path rules of the local arm do not apply.
+    /// * `server_api_key_env`, when present, must look like an environment
+    ///   variable name. The credential itself is never accepted here: it
+    ///   belongs to the operator's launch environment, not to a catalogue
+    ///   whose job is to be readable.
+    pub fn upsert_server_model(
+        &mut self,
+        model: ModelEntry,
+        models_root: &str,
+    ) -> CoreResult<Vec<ModelEntry>> {
+        let id = model.id.trim().to_string();
+        if id.is_empty() || model.display_name.trim().is_empty() {
+            return Err(CoreError::InvalidDocument(
+                "A model needs both an id and a display name before it can be added.".into(),
+            ));
+        }
+        if model.source.trim().is_empty() {
+            return Err(CoreError::InvalidDocument(
+                "A server model needs the model id the server serves it under.".into(),
+            ));
+        }
+        if model.location != ModelLocation::PrivateServer
+            || model.backend != ModelBackend::PrivateEndpoint
+        {
+            return Err(CoreError::InvalidDocument(
+                "The server model catalogue only accepts private_endpoint models served off this device.".into(),
+            ));
+        }
+        if let Some(url) = model.server_url.as_deref() {
+            let parsed = reqwest::Url::parse(url.trim()).map_err(|_| {
+                CoreError::InvalidDocument(format!(
+                    "'{url}' is not a URL the core can send a request to."
+                ))
+            })?;
+            // The classifier will refuse anything public at request time; a
+            // clearer refusal at entry time is what stops an operator
+            // configuring a model that can only ever fail. Credentials in the
+            // URL are refused outright, matching `classify_destination`.
+            if !["http", "https"].contains(&parsed.scheme())
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+            {
+                return Err(CoreError::InvalidDocument(format!(
+                    "'{url}' must be a plain http(s) URL without embedded credentials."
+                )));
+            }
+        }
+        if let Some(env) = model.server_api_key_env.as_deref() {
+            let name = env.trim();
+            if name.is_empty()
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || name.starts_with(|c: char| c.is_ascii_digit())
+            {
+                return Err(CoreError::InvalidDocument(format!(
+                    "'{env}' does not look like an environment variable name."
+                )));
+            }
+        }
+        if model.context_size == 0 || model.trained_context == 0 {
+            return Err(CoreError::InvalidDocument(
+                "Context sizes must be greater than zero.".into(),
+            ));
+        }
+
+        if let Some(index) = self.models.iter().position(|entry| entry.id == id) {
+            self.models[index] = model;
+        } else {
+            self.models.push(model);
+        }
         self.ctx_override.remove(&id);
 
         self.persist(models_root)?;
@@ -1296,6 +1386,8 @@ mod local_model_catalogue_tests {
             gen_tokens_per_sec: None,
             note: None,
             preset_options: None,
+            server_url: None,
+            server_api_key_env: None,
         }
     }
 
@@ -1339,7 +1431,6 @@ mod local_model_catalogue_tests {
         assert!(error.message().contains("filesystem path"));
         assert!(registry.models.is_empty());
     }
-
     fn present_model(
         dir: &Path,
         id: &str,
@@ -1371,7 +1462,7 @@ mod local_model_catalogue_tests {
         );
         let coordinator = present_model(
             &dir,
-            "qwen3.5-9b",
+            "gemma-4-e4b",
             vec![
                 ModelCapability::General,
                 ModelCapability::Reasoning,
@@ -1392,7 +1483,7 @@ mod local_model_catalogue_tests {
             Some("paddleocr-vl-1.6")
         );
         let agent = registry.route_agent(TaskKind::ScannedDocument, None);
-        assert_eq!(agent.model_id.as_deref(), Some("qwen3.5-9b"));
+        assert_eq!(agent.model_id.as_deref(), Some("gemma-4-e4b"));
         assert!(agent.reason.contains("cannot coordinate tool calls"));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1465,7 +1556,7 @@ mod local_model_catalogue_tests {
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
         let coordinator = present_model(
             &dir,
-            "qwen3.5-9b",
+            "gemma-4-e4b",
             vec![
                 ModelCapability::Reasoning,
                 ModelCapability::Documents,
@@ -1482,7 +1573,7 @@ mod local_model_catalogue_tests {
 
         assert!(registry.route(TaskKind::DigitalDocument, None).model_id.is_none());
         let agent = registry.route_agent(TaskKind::DigitalDocument, None);
-        assert_eq!(agent.model_id.as_deref(), Some("qwen3.5-9b"));
+        assert_eq!(agent.model_id.as_deref(), Some("gemma-4-e4b"));
         assert!(agent.reason.contains("extracted natively"));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1573,7 +1664,7 @@ mod local_model_catalogue_tests {
         std::fs::create_dir_all(&dir).expect("temporary routing directory");
         let mut primary = present_model(
             &dir,
-            "qwen3.5-9b",
+            "gemma-4-e4b",
             vec![
                 ModelCapability::General,
                 ModelCapability::Reasoning,
@@ -1604,7 +1695,7 @@ mod local_model_catalogue_tests {
         // Message text alone (~10k) with its routing slack still fits the 16k
         // primary…
         let fits = registry.route_agent(TaskKind::Reasoning, Some(10_000));
-        assert_eq!(fits.model_id.as_deref(), Some("qwen3.5-9b"));
+        assert_eq!(fits.model_id.as_deref(), Some("gemma-4-e4b"));
         // …but once the tool schemas the request carries are counted the same
         // turn needs more than the primary's window holds, and must not be sent
         // there to be rejected by the server.
@@ -1732,6 +1823,140 @@ mod local_model_catalogue_tests {
 }
 
 #[cfg(test)]
+mod server_model_catalogue_tests {
+    use super::*;
+
+    fn server_model(url: Option<&str>, env: Option<&str>) -> ModelEntry {
+        ModelEntry {
+            id: "org-chat".into(),
+            display_name: "Org Chat".into(),
+            backend: ModelBackend::PrivateEndpoint,
+            location: ModelLocation::PrivateServer,
+            source: "org-chat-70b".into(),
+            projector: None,
+            architecture: "remote".into(),
+            quantization: "server-side".into(),
+            context_size: 32_768,
+            trained_context: 32_768,
+            kv_cache_type: None,
+            capabilities: vec![ModelCapability::General, ModelCapability::Tools],
+            estimated_vram_mb: 0,
+            file_size_bytes: 0,
+            priority: ModelPriority::Primary,
+            prompt_tokens_per_sec: None,
+            gen_tokens_per_sec: None,
+            note: None,
+            preset_options: None,
+            server_url: url.map(str::to_string),
+            server_api_key_env: env.map(str::to_string),
+        }
+    }
+
+    fn registry() -> Registry {
+        Registry {
+            models: Vec::new(),
+            rules: routing_rules(),
+            path: std::env::temp_dir().join(format!(
+                "servergen-server-catalogue-{}",
+                uuid::Uuid::new_v4()
+            )),
+            ctx_override: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_server_model_without_a_url_uses_the_global_setting() {
+        // The single-server deployment: no per-model URL, so the entry must
+        // persist without one and the request path falls back to Settings.
+        let mut reg = registry();
+        let saved = reg
+            .upsert_server_model(server_model(None, None), "C:/models")
+            .expect("a server model with no URL is the global-server case");
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].server_url.is_none());
+        assert!(saved[0].server_api_key_env.is_none());
+        let _ = std::fs::remove_dir_all(&reg.path.parent().unwrap().join(
+            reg.path.file_name().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_private_server_url_is_persisted_on_the_entry() {
+        // The per-model URL is what lets an org split models across servers;
+        // it is accepted at entry time when it is well-shaped and refused at
+        // request time by `classify_destination` if it is not private. Entry
+        // time checks shape, request time checks the network — that split is
+        // the design, not an oversight.
+        let mut reg = registry();
+        let saved = reg
+            .upsert_server_model(server_model(Some("http://10.0.0.10:8080"), Some("SOVEREIGN_MODEL_TOKEN")), "C:/models")
+            .expect("a plain private http URL is accepted");
+        assert_eq!(saved[0].server_url.as_deref(), Some("http://10.0.0.10:8080"));
+        let raw = std::fs::read_to_string(&reg.path).expect("catalogue written");
+        assert!(raw.contains("10.0.0.10:8080"));
+        let _ = std::fs::remove_file(&reg.path);
+    }
+
+    #[test]
+    fn credentials_embedded_in_the_url_are_refused() {
+        let mut reg = registry();
+        let error = reg
+            .upsert_server_model(
+                server_model(Some("http://user:pass@10.0.0.10:8080"), None),
+                "C:/models",
+            )
+            .expect_err("userinfo in the URL is a credential in the catalogue");
+        assert!(error.message().contains("credentials"), "{}", error.message());
+        assert!(reg.models.is_empty());
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_refused() {
+        let mut reg = registry();
+        let error = reg
+            .upsert_server_model(server_model(Some("ftp://10.0.0.10:8080"), None), "C:/models")
+            .expect_err("only http(s) is a server URL");
+        assert!(error.message().contains("http"), "{}", error.message());
+        assert!(reg.models.is_empty());
+    }
+
+    #[test]
+    fn the_credential_field_must_be_an_env_var_name() {
+        let mut reg = registry();
+        // Something that cannot be set in a shell.
+        let error = reg
+            .upsert_server_model(server_model(None, Some("9BAD-NAME")), "C:/models")
+            .expect_err("a name a shell cannot set is refused");
+        assert!(error.message().contains("environment variable"), "{}", error.message());
+        assert!(reg.models.is_empty());
+
+        // A real name is accepted — and the token itself is nowhere in the file.
+        let mut reg = registry();
+        let saved = reg
+            .upsert_server_model(server_model(None, Some("SOVEREIGN_MODEL_TOKEN")), "C:/models")
+            .expect("a plausible env var name is accepted");
+        assert_eq!(saved[0].server_api_key_env.as_deref(), Some("SOVEREIGN_MODEL_TOKEN"));
+        let raw = std::fs::read_to_string(&reg.path).expect("catalogue written");
+        assert!(raw.contains("SOVEREIGN_MODEL_TOKEN"));
+        assert!(!raw.contains("Bearer"), "the token itself never enters the file");
+        let _ = std::fs::remove_file(&reg.path);
+    }
+
+    #[test]
+    fn a_local_entry_cannot_sneak_through_the_server_arm() {
+        let mut reg = registry();
+        let mut m = server_model(None, None);
+        m.location = ModelLocation::ThisDevice;
+        let error = reg
+            .upsert_server_model(m, "C:/models")
+            .expect_err("the arm refuses an entry that is not a private server model");
+        assert!(error.message().contains("private_endpoint"), "{}", error.message());
+        assert!(reg.models.is_empty());
+    }
+
+}
+
+#[cfg(test)]
 mod vram_budgets {
     use super::*;
 
@@ -1814,8 +2039,8 @@ mod models_root_detection {
     #[test]
     fn a_gguf_one_level_down_is_a_models_root() {
         let dir = scratch("gguf");
-        std::fs::create_dir_all(dir.join("qwen3.5-9b")).expect("model directory");
-        std::fs::write(dir.join("qwen3.5-9b/Q4_K_M.gguf"), b"x").expect("weight file");
+        std::fs::create_dir_all(dir.join("gemma-4-e4b")).expect("model directory");
+        std::fs::write(dir.join("gemma-4-e4b/Q4_0.gguf"), b"x").expect("weight file");
         assert!(holds_weights(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1856,93 +2081,93 @@ mod auto_ctx_tests {
     use crate::gguf::KvGeometry;
     use std::collections::HashMap;
 
-    /// The seed's qwen3.5-9b, exactly as shipped: 16k window, 262 144 trained,
-    /// 6883 MiB measured at 16k, q8_0 KV, tool-capable — the profile that is
+    /// The seed's Gemma 4 E4B, exactly as shipped: 16k window, 131 072 trained,
+    /// 4373 MiB measured at 16k, q8_0 KV, tool-capable — the profile that is
     /// VRAM-pinned and therefore the case auto-sizing exists for.
-    fn qwen() -> ModelEntry {
+    fn gemma() -> ModelEntry {
         seed_catalogue()
             .models
             .into_iter()
-            .find(|m| m.id == "qwen3.5-9b")
-            .expect("seed qwen3.5-9b")
+            .find(|m| m.id == "gemma-4-e4b")
+            .expect("seed gemma-4-e4b")
     }
 
-    const QWEN_GEO: KvGeometry = KvGeometry {
-        layers: 33,
-        heads: 4,
-        key_len: 256,
-        value_len: 256,
+    const GEMMA_GEO: KvGeometry = KvGeometry {
+        layers: 42,
+        heads: 2,
+        key_len: 512,
+        value_len: 512,
     };
 
     #[test]
-    fn eight_gig_card_raises_qwen_by_the_free_vram_delta() {
-        let e = qwen();
+    fn eight_gig_card_raises_gemma_by_the_free_vram_delta() {
+        let e = gemma();
         assert!(context_auto_eligible(&e));
         // The fallback card this catalogue was tuned on: 8187 MiB total, of
-        // which the display keeps ~512, leaving solo ≈ 7675. Qwen is measured
-        // at 6883 MiB there, so with a 512 MiB reserve the raise is ~4k extra
-        // tokens — 16k → ~20k, not 56k, and never under the configured window.
-        let eff = autosized_context(&e, Some(QWEN_GEO), vram_solo_mb());
+        // which the display keeps ~512, leaving solo ≈ 7675. Gemma is measured
+        // at 4373 MiB there, so with a 512 MiB reserve the raise is substantial
+        // but still bounded, never below the configured window.
+        let eff = autosized_context(&e, Some(GEMMA_GEO), vram_solo_mb());
         assert!(
-            (18_000..=24_576).contains(&eff),
-            "8 GB card should raise qwen to ~20-24k; got {eff}"
+            (24_000..=65_536).contains(&eff),
+            "8 GB card should raise Gemma above 16k without exceeding the cap; got {eff}"
         );
         assert!(eff <= e.trained_context.min(AUTO_CTX_CAP));
     }
 
     #[test]
     fn huge_card_hits_the_auto_cap_not_the_trained_ceiling() {
-        let e = qwen();
-        // A 24 GiB venue card. Room dwarfs qwen's trained 262 144, but
+        let e = gemma();
+        // A 24 GiB venue card. Room dwarfs Gemma's trained 131 072, but
         // AUTO_CTX_CAP (65 536) is the intended practical target: a bigger GPU
         // runs the same build at 64k without a catalogue edit, not by reserving
         // 17 GiB of KV at the training ceiling.
         let solo_24gb = 24_576 - 512;
-        assert_eq!(autosized_context(&e, Some(QWEN_GEO), solo_24gb), 65_536);
+        assert_eq!(autosized_context(&e, Some(GEMMA_GEO), solo_24gb), 65_536);
     }
 
     #[test]
     fn no_room_specialists_and_unknown_geometry_stay_at_the_catalogue_window() {
         // A specialist (no Tools) is not sized up even when the geometry reads.
-        let mut ocr = qwen();
+        let mut ocr = gemma();
         ocr.id = "olmocr-2".into();
         ocr.capabilities = vec![ModelCapability::Ocr, ModelCapability::Documents];
         assert!(!context_auto_eligible(&ocr));
         assert_eq!(
-            autosized_context(&ocr, Some(QWEN_GEO), vram_solo_mb()),
+            autosized_context(&ocr, Some(GEMMA_GEO), vram_solo_mb()),
             16_384
         );
 
-        let e = qwen();
-        // No room above the anchor → baseline. (Solo below the measured 6883.)
-        assert_eq!(autosized_context(&e, Some(QWEN_GEO), 6_800), 16_384);
+        let e = gemma();
+        // No room above the anchor → baseline. (Solo below the measured 4373.)
+        assert_eq!(autosized_context(&e, Some(GEMMA_GEO), 4_200), 16_384);
         // Unreadable header or unmapped cache type → baseline.
         assert_eq!(autosized_context(&e, None, vram_solo_mb()), 16_384);
     }
 
     #[test]
     fn effective_context_tracks_the_launched_override_not_the_catalogue_line() {
-        let e = qwen();
+        let e = gemma();
         let mut reg = Registry {
             models: vec![e.clone()],
             rules: Vec::new(),
             path: std::path::PathBuf::from("models.json"),
             ctx_override: HashMap::new(),
         };
-        assert_eq!(reg.effective_context("qwen3.5-9b"), 16_384);
+        assert_eq!(reg.effective_context("gemma-4-e4b"), 16_384);
 
         // After the router raises the window at preset-write time, routing and
         // the agent see the launched number...
-        reg.set_ctx_overrides(&[("qwen3.5-9b".to_string(), 20_480)]);
-        assert_eq!(reg.effective_context("qwen3.5-9b"), 20_480);
+        reg.set_ctx_overrides(&[("gemma-4-e4b".to_string(), 20_480)]);
+        assert_eq!(reg.effective_context("gemma-4-e4b"), 20_480);
         // ...while the catalogue line stays the operator's number (persist()
         // writes it, never the machine-derived override).
-        assert_eq!(reg.get("qwen3.5-9b").unwrap().context_size, 16_384);
+        assert_eq!(reg.get("gemma-4-e4b").unwrap().context_size, 16_384);
         assert_eq!(reg.effective_context("unknown-model"), 0);
 
         // A later preset write replaces the set; a model no longer raised (its
         // weights moved away, say) falls back to its catalogue window.
         reg.set_ctx_overrides(&[("nemotron-cascade-8b".to_string(), 24_576)]);
-        assert_eq!(reg.effective_context("qwen3.5-9b"), 16_384);
+        assert_eq!(reg.effective_context("gemma-4-e4b"), 16_384);
     }
 }

@@ -20,8 +20,10 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ApprovalPopover } from './ApprovalPopover';
-import { formatBytes } from '../../services/registry';
+import { ProjectPicker } from './ProjectPicker';
+import { formatBytes, modelById } from '../../services/registry';
 import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
+import { basename } from '../../services/paths';
 import {
   blobToBase64,
   recordingToWav,
@@ -60,7 +62,14 @@ type VoiceState = 'idle' | 'checking' | 'recording' | 'transcribing';
 export const FloatingInput: React.FC<{
   drafts: Record<string, ComposerDraft>;
   setDrafts: React.Dispatch<React.SetStateAction<Record<string, ComposerDraft>>>;
-}> = ({ drafts, setDrafts }) => {
+  /**
+   * `centered` is the fresh-chat screen: the card sits in the middle of the
+   * canvas with the project row attached beneath it. `docked` is the running
+   * conversation: the same card pinned to the bottom, with no project row —
+   * the chat already has its home by then.
+   */
+  layout?: 'docked' | 'centered';
+}> = ({ drafts, setDrafts, layout = 'docked' }) => {
   const {
     send,
     isRunning,
@@ -80,18 +89,31 @@ export const FloatingInput: React.FC<{
     knowledgeStats,
     catalogueModels,
     loadedModelIds,
+    routeRules,
   } = useApp();
   const [submitting, setSubmitting] = useState(false);
   const [showPlus, setShowPlus] = useState(false);
   const [showApproval, setShowApproval] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [voiceError, setVoiceError] = useState('');
+  // Pressed Stop but `agent://done` has not arrived yet. The backend now
+  // aborts within ~100 ms, and this keeps the button from looking dead in
+  // the gap — no second cancel is sent while it is set.
+  const [stopping, setStopping] = useState(false);
+  // Send was pressed while the mic was still capturing: transcribe first,
+  // then send the combined text automatically.
+  const [sendAfterVoice, setSendAfterVoice] = useState(false);
+  const sendAfterVoiceRef = useRef(false);
   const submittingRef = useRef(false);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingTimerRef = useRef<number | null>(null);
+  // Latest draft, readable from the transcription callback that outlives its
+  // render. The user can keep typing while the mic captures.
+  const textRef = useRef('');
+  const attachedRef = useRef<string[]>([]);
   const draftKey = activeSessionId ?? `__new_chat__:${activeWorkspace?.id ?? 'none'}`;
   const draft = drafts[draftKey] ?? EMPTY_DRAFT;
   const { text, attached } = draft;
@@ -117,7 +139,7 @@ export const FloatingInput: React.FC<{
     const element = areaRef.current;
     if (!element) return;
     element.style.height = 'auto';
-    element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
+    element.style.height = `${Math.min(element.scrollHeight, 176)}px`;
   }, [text]);
 
   useEffect(() => {
@@ -142,6 +164,20 @@ export const FloatingInput: React.FC<{
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
+  useEffect(() => {
+    textRef.current = text;
+    attachedRef.current = attached;
+  }, [text, attached]);
+
+  useEffect(() => {
+    if (!isRunning) setStopping(false);
+  }, [isRunning]);
+
+  // Whether this chat has a project attached. Null means a personal chat —
+  // every send goes out as-is, exactly like a regular personal chat, with no
+  // project prompt in the way.
+  const hasProject = activeWorkspace !== null;
+
   const clearDraft = () => {
     setDrafts((current) => {
       const next = { ...current };
@@ -152,7 +188,36 @@ export const FloatingInput: React.FC<{
     });
   };
 
+  const submitValue = async (value: string, files: string[]) => {
+    const trimmed = value.trim();
+    if (!trimmed || submittingRef.current) return;
+    // The turn is busy: park the instruction behind it instead of dropping
+    // it. It is sent on its own when the running turn completes.
+    if (isRunning) {
+      queueMessage(trimmed, files, mode);
+      clearDraft();
+      return;
+    }
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      const accepted = await send(trimmed, files);
+      if (accepted) clearDraft();
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
+
   const submit = async () => {
+    // Send pressed while the mic is still capturing: finish capturing first
+    // and send automatically once transcription lands.
+    if (voiceState === 'recording' || voiceState === 'transcribing') {
+      sendAfterVoiceRef.current = true;
+      setSendAfterVoice(true);
+      if (voiceState === 'recording') stopRecording();
+      return;
+    }
     if (!text.trim() || submittingRef.current) return;
 
     // Whole-line commands are handled here, not sent: they act on the app.
@@ -194,22 +259,7 @@ export const FloatingInput: React.FC<{
       return;
     }
 
-    // The turn is busy: park the instruction behind it instead of dropping
-    // it. It is sent on its own when the running turn completes.
-    if (isRunning) {
-      queueMessage(text, attached, mode);
-      clearDraft();
-      return;
-    }
-    submittingRef.current = true;
-    setSubmitting(true);
-    try {
-      const accepted = await send(text, attached);
-      if (accepted) clearDraft();
-    } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
-    }
+    await submitValue(text, attached);
   };
 
   const attach = async () => {
@@ -281,6 +331,8 @@ export const FloatingInput: React.FC<{
       };
       recorder.onerror = () => {
         stream.getTracks().forEach((track) => track.stop());
+        sendAfterVoiceRef.current = false;
+        setSendAfterVoice(false);
         setVoiceState('idle');
         setVoiceError('The microphone recording stopped unexpectedly. Please try again.');
       };
@@ -294,8 +346,35 @@ export const FloatingInput: React.FC<{
             const captured = new Blob(chunks, { type: recorder.mimeType });
             const wav = await recordingToWav(captured);
             const transcript = await transcription.run(await blobToBase64(wav), preferences);
-            insertTranscription(transcript);
+            const clean = transcript.trim();
+            if (!clean) {
+              if (sendAfterVoiceRef.current) {
+                sendAfterVoiceRef.current = false;
+                setSendAfterVoice(false);
+                setVoiceError('The microphone did not capture any words, so nothing was sent.');
+              }
+              return;
+            }
+            if (sendAfterVoiceRef.current) {
+              // Send pressed mid-dictation: the combined text goes out as one
+              // turn instead of sitting in the composer.
+              sendAfterVoiceRef.current = false;
+              setSendAfterVoice(false);
+              const existing = textRef.current;
+              const separator = existing.length > 0 && !/\s$/.test(existing) ? ' ' : '';
+              const combined = `${existing}${separator}${clean}`;
+              setDrafts((current) => ({
+                ...current,
+                [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), text: combined },
+              }));
+              await submitValue(combined, attachedRef.current);
+              window.requestAnimationFrame(() => areaRef.current?.focus());
+            } else {
+              insertTranscription(transcript);
+            }
           } catch (error) {
+            sendAfterVoiceRef.current = false;
+            setSendAfterVoice(false);
             setVoiceError(error instanceof Error ? error.message : String(error));
           } finally {
             setVoiceState('idle');
@@ -324,6 +403,17 @@ export const FloatingInput: React.FC<{
   const loaded = loadedModelIds
     .map((id) => catalogueModels.find((model) => model.id === id)?.displayName)
     .filter(Boolean);
+  // The model actually in play: a resident one when something is loaded,
+  // else the route the next turn would take — vision when an image is
+  // attached, the plain reasoning route for a normal chat. Every step falls
+  // back to something name-like (even the raw route id), so the button only
+  // reads "No model" when there genuinely is none.
+  const routedModelId = routeRules.find((rule) => rule.kind === (attached.some(isImagePath) ? 'photograph' : 'reasoning'))?.modelId;
+  const activeModelName =
+    loaded[0] ??
+    (routedModelId ? modelById(routedModelId)?.displayName ?? routedModelId : undefined) ??
+    catalogueModels[0]?.displayName ??
+    'No model';
   // Command hints appear while the first word is being typed — after the
   // first space the message is clearly prose that happens to start with '/'.
   const slashHint =
@@ -331,9 +421,11 @@ export const FloatingInput: React.FC<{
       ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith(text.trim()))
       : [];
 
+  const centered = layout === 'centered';
+
   return (
-    <div className="bg-transparent px-2 pb-2 pt-1">
-      <div ref={wrapRef} className="relative mx-auto max-w-4xl">
+    <div className={centered ? 'w-full' : 'bg-transparent px-2 pb-2 pt-1'}>
+      <div ref={wrapRef} className={centered ? 'relative w-full' : 'relative mx-auto max-w-4xl'}>
         {attached.length > 0 && (
           <div className="mb-2">
             <div className="flex flex-wrap gap-1.5">
@@ -359,9 +451,9 @@ export const FloatingInput: React.FC<{
                 return (
                   <span key={path} className="flex items-center gap-1.5 rounded-md border nerve-border bg-[var(--card)] py-1 pl-2 pr-1 text-xs text-[var(--card-foreground)]" title={path}>
                     <Paperclip size={10} className="text-[var(--muted-foreground)]" />
-                    <span className="max-w-[220px] truncate">{document?.fileName ?? path.split(/[\\/]/).pop()}</span>
+                    <span className="max-w-[220px] truncate">{document?.fileName ?? basename(path)}</span>
                     {document && <span className="text-[10px] text-[var(--muted-foreground)]">{formatBytes(document.sizeBytes)}</span>}
-                    <button onClick={() => setAttached((current) => current.filter((item) => item !== path))} className="grid size-5 place-items-center rounded hover:bg-[var(--accent)]"><X size={10} /></button>
+                    <button onClick={() => setAttached((current) => current.filter((item) => item !== path))} aria-label={`Remove ${basename(path)} from draft`} className="grid size-5 place-items-center rounded hover:bg-[var(--accent)]"><X size={10} /></button>
                   </span>
                 );
               })}
@@ -392,9 +484,15 @@ export const FloatingInput: React.FC<{
           </div>
         )}
 
-        <div className={`relative mt-2 overflow-visible rounded-[calc(var(--radius)*0.8)] border bg-[var(--background)] shadow-sm transition ${
+        <div className={`composer-shell relative mt-2 overflow-visible border bg-[var(--background)] shadow-sm transition ${
+          centered ? 'rounded-xl rounded-b-none' : 'rounded-[calc(var(--radius)*0.8)]'
+        } ${
           mode === 'plan' ? 'border-[var(--success)]' : 'border-[var(--input)] focus-within:border-[var(--primary)]'
         }`}>
+          {/* Mode, permission and model controls ride the card's top edge —
+              each solid pill covers the edge behind itself, so the pills read
+              as separate buttons attached to the bar with plain canvas
+              everywhere around them. */}
           <div
             className={`pointer-events-none absolute inset-x-2.5 top-0 flex -translate-y-1/2 items-center gap-1 [&>*]:pointer-events-auto ${
               showApproval ? 'z-50' : 'z-20'
@@ -421,11 +519,20 @@ export const FloatingInput: React.FC<{
               </button>
               {showApproval && <ApprovalPopover onClose={() => setShowApproval(false)} />}
             </div>
-            <div className="ml-auto flex items-center gap-1">
-              <span className="composer-tab" title="Local context sources">{knowledgeStats.documents} docs</span>
-              <span className="composer-tab max-w-56 truncate" title={loaded.join(', ') || 'Loads the routed local model on demand'}>
-                {loaded.length ? loaded.join(', ') : `${catalogueModels.length} local models`}
-              </span>
+            {/* The model in play, back on the right where it was — a solid
+                pill like the rest, so it covers the edge behind itself.
+                Sizes itself to short names, truncates long ones, full name
+                on hover. Opens Models. */}
+            <div className="ml-auto flex items-center">
+              <button
+                type="button"
+                onClick={() => openSettings('models')}
+                className="composer-tab min-w-0 max-w-44 truncate"
+                title={`${activeModelName} — open model settings`}
+              >
+                <Bot size={13} strokeWidth={2.2} />
+                <span className="truncate">{activeModelName}</span>
+              </button>
             </div>
           </div>
 
@@ -433,6 +540,7 @@ export const FloatingInput: React.FC<{
             ref={areaRef}
             data-inset-field
             value={text}
+            aria-label="Message the local agent"
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -452,7 +560,7 @@ export const FloatingInput: React.FC<{
             rows={2}
             disabled={disabled}
             placeholder={disabled ? 'The local core is not attached' : attached.length > 0 ? 'Tell the agent what to do with the attached files' : 'Ask the local Servergen agent'}
-            className="min-h-[7.25rem] w-full resize-none bg-transparent px-4 pb-12 pt-7 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none disabled:cursor-not-allowed disabled:opacity-60"
+            className="min-h-[5.8rem] w-full resize-none bg-transparent px-4 pb-[2.4rem] pt-[1.4rem] text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none disabled:cursor-not-allowed disabled:opacity-60"
           />
 
           {slashHint.length > 0 && (
@@ -506,7 +614,11 @@ export const FloatingInput: React.FC<{
                 </div>
               )}
             </div>
-            {!activeWorkspace && <span className="hidden text-[10px] text-[var(--muted-foreground)] sm:inline">Open a project to enable file tools</span>}
+            {!hasProject && (
+              <span className="hidden text-[10px] text-[var(--muted-foreground)] sm:inline">
+                Personal chat
+              </span>
+            )}
           </div>
 
           <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1.5">
@@ -529,19 +641,60 @@ export const FloatingInput: React.FC<{
             </button>
             {isRunning ? (
               <>
-                <button type="button" onClick={() => void submit()} disabled={!text.trim() || disabled || submitting} className="nerve-border grid size-8 place-items-center rounded-full bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-30" title="Queue — sent when this run finishes (Enter)"><Clock size={14} /></button>
-                <button type="button" onClick={() => void cancelRun()} className="grid size-8 place-items-center rounded-full bg-[var(--destructive-solid)] text-[var(--destructive-solid-foreground)]" title="Stop generation"><Square size={12} fill="currentColor" /></button>
+                <button
+                  type="button"
+                  onClick={() => void submit()}
+                  disabled={(!text.trim() && voiceState === 'idle') || disabled || submitting}
+                  className="nerve-border grid size-8 place-items-center rounded-full bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-30"
+                  title={voiceState === 'idle' ? 'Queue — sent when this run finishes (Enter)' : 'Finish dictation and queue it when this run finishes'}
+                >
+                  <Clock size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (stopping) return;
+                    setStopping(true);
+                    void cancelRun();
+                  }}
+                  disabled={stopping}
+                  className="grid size-8 place-items-center rounded-full bg-[var(--destructive-solid)] text-[var(--destructive-solid-foreground)] disabled:opacity-60"
+                  title={stopping ? 'Stopping…' : 'Stop generation'}
+                >
+                  {stopping ? <Loader2 size={12} className="animate-spin" /> : <Square size={12} fill="currentColor" />}
+                </button>
               </>
             ) : (
-              <button type="button" onClick={() => void submit()} disabled={!text.trim() || disabled || submitting} className="servergen-primary grid size-8 place-items-center rounded-full shadow-sm disabled:cursor-not-allowed disabled:opacity-30" title="Send (Enter)">{submitting ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} strokeWidth={2.4} />}</button>
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={(!text.trim() && voiceState === 'idle') || disabled || submitting}
+                className="servergen-primary grid size-8 place-items-center rounded-full shadow-sm disabled:cursor-not-allowed disabled:opacity-30"
+                title={voiceState === 'idle' ? 'Send (Enter)' : 'Finish dictation and send automatically'}
+              >
+                {submitting || sendAfterVoice ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} strokeWidth={2.4} />}
+              </button>
             )}
           </div>
         </div>
 
-        {voiceState === 'recording' && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--destructive)]"><span className="size-1.5 rounded-full bg-current animate-pulse" />Listening locally · click stop when finished</p>}
-        {voiceState === 'transcribing' && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Transcribing locally · audio stays on this device</p>}
+        {/* Fresh-chat project row — the attached bar beneath the card. Name
+            only, never a folder path. Running conversations dock without it:
+            the chat already has its home by then. */}
+        {centered && (
+          <div className="composer-attached flex items-center gap-1.5 rounded-xl rounded-t-none border border-t-0 border-[var(--border)] bg-[var(--card)] px-2.5 py-1.5">
+            <ProjectPicker />
+          </div>
+        )}
+
+        {sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Will send automatically after transcription</p>}
+        {voiceState === 'recording' && !sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--destructive)]"><span className="size-1.5 rounded-full bg-current animate-pulse" />Listening locally · click stop when finished · or press Send to finish and send</p>}
+        {voiceState === 'recording' && sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--destructive)]"><span className="size-1.5 rounded-full bg-current animate-pulse" />Finishing dictation · will send automatically</p>}
+        {voiceState === 'transcribing' && !sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Transcribing locally · audio stays on this device</p>}
+        {voiceState === 'transcribing' && sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Transcribing locally · will send automatically</p>}
         {voiceError && <p role="alert" className="mt-1.5 flex items-center justify-center gap-2 text-[10px] text-[var(--destructive)]"><span className="max-w-[42rem] truncate" title={voiceError}>{voiceError}</span><button type="button" onClick={() => openSettings('transcription')} className="underline underline-offset-2">Transcription settings</button><button type="button" onClick={() => setVoiceError('')} aria-label="Dismiss transcription error"><X size={10} /></button></p>}
-        {isRunning && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Running locally · nothing leaves this device · type to queue a follow-up</p>}
+        {isRunning && stopping && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Stopping…</p>}
+        {isRunning && !stopping && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Running locally · nothing leaves this device · type to queue a follow-up</p>}
       </div>
     </div>
   );

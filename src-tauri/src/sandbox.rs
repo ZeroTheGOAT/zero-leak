@@ -18,12 +18,19 @@
 //! boundary plus an audited allow list, and the honest name for that is
 //! containment, not isolation — which is what `winproc`'s header says too.
 //!
+//! Known limit, stated plainly: `sandbox_network=false` is a policy flag, not
+//! a packet filter. A contained child keeps the host network stack, so
+//! `python -c "import socket"` bypasses the URL allow-list that guards model
+//! HTTP. Treat sandbox code as host-networked; the egress gate (`evidence` +
+//! `state::classify_url`) covers model HTTP, not arbitrary child sockets.
+//!
 //! Output streams as it arrives. A five-minute `pip install` that only reports
 //! at the end is indistinguishable from a hang, and an operator watching a hang
 //! kills it. Both pipes are read on their own threads and every line is emitted
 //! as `sandbox://line` and appended to the stored run, so the console and the
 //! audit trail see the same bytes.
 
+use crate::logln;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -189,7 +196,7 @@ fn path_extensions() -> Vec<String> {
 /// `powershell -enc`, a `curl` buried in a `&&` chain. Substring matching costs
 /// some false positives — a file literally named `format` — and that is the
 /// right trade for something that refuses rather than deletes.
-fn refuse_reason(command: &str, p: &SandboxPolicy) -> Option<String> {
+pub(crate) fn refuse_reason(command: &str, p: &SandboxPolicy) -> Option<String> {
     let cmd = command.trim();
     if cmd.is_empty() {
         return Some("An empty command was not run.".into());
@@ -386,18 +393,27 @@ pub async fn run_python(
     // The script's own home, which is the sandbox root whatever working
     // directory the child is given: a generated file has no business appearing
     // inside the operator's project folder.
-    let sandbox_dir = std::path::PathBuf::from(&p.working_dir);
-    std::fs::create_dir_all(&sandbox_dir).map_err(|e| {
-        CoreError::ExecutionFailed(format!(
-            "The sandbox folder {} could not be created ({e}), so nothing was executed.",
-            p.working_dir
-        ))
-    })?;
-
-    let script = sandbox_dir.join(format!("{}.py", new_id("script")));
-    std::fs::write(&script, code.as_bytes()).map_err(|e| {
-        CoreError::ExecutionFailed(format!("The script could not be written to {}: {e}", script.display()))
-    })?;
+    // Blocking FS is moved off the async runtime via spawn_blocking.
+    let working_dir = p.working_dir.clone();
+    let script = tokio::task::spawn_blocking(move || -> CoreResult<std::path::PathBuf> {
+        let sandbox_dir = std::path::PathBuf::from(&working_dir);
+        std::fs::create_dir_all(&sandbox_dir).map_err(|e| {
+            CoreError::ExecutionFailed(format!(
+                "The sandbox folder {} could not be created ({e}), so nothing was executed.",
+                sandbox_dir.display()
+            ))
+        })?;
+        let script = sandbox_dir.join(format!("{}.py", new_id("script")));
+        std::fs::write(&script, code.as_bytes()).map_err(|e| {
+            CoreError::ExecutionFailed(format!(
+                "The script could not be written to {}: {e}",
+                script.display()
+            ))
+        })?;
+        Ok(script)
+    })
+    .await
+    .map_err(|e| CoreError::ExecutionFailed(format!("Sandbox file setup was interrupted: {e}")))??;
 
     // `-I` is isolated mode: no `PYTHONPATH`, no user site-packages, and the
     // script's own directory is not put ahead of the standard library. Without
@@ -713,7 +729,7 @@ async fn exec(
     let job = contained.job.clone();
     let mut child = contained.child;
 
-    st.sandbox.lock().expect("sandbox lock").insert(
+    st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).insert(
         run_id.clone(),
         SandboxHandle { run_id: run_id.clone(), pid, kill: killer },
     );
@@ -779,14 +795,28 @@ async fn exec(
     let mut status = String::new();
 
     loop {
+        // Stop in the chat that started this command aborts the command
+        // itself, not just the wait around it. Without this, a long build
+        // runs to its timeout while the operator watches a dead Stop button;
+        // the drain below already polls every 120 ms, so this lands just as
+        // fast. Console runs have no agent run and are unaffected.
+        if let Some((agent_run_id, _)) = crate::state::current_run() {
+            if st.is_run_cancelled(&agent_run_id) {
+                if let Some(h) = st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id) {
+                    (h.kill)();
+                }
+                status = "killed".into();
+                break;
+            }
+        }
         // The three ways a run ends, checked in order of who asked for it:
         // the operator, the clock, then the program itself.
-        if st.sandbox.lock().expect("sandbox lock").get(&run_id).is_none() {
+        if st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).get(&run_id).is_none() {
             status = "killed".into();
             break;
         }
         if std::time::Instant::now() >= deadline {
-            let handle = st.sandbox.lock().expect("sandbox lock").remove(&run_id);
+            let handle = st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id);
             if let Some(h) = handle {
                 (h.kill)();
             }
@@ -863,7 +893,7 @@ async fn exec(
     // `Disconnected` breaks the loop first and the operator pressing Stop was
     // recorded as the program ending by itself. What the console then showed for
     // a stopped script was `exited 1`, which reads as "your script failed".
-    if status.is_empty() && st.sandbox.lock().expect("sandbox lock").get(&run_id).is_none() {
+    if status.is_empty() && st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).get(&run_id).is_none() {
         status = "killed".into();
     }
 
@@ -872,7 +902,7 @@ async fn exec(
     // the program ended itself, and the outcome has to be read off the process.
     let stop_requested = !status.is_empty();
     if stop_requested {
-        if let Some(h) = st.sandbox.lock().expect("sandbox lock").remove(&run_id) {
+        if let Some(h) = st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id) {
             (h.kill)();
         }
     }
@@ -894,7 +924,7 @@ async fn exec(
         // later: it is wedged, or it left a grandchild holding the pipes open.
         // Ending it beats holding this task open for good, and `killed` is then
         // the honest word for what happened.
-        if let Some(h) = st.sandbox.lock().expect("sandbox lock").remove(&run_id) {
+        if let Some(h) = st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id) {
             (h.kill)();
         }
         status = "killed".into();
@@ -904,7 +934,7 @@ async fn exec(
     if status.is_empty() {
         status = "exited".into();
     }
-    st.sandbox.lock().expect("sandbox lock").remove(&run_id);
+    st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id);
     // Closing the job now sweeps up any grandchild that outlived the leader.
     drop(job);
 
@@ -959,6 +989,15 @@ async fn exec(
         },
     );
 
+    // A Stop that killed the command above ends the agent run here rather
+    // than returning "killed" as ordinary tool output for the model to reason
+    // about. The orchestrator already treats this as a stop, not a failure.
+    if let Some((agent_run_id, _)) = crate::state::current_run() {
+        if st.is_run_cancelled(&agent_run_id) {
+            return Err(CoreError::Denied("The run was cancelled.".into()));
+        }
+    }
+
     Ok(run)
 }
 
@@ -970,7 +1009,7 @@ pub fn kill(st: &AppState, run_id: &str) -> CoreResult<()> {
     // Removing the handle is itself the stop signal: the drain loop checks for
     // its own presence in the map each pass, so a kill takes effect at the next
     // boundary even if the terminate call loses a race with process exit.
-    let handle = st.sandbox.lock().expect("sandbox lock").remove(run_id);
+    let handle = st.sandbox.lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
     match handle {
         Some(h) => {
             (h.kill)();
@@ -1009,7 +1048,7 @@ pub fn history(st: &AppState) -> CoreResult<Vec<SandboxRun>> {
 /// tree on process exit anyway; this makes it orderly and immediate.
 pub fn kill_all(st: &Arc<AppState>) {
     let handles: Vec<SandboxHandle> = {
-        let mut map = st.sandbox.lock().expect("sandbox lock");
+        let mut map = st.sandbox.lock().unwrap_or_else(|e| e.into_inner());
         map.drain().map(|(_, h)| h).collect()
     };
     for h in handles {
@@ -1022,7 +1061,7 @@ pub fn kill_all(st: &Arc<AppState>) {
         // the handle is what makes the row addressable here, where the
         // `SandboxRun` itself is owned by a thread that is being abandoned.
         if let Err(e) = st.with_db(|conn| crate::db::mark_sandbox_stopped(conn, &h.run_id, "killed")) {
-            eprintln!("[sandbox] {} was stopped at shutdown but its history row could not be updated: {e}", h.run_id);
+            logln!("[sandbox] {} was stopped at shutdown but its history row could not be updated: {e}", h.run_id);
         }
     }
 }
