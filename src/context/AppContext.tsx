@@ -1772,6 +1772,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ),
     );
     setActiveWorkspaceId(workspaceId);
+    // Persist the rebind at once. A turn's `touch_session` only ever *sets*
+    // a workspace (COALESCE keeps the stored one when the turn carries
+    // none), so a client-only detach would be reverted by the next
+    // `session_list` hydration and the chat would reappear under the
+    // project. A placeholder chat with no turn yet has no store row; the
+    // call is a no-op there and the first turn inserts the binding.
+    void core.sessions.setWorkspace(sessionId, workspaceId).catch(() => {
+      /* Core detached: the local change stands until the next hydration. */
+    });
   }, []);
 
   /* ---------------------------------------------------------------- */

@@ -392,6 +392,15 @@ export const sessions = {
   setMemory: (sessionId: string, useMemories: boolean, contributeMemories: boolean) =>
     call<Session>('session_memory', { sessionId, useMemories, contributeMemories }),
   /**
+   * Rebinds a stored chat to a project, or detaches it with `null`. The
+   * first turn's COALESCE on the store side only ever *sets* a workspace, so
+   * an explicit clear — "don't work in a project" — has to travel through
+   * this command or the next session_list reload would quietly put the chat
+   * back under the project.
+   */
+  setWorkspace: (sessionId: string, workspaceId: string | null) =>
+    call<void>('session_workspace', { sessionId, workspaceId }),
+  /**
    * Deletes one operator message and every turn after it in the store. The
    * frontend then re-sends the corrected wording as a fresh turn, which is how
    * editing an earlier message rewrites the conversation from that point.

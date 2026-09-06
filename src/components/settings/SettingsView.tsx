@@ -63,6 +63,7 @@ import type {
 import {
   readAppearance,
   saveAppearance,
+  stepFontSize,
   UI_FONT_MAX,
   UI_FONT_MIN,
   type AppearancePreferences,
@@ -811,6 +812,16 @@ export const SettingsView: React.FC = () => {
     openTab,
   } = useApp();
   const [appearance, setAppearance] = useState<AppearancePreferences>(() => readAppearance());
+  // The appearance preference is also written from outside this screen —
+  // the TitleBar's Ctrl+= / Ctrl+- / Ctrl+0 accelerators step the very same
+  // font size. Without this listener our cached copy goes stale, and the
+  // next edit here would spread the stale value back over the saved one,
+  // silently reverting the zoom the operator just chose.
+  useEffect(() => {
+    const onAppearance = () => setAppearance(readAppearance());
+    window.addEventListener('zeroleak:appearance', onAppearance);
+    return () => window.removeEventListener('zeroleak:appearance', onAppearance);
+  }, []);
   const [prefs, setPrefs] = useWorkbenchPreferences();
   const [addModelOpen, setAddModelOpen] = useState(false);
   const [mcpDraft, setMcpDraft] = useState({ name: '', command: '', args: '' });
@@ -994,7 +1005,7 @@ export const SettingsView: React.FC = () => {
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setAppearanceValue('fontSize', Math.max(UI_FONT_MIN, appearance.fontSize - 1))}
+                  onClick={() => stepFontSize(-1)}
                   disabled={appearance.fontSize <= UI_FONT_MIN}
                   aria-label="Decrease font size"
                   className="grid size-8 place-items-center rounded-md border nerve-border text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -1004,7 +1015,7 @@ export const SettingsView: React.FC = () => {
                 <span className="w-14 text-center text-sm tabular-nums text-[var(--foreground)]" aria-live="polite">{appearance.fontSize} px</span>
                 <button
                   type="button"
-                  onClick={() => setAppearanceValue('fontSize', Math.min(UI_FONT_MAX, appearance.fontSize + 1))}
+                  onClick={() => stepFontSize(1)}
                   disabled={appearance.fontSize >= UI_FONT_MAX}
                   aria-label="Increase font size"
                   className="grid size-8 place-items-center rounded-md border nerve-border text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"

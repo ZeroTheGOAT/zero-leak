@@ -1194,6 +1194,27 @@ pub fn set_session_memory(
     Ok(())
 }
 
+/// Rebinds a stored chat to a workspace, or detaches it with `None`.
+///
+/// The explicit counterpart to `touch_session`, whose COALESCE only ever
+/// *sets* a binding — a turn that arrives with no workspace keeps the stored
+/// one, so clearing a chat out of a project has to come through here. A chat
+/// that has not sent its first turn has no row yet; updating it is a
+/// deliberate no-op, because that first turn inserts the binding the caller
+/// already holds on the screen. `workspace_id` is not a foreign key by
+/// design (see the schema note), so no workspace lookup is made.
+pub fn set_session_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_id: Option<&str>,
+) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE sessions SET workspace_id = ?2 WHERE id = ?1",
+        params![id, workspace_id],
+    )?;
+    Ok(())
+}
+
 /// Appends a turn and returns it, numbered after whatever is already there.
 pub fn add_message(
     conn: &Connection,
@@ -3153,6 +3174,31 @@ mod harness_state {
         let row = session(&conn, "s1").unwrap();
         assert!(!row.use_memories);
         assert!(row.contribute_memories);
+    }
+
+    #[test]
+    fn a_detached_chat_stays_personal_across_its_next_turn() {
+        let conn = store();
+        touch_session(&conn, "s1", Some("ws1"), AgentMode::Plan, "in the project", 100).unwrap();
+
+        // An explicit detach must survive both the next turn — whose
+        // touch_session COALESCE would otherwise keep the stored binding —
+        // and the session_list reload that rehydrates the sidebar from the
+        // store.
+        set_session_workspace(&conn, "s1", None).unwrap();
+        touch_session(&conn, "s1", None, AgentMode::Agent, "personal follow-up", 200).unwrap();
+        assert_eq!(
+            session(&conn, "s1").unwrap().workspace_id,
+            None,
+            "a detached chat reappears under the project after a reload if the clear is not stored"
+        );
+
+        // Re-attaching is equally durable, and a chat with no row yet (a
+        // client-side placeholder that has not sent its first turn) is a
+        // silent no-op rather than an error.
+        set_session_workspace(&conn, "s1", Some("ws2")).unwrap();
+        assert_eq!(session(&conn, "s1").unwrap().workspace_id.as_deref(), Some("ws2"));
+        set_session_workspace(&conn, "not-yet-stored", None).unwrap();
     }
 
     #[test]

@@ -63,7 +63,7 @@ pub const COMMANDS: &[&str] = &[
     "audit_list", "store_gate_list",
     "vault_status", "vault_event_list", "vault_enable", "vault_disable",
     "turn_start", "agent_start", "agent_cancel", "permission_respond", "question_answer", "change_apply", "change_discard", "change_apply_all", "change_discard_all",
-    "session_list", "session_history", "session_truncate", "session_delete", "session_memory", "attachment_stage",
+    "session_list", "session_history", "session_truncate", "session_delete", "session_memory", "session_workspace", "attachment_stage",
     "settings_get", "settings_set",
     "window_minimize", "window_toggle_maximize", "window_close", "app_quit",
 ];
@@ -475,6 +475,16 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
             arg::<bool>(args, "useMemories")?,
             arg::<bool>(args, "contributeMemories")?,
         )?),
+        // Rebind a stored chat to a project, or detach it with a null. The
+        // first turn's touch_session COALESCE only ever sets a workspace, so
+        // an explicit clear has to come through this command; a chat with no
+        // row yet is a no-op whose binding the first turn then inserts.
+        "session_workspace" => {
+            let session_id = arg::<String>(args, "sessionId")?;
+            let workspace_id = opt::<String>(args, "workspaceId")?;
+            st.with_db(|c| crate::db::set_session_workspace(c, &session_id, workspace_id.as_deref()))?;
+            ok(())
+        }
         "permission_respond" => ok(agent::respond_to_permission(
             st,
             &arg::<String>(args, "requestId")?,

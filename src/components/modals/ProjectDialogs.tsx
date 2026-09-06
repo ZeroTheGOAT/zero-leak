@@ -302,7 +302,7 @@ export const DeleteProjectDialog: React.FC<DeleteProjectDialogProps> = ({
           <button
             onClick={() => void remove([])}
             disabled={busy || blocked}
-            className="zeroleak-primary flex h-10 items-center gap-2 rounded-xl px-4 text-[12px] font-medium disabled:opacity-35"
+            className="flex h-10 items-center gap-2 rounded-xl bg-[var(--destructive-solid)] px-4 text-[12px] font-medium text-[var(--destructive-solid-foreground)] transition hover:brightness-110 disabled:opacity-35"
           >
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
             Delete project and chats
@@ -336,7 +336,7 @@ export const DeleteChatDialog: React.FC<{
               void deleteSession(session.id).then(onClose);
             }}
             disabled={busy || blocked}
-            className="zeroleak-primary flex h-9 items-center gap-2 rounded-lg px-3 text-[12px] font-medium disabled:opacity-35"
+            className="flex h-9 items-center gap-2 rounded-lg bg-[var(--destructive-solid)] px-3 text-[12px] font-medium text-[var(--destructive-solid-foreground)] transition hover:brightness-110 disabled:opacity-35"
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
             Delete chat

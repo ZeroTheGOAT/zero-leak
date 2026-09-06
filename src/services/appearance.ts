@@ -49,11 +49,15 @@ export function stepFontSize(delta: number): void {
   saveAppearance({ ...current, fontSize: next });
 }
 
-/** Reset to the designed size (14 px, zoom 1) — "Actual Size". */
+/**
+ * Reset to the shipped default size — the size a fresh install starts at —
+ * so Ctrl+0 / "Actual Size" is a no-op for an untouched operator rather
+ * than a jump from the 12 px default up to the 14 px designed size.
+ */
 export function resetFontSize(): void {
   const current = readAppearance();
-  if (current.fontSize === UI_FONT_BASE) return;
-  saveAppearance({ ...current, fontSize: UI_FONT_BASE });
+  if (current.fontSize === DEFAULT_APPEARANCE.fontSize) return;
+  saveAppearance({ ...current, fontSize: DEFAULT_APPEARANCE.fontSize });
 }
 
 export function readAppearance(): AppearancePreferences {
@@ -126,16 +130,12 @@ export function saveAppearance(value: AppearancePreferences): void {
 export function initializeAppearance(): void {
   const current = readAppearance();
   applyAppearance(current);
-  // The retired Ctrl+/- body zoom multiplied with the mount zoom and pushed
-  // the shell off-screen. Its key (and any inline body zoom it left behind)
-  // is cleared once here so no stale value re-applies it after an update.
-  try {
-    if (localStorage.getItem('zeroleak.ui-zoom.v1') !== null) {
-      localStorage.removeItem('zeroleak.ui-zoom.v1');
-    }
-  } catch {
-    /* Storage blocked: the stale zoom simply cannot be cleaned. */
-  }
+  // Legacy preference keys — including the retired Ctrl+/- body zoom's
+  // `servergen.ui-zoom.v1` — are migrated or dropped once at boot by
+  // services/prefs-migration.ts, before anything reads the new keys. Here
+  // only the inline body zoom an older build may have left on this page is
+  // cleared: the retired second zoom multiplied with the mount zoom below
+  // and pushed the shell off-screen.
   document.body.style.removeProperty('zoom');
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     const next = readAppearance();
