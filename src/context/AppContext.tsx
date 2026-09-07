@@ -313,6 +313,16 @@ interface AppContextValue {
    * over only once this clears.
    */
   sidebarLeaving: boolean;
+  /**
+   * True from the moment the sidebar is reopened from the collapsed peek state
+   * until the workbench is next left for Settings (openSettings clears it) —
+   * used to glide the docked sidebar back in on the title-bar toggle, exactly
+   * like the hover peek, instead of a pop. The latch is consumed on entering
+   * Settings because that unmounts the docked sidebar; without the clear, a
+   * mere return from Settings would be misread as a reopen and replay the
+   * entrance glide on every round-trip.
+   */
+  sidebarReopened: boolean;
   /** Bottom dock hosting the sandbox terminal. View → Toggle Bottom Panel. */
   isBottomPanelOpen: boolean;
   setIsBottomPanelOpen: (v: boolean) => void;
@@ -582,6 +592,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
      ref lets us ignore redundant set calls without reading state in a loop. */
   const sidebarOpenRef = useRef(isSidebarOpen);
   const [sidebarLeaving, setSidebarLeaving] = useState(false);
+  /* True once the sidebar has been reopened from the collapsed peek state —
+     the docked Sidebar mounts fresh each time, and needs to know whether to
+     glide in (see the `opening` prop). The app's first render is not a
+     reopen, so a fresh session starts with the sidebar simply there. Cleared
+     whenever Settings is opened (the workbench — and the docked sidebar —
+     unmounts), so a return from Settings is never mistaken for a reopen. */
+  const [sidebarReopened, setSidebarReopened] = useState(false);
   const sidebarCloseTimer = useRef<number | null>(null);
   const setIsSidebarOpen = useCallback((v: boolean) => {
     if (v === sidebarOpenRef.current) return;
@@ -594,6 +611,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sidebarCloseTimer.current = null;
       }
       setSidebarLeaving(false);
+      // Reaching this branch means the sidebar was actually collapsed, so
+      // the next docked mount is a reopen, not the app's first render.
+      setSidebarReopened(true);
     } else {
       setSidebarLeaving(true);
       if (sidebarCloseTimer.current !== null) {
@@ -2110,6 +2130,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const openSettings = useCallback((page: SettingsPage = 'workbench') => {
     setSettingsPage(page);
     setView('settings');
+    // Leaving the workbench unmounts the docked sidebar (SettingsView owns the
+    // screen while settings is open), so clear the reopened latch here: the
+    // next docked mount — returning from Settings — is then not mistaken for a
+    // toggle-open, and does not replay the entrance glide. Only a real
+    // collapse→open from the collapsed peek state animates.
+    setSidebarReopened(false);
   }, []);
 
   const openTab = useCallback(
@@ -2592,6 +2618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isSidebarOpen,
       setIsSidebarOpen,
       sidebarLeaving,
+      sidebarReopened,
       isBottomPanelOpen,
       setIsBottomPanelOpen,
       showPinnedSummary,
@@ -2743,6 +2770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isSidebarOpen,
       setIsSidebarOpen,
       sidebarLeaving,
+      sidebarReopened,
       isBottomPanelOpen,
       setIsBottomPanelOpen,
       showPinnedSummary,

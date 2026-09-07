@@ -29,13 +29,24 @@ import {
   EditProjectDialog,
 } from '../modals/ProjectDialogs';
 import { sidebarSizeTransition } from './sidebarMotion';
+import { SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, readStoredWidth, storeWidth } from './sidebarWidth';
+import { useColumnResize } from './useColumnResize';
 
-export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
+// Dragging the edge all the way to the left collapses the sidebar instead of
+// parking it at a sliver: below the threshold the bar glides away to zero
+// width (closing prop) and returns on hover at the left edge or via the
+// title-bar toggle.
+const SIDEBAR_COLLAPSE_AT = 140;
+
+export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?: boolean }> = ({
   closing = false,
   // Floating = the peek overlay shown over content while the sidebar is
   // collapsed. It is pinned-width and transient, so it gets no resize handle —
   // dragging to resize only belongs to the docked, screen-attached sidebar.
   floating = false,
+  // Fresh reopen from the collapsed peek state (title-bar toggle): glide in
+  // from zero like the hover peek, instead of popping in at full width.
+  opening = false,
 }) => {
   const {
     workspaces,
@@ -55,16 +66,25 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
   } = useApp();
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [sidebarWidth, setSidebarWidth] = useState(260);
-  const [resizing, setResizing] = useState(false);
-  const resizeStart = useRef<{ x: number; width: number } | null>(null);
+  // The docked sidebar keeps the operator's chosen width (readStoredWidth);
+  // the floating peek is pinned to the default — a transient hover overlay
+  // should never burst wide just because the docked sidebar was dragged big.
+  // A fresh reopen mounts at zero and glides in (see the `opening` prop). All
+  // drag-gesture state lives in the shared hook, exactly as it does in the
+  // settings nav, so both surfaces stay the same width and one behavior.
+  const { width: sidebarWidth, setWidth: setSidebarWidth, widthRef, resizing, beginResize } =
+    useColumnResize({
+      initialWidth: () => (opening ? 0 : floating ? SIDEBAR_WIDTH_DEFAULT : readStoredWidth()),
+      collapseAt: SIDEBAR_COLLAPSE_AT,
+      onCollapse: () => setIsSidebarOpen(false),
+      onSettled: storeWidth,
+    });
   // While `closing` the sidebar stays mounted and glides to zero width + fades,
   // so a collapse is a motion, never a vanish. AppContext clears the flag only
   // after the motion has had time to finish (see sidebarLeaving).
   const [fading, setFading] = useState(false);
-  const widthRef = useRef(sidebarWidth);
   const wasClosing = useRef(closing);
-  const restoreWidth = useRef(260);
+  const restoreWidth = useRef(SIDEBAR_WIDTH_DEFAULT);
   const [editingProject, setEditingProject] = useState<Workspace | null>(null);
   const [deletingProject, setDeletingProject] = useState<Workspace | null>(null);
   const [deletingChat, setDeletingChat] = useState<Session | null>(null);
@@ -133,56 +153,26 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
       </button>
     ) : null;
 
-  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    resizeStart.current = { x: event.clientX, width: sidebarWidth };
-    setResizing(true);
-  };
-
-  // Dragging the edge all the way to the left collapses the sidebar instead
-  // of parking it at a sliver: below the threshold the bar glides away to
-  // zero width (closing prop) and returns on hover at the left edge or via
-  // the title-bar toggle.
-  const COLLAPSE_AT = 140;
-
+  // Entrance on a fresh reopen from the collapsed peek state: the reopen
+  // render has already mounted at zero, so after one frame (letting that zero
+  // width paint) the next frame glides to the operator's width — the same
+  // feel as the hover peek's entrance. Two frames are required, exactly as
+  // SidebarPeek documents: if the flip landed on the mount frame, the first
+  // painted state would already be full width and the entrance would snap.
+  // Guarded by a ref so StrictMode's double-mount re-schedules the glide
+  // instead of skipping it.
+  const openingRef = useRef(opening);
   useEffect(() => {
-    if (!resizing) return;
-    const move = (event: PointerEvent) => {
-      if (!resizeStart.current) return;
-      const width = resizeStart.current.width + event.clientX - resizeStart.current.x;
-      if (width < COLLAPSE_AT) {
-        resizeStart.current = null;
-        setResizing(false);
-        setIsSidebarOpen(false);
-        return;
-      }
-      // Names and rows stay fully rendered while resizing — truncation only
-      // clips the text, so nothing vanishes before the collapse point.
-      setSidebarWidth(Math.min(480, Math.max(180, width)));
-    };
-    const end = () => {
-      resizeStart.current = null;
-      setResizing(false);
-    };
-    const previousCursor = document.body.style.cursor;
-    document.body.style.cursor = 'col-resize';
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-    return () => {
-      document.body.style.cursor = previousCursor;
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', end);
-      window.removeEventListener('pointercancel', end);
-    };
-  }, [resizing, setIsSidebarOpen]);
-
-  // Keep a live copy of the width for the close/reopen effect below — that
-  // effect must not re-run on every pixel of a resize drag, but needs the
-  // most recent width when a collapse is asked for.
-  useEffect(() => {
-    widthRef.current = sidebarWidth;
-  }, [sidebarWidth]);
+    if (!openingRef.current) return;
+    let raf = window.requestAnimationFrame(() => {
+      raf = window.requestAnimationFrame(() => {
+        setSidebarWidth(readStoredWidth());
+      });
+    });
+    return () => window.cancelAnimationFrame(raf);
+    // setSidebarWidth (from useColumnResize) is stable, so this still runs
+    // exactly once per reopen mount.
+  }, [setSidebarWidth]);
 
   /**
    * Exit / re-entry. When `closing` arrives the sidebar is still mounted
@@ -193,7 +183,8 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
    */
   useEffect(() => {
     if (closing) {
-      restoreWidth.current = widthRef.current;
+      restoreWidth.current =
+        widthRef.current >= SIDEBAR_WIDTH_MIN ? widthRef.current : readStoredWidth();
       wasClosing.current = true;
       const raf = window.requestAnimationFrame(() => {
         setSidebarWidth(0);
@@ -212,7 +203,9 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
       return () => window.cancelAnimationFrame(raf);
     }
     wasClosing.current = false;
-  }, [closing]);
+    // widthRef and setSidebarWidth (both from useColumnResize) are stable, so
+    // this still fires only when `closing` flips — once per close/reopen.
+  }, [closing, widthRef, setSidebarWidth]);
 
   /**
    * One conversation. The delete button removes it from the core's store as
@@ -449,7 +442,10 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean }> = ({
         aria-label="Resize left sidebar"
         aria-orientation="vertical"
         onPointerDown={beginResize}
-        onDoubleClick={() => setSidebarWidth(260)}
+        onDoubleClick={() => {
+          setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+          storeWidth(SIDEBAR_WIDTH_DEFAULT);
+        }}
         className="group/split absolute -right-1 bottom-0 top-0 z-[80] w-2 cursor-col-resize touch-none"
         title="Drag left or right to resize"
       >

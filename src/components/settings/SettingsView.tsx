@@ -45,6 +45,8 @@ import { AuditView } from '../panels/AuditView';
 import { KnowledgeView } from '../panels/KnowledgeView';
 import { MemoryView } from '../panels/MemoryView';
 import { ModelManagerView } from '../panels/ModelManagerView';
+import { useColumnResize } from '../layout/useColumnResize';
+import { SIDEBAR_WIDTH_DEFAULT, readStoredWidth, storeWidth } from '../layout/sidebarWidth';
 import type {
   AgentMode,
   AppSettings,
@@ -521,7 +523,15 @@ function useWorkbenchPreferences() {
       const parsed: unknown = raw ? JSON.parse(raw) : {};
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return DEFAULT_PREFS;
       const rec = parsed as Record<string, unknown>;
-      if ('__proto__' in rec || 'constructor' in rec || 'prototype' in rec) return DEFAULT_PREFS;
+      // hasOwnProperty (not `in`), like services/appearance.ts:78: `__proto__`
+      // and `constructor` are inherited members of every parsed object, so `in`
+      // would reject every read and reset the whole preference block — the
+      // chosen transcription model among it — to the defaults on each visit.
+      if (
+        Object.prototype.hasOwnProperty.call(rec, '__proto__') ||
+        Object.prototype.hasOwnProperty.call(rec, 'constructor') ||
+        Object.prototype.hasOwnProperty.call(rec, 'prototype')
+      ) return DEFAULT_PREFS;
       const stored = rec as Partial<WorkbenchPreferences>;
       return { ...DEFAULT_PREFS, ...stored, toolEnabled: { ...DEFAULT_PREFS.toolEnabled, ...stored.toolEnabled } };
     } catch {
@@ -839,6 +849,17 @@ export const SettingsView: React.FC = () => {
   const [vaultHistory, setVaultHistory] = useState<VaultEvent[] | null>(null);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultDialog, setVaultDialog] = useState<'enable' | 'disable' | null>(null);
+  // The settings nav shares its width with the chat sidebar — one column, two
+  // surfaces — so both read and write the same stored value and both carry the
+  // same edge handle. The whole drag gesture lives in the same shared hook the
+  // chat sidebar uses; the settings nav passes no collapseAt, so it never
+  // collapses — it only clamps, and persists on a settled release (never on a
+  // pointercancel, which is an interrupted drag, not a choice).
+  const { width: settingsWidth, setWidth: setSettingsWidth, resizing, beginResize } =
+    useColumnResize({
+      initialWidth: readStoredWidth,
+      onSettled: storeWidth,
+    });
   const activePage = PAGES.find((item) => item.id === settingsPage) ?? PAGES[0];
 
   const loadGateLedger = async () => {
@@ -1256,7 +1277,7 @@ export const SettingsView: React.FC = () => {
             <Row label="Model storage" description="STT weights use the same local models root."><span className="max-w-80 truncate font-mono text-xs text-[var(--muted-foreground)]">{settings.modelsDirectory}/stt</span></Row>
             <Row label="Local readiness" description={localTranscriptionStatus?.detail ?? 'Checking the local runtime and model…'}><span className={`rounded-full px-2 py-1 text-xs ${localTranscriptionStatus?.ready ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-[var(--warning-soft)] text-[var(--warning)]'}`}>{localTranscriptionStatus?.ready ? 'Ready' : localTranscriptionStatus ? 'Setup needed' : 'Checking'}</span></Row>
           </Section>
-          <Section id="stt-context" title="Context">
+          <Section id="stt-context" title="Context" description="Hints passed only to the local transcriber — nothing leaves the workstation.">
             <Row label="Expected language" description="Passed to whisper.cpp as the spoken language. Auto detect asks it to identify the language itself."><Select value={languageCode(prefs.transcriptionLanguage)} onChange={(e) => setPrefs({ ...prefs, transcriptionLanguage: e.target.value })}>{TRANSCRIPTION_LANGUAGES.map((entry) => <option key={entry.code} value={entry.code}>{entry.label}</option>)}</Select></Row>
             <Row label="Vocabulary hints" description="Names, acronyms, and preferred spellings passed only to the local transcriber." stacked><Input className="w-full" value={prefs.transcriptionVocabulary} onChange={(e) => setPrefs({ ...prefs, transcriptionVocabulary: e.target.value })} /></Row>
           </Section>
@@ -1509,8 +1530,11 @@ export const SettingsView: React.FC = () => {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 bg-[var(--background)] text-[var(--foreground)]">
-      <aside className="grid w-[13.5rem] min-h-0 flex-none grid-rows-[auto_minmax(0,1fr)_auto] border-r border-[color-mix(in_oklab,var(--border)_60%,transparent)] bg-[var(--sidebar)] p-[0.9rem_0.7rem] text-[var(--sidebar-foreground)]">
+    <div className="flex min-h-0 flex-1 text-[var(--foreground)]">
+      <aside
+        className="relative grid min-h-0 flex-none grid-rows-[auto_minmax(0,1fr)_auto] bg-[var(--sidebar)] p-[0.9rem_0.7rem] text-[var(--sidebar-foreground)]"
+        style={{ width: settingsWidth }}
+      >
         <div className="px-1.5 pb-3">
           <strong className="text-sm font-semibold text-[var(--foreground)]">Settings</strong>
         </div>
@@ -1533,9 +1557,35 @@ export const SettingsView: React.FC = () => {
         <button onClick={() => setView('workbench')} className="mt-3 flex items-center gap-2 rounded-md border nerve-border px-2.5 py-2 text-xs text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-foreground)]">
           <X size={13} /> Close settings
         </button>
+        {/* Same edge handle as the chat sidebar — resizing here moves the
+            shared width, and the chat sidebar comes back to it. */}
+        <div
+          role="separator"
+          aria-label="Resize settings sidebar"
+          aria-orientation="vertical"
+          onPointerDown={beginResize}
+          onDoubleClick={() => {
+            setSettingsWidth(SIDEBAR_WIDTH_DEFAULT);
+            storeWidth(SIDEBAR_WIDTH_DEFAULT);
+          }}
+          className="group/split absolute -right-1 bottom-0 top-0 z-[80] w-2 cursor-col-resize touch-none"
+          title="Drag left or right to resize"
+        >
+          <div
+            aria-hidden="true"
+            className={`mx-auto h-full w-px transition-colors ${
+              resizing
+                ? 'bg-[var(--muted-foreground)]'
+                : 'bg-transparent group-hover/split:bg-[var(--muted-foreground)]'
+            }`}
+          />
+        </div>
       </aside>
 
-      <main className="min-w-0 flex-1 overflow-y-auto px-5 pb-16 pt-4">
+      {/* Same card treatment as the chat screen: the nav plays the sidebar
+          role, so the content is the background card whose rounded top-left
+          corner reads as the sidebar continuing behind the curve. */}
+      <main className="min-w-0 flex-1 overflow-y-auto rounded-tl-[14px] border-l border-[var(--border)] bg-[var(--background)] px-5 pb-16 pt-4">
         <div className="grid w-full max-w-[44rem] content-start gap-5">
           <header className="flex min-h-10 items-start justify-between gap-4">
             <div>

@@ -39,6 +39,7 @@ export const AppContent: React.FC = () => {
     queuedMessages,
     isSidebarOpen,
     sidebarLeaving,
+    sidebarReopened,
     showPinnedSummary,
   } = useApp();
   // Peek-on-hover when the sidebar is collapsed (hover strip + slide-in
@@ -140,13 +141,23 @@ export const AppContent: React.FC = () => {
   // continuing behind the curve, and must vanish with it.
   const sidebarMounted = isSidebarOpen || sidebarLeaving;
 
+  // A fresh reopen from the collapsed peek state (title-bar toggle) glides
+  // the sidebar in — see Sidebar's `opening` prop. The app's first render
+  // is not a reopen (sidebarReopened stays false), and a close is excluded
+  // here by sidebarLeaving, so only a real toggle-open animates.
+  const sidebarOpening = sidebarReopened && !sidebarLeaving;
+
   return (
     <div className="zeroleak-shell h-full w-full flex flex-col font-sans overflow-hidden">
       <TitleBar />
 
       <div
         className={`flex-1 flex overflow-hidden min-h-0 select-none relative ${
-          sidebarMounted ? 'bg-[var(--sidebar)]' : ''
+          // The settings screen always carries its own sidebar-coloured nav,
+          // so it always sits on the sidebar-coloured row — the curve at the
+          // settings content's top-left needs that ground to read, exactly
+          // like the chat screen's.
+          sidebarMounted || view === 'settings' ? 'bg-[var(--sidebar)]' : ''
         }`}
       >
         {view === 'settings' ? (
@@ -157,7 +168,7 @@ export const AppContent: React.FC = () => {
               /* While sidebarLeaving the sidebar is still mounted and gliding
                  to zero width (see Sidebar's closing prop) — only once that
                  motion finishes does the collapsed peek layout take over. */
-              <Sidebar closing={sidebarLeaving} />
+              <Sidebar closing={sidebarLeaving} opening={sidebarOpening} />
             ) : (
               <SidebarPeek />
             )}
