@@ -1,0 +1,768 @@
+import {
+  askUserResultSchema,
+  bashResultDetailsSchema,
+  editOperationResultDetailsSchema,
+  explainImageResultDetailsSchema,
+  exploreResultPreviewSchema,
+  pythonResultDetailsSchema,
+  todosResultSchema,
+  webFetchResultDetailsSchema,
+  webSearchResultDetailsSchema,
+} from "@nervekit/contracts/tools";
+import type {
+  ToolCallRecord,
+  ToolCallTranscriptRecord,
+} from "../../state/tool-types";
+export type ToolCallDisplayRecord = ToolCallRecord | ToolCallTranscriptRecord;
+
+import { LruCache } from "@nervekit/ui-kit/collections/lru-cache";
+import type { ConversationLiveToolOutputSnapshot } from "@nervekit/contracts/conversations";
+import {
+  redactStructuredValue,
+  toolArgumentSource,
+} from "../lifecycle/argument-source";
+import { parseConfluenceView } from "./confluence-result-view";
+import { parseExploreProgressLog } from "./explore-progress";
+import { parseJiraView } from "./jira-result-view";
+import {
+  parseTaskControlResult,
+  parseTaskLogsResult,
+  parseTaskStartResult,
+  parseTaskStatusResult,
+} from "./task-result-parser";
+import {
+  asRecord,
+  countLogicalLines,
+  detailsTruncated,
+  diffStats,
+  firstTextBlock,
+  groupMatchesByFile,
+  imageDataUrl,
+  outputArtifactsFromDetails,
+  outputLimitsFromDetails,
+  parseToolExecutionResult,
+  relativePath,
+  resolveToolPath,
+  resultOutputText,
+  stringField,
+  todoItemsField,
+  trimMatchText,
+} from "./tool-view-helpers";
+import type { ToolView } from "./tool-view-types";
+
+export { aggregateExploreTasks } from "./explore-progress";
+// Re-export the supporting modules so existing consumers that import from this
+// file (via tool-result-view) keep a single, stable surface.
+export {
+  ATLASSIAN_COLLAPSED_ITEMS,
+  COLLAPSED_LINES,
+  countLogicalLines,
+  groupMatchesByFile,
+  imageDataUrl,
+  relativePath,
+  splitLogicalLines,
+  tail,
+  tailLogicalText,
+} from "./tool-view-helpers";
+export type {
+  ExploreProgressView,
+  ExploreSummary,
+  ExploreTaskState,
+  ExploreTaskStatus,
+  GrepMatchView,
+  GroupedMatches,
+  ToolView,
+} from "./tool-view-types";
+
+function arrayField(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function editOperationCount(args: Record<string, unknown>): number {
+  return arrayField(args.edits).length;
+}
+
+function nonnegativeIntegerField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function previewOverflowHidden(
+  toolCall: ToolCallDisplayRecord,
+  noun: string,
+  direction?: "head" | "tail" | "mixed",
+): number {
+  const overflow =
+    "previewOverflow" in toolCall ? toolCall.previewOverflow : undefined;
+  if (!overflow || overflow.noun !== noun) return 0;
+  if (direction && overflow.direction !== direction) return 0;
+  return overflow.hidden;
+}
+
+function actualPreviewCount(
+  visible: number,
+  toolCall: ToolCallDisplayRecord,
+  noun: string,
+  direction?: "head" | "tail" | "mixed",
+): number {
+  return visible + previewOverflowHidden(toolCall, noun, direction);
+}
+
+function modelDisplayedLines(
+  outputLimits: ReturnType<typeof outputLimitsFromDetails>,
+): number | undefined {
+  return outputLimits?.model?.displayedLines;
+}
+
+function actualTextLineCount(
+  text: string | undefined,
+  toolCall: ToolCallDisplayRecord,
+  noun: string,
+  direction?: "head" | "tail" | "mixed",
+  outputLimits?: ReturnType<typeof outputLimitsFromDetails>,
+): number {
+  return (
+    modelDisplayedLines(outputLimits) ??
+    actualPreviewCount(countLogicalLines(text), toolCall, noun, direction)
+  );
+}
+
+// Memoize the (zod-heavy) tool-result projection. parseToolView re-runs on
+// every card mount (tab switch / scroll into view) and on every live
+// `tool_call.updated`; caching by tool-call identity + revision lets stable
+// cards reuse the parsed view instead of re-running schema parsing.
+const toolViewCache = new LruCache<string, ToolView>(300);
+
+function payloadSignature(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return `s:${value.length}`;
+  try {
+    return `j:${JSON.stringify(value)?.length ?? 0}`;
+  } catch {
+    return "u";
+  }
+}
+
+function toolViewSignature(
+  toolCall: ToolCallDisplayRecord,
+  liveOutput?: ConversationLiveToolOutputSnapshot,
+): string {
+  const payloads = toolCall as ToolCallDisplayRecord & {
+    args?: unknown;
+    result?: unknown;
+    argsPreview?: unknown;
+    resultPreview?: unknown;
+  };
+  const mode = "result" in toolCall || "args" in toolCall ? "full" : "preview";
+  const overflow =
+    "previewOverflow" in toolCall ? toolCall.previewOverflow : undefined;
+  return [
+    toolCall.id,
+    toolCall.status,
+    toolCall.updatedAt,
+    mode,
+    payloadSignature(payloads.argsPreview ?? payloads.args),
+    payloadSignature(payloads.resultPreview ?? payloads.result),
+    overflow ? `${overflow.hidden}:${overflow.noun}:${overflow.direction}` : "",
+    liveOutput?.updatedAt ?? "",
+    liveOutput?.text.length ?? 0,
+  ].join("\0");
+}
+
+/** Cached wrapper around {@link parseToolView}, keyed by tool-call revision. */
+export function parseToolViewCached(
+  toolCall: ToolCallDisplayRecord,
+  liveOutput?: ConversationLiveToolOutputSnapshot,
+): ToolView {
+  const key = toolViewSignature(toolCall, liveOutput);
+  const cached = toolViewCache.get(key);
+  if (cached !== undefined) return cached;
+  const view = parseToolView(toolCall, liveOutput);
+  toolViewCache.set(key, view);
+  return view;
+}
+
+export function parseToolView(
+  toolCall: ToolCallDisplayRecord,
+  liveOutput?: ConversationLiveToolOutputSnapshot,
+): ToolView {
+  const payloads = toolCall as ToolCallDisplayRecord & {
+    args?: unknown;
+    result?: unknown;
+    argsPreview?: unknown;
+    resultPreview?: unknown;
+  };
+  const rawArgs = payloads.argsPreview ?? payloads.args;
+  const rawResult = payloads.resultPreview ?? payloads.result;
+  const args = asRecord(rawArgs);
+  const cwd = toolCall.cwd;
+  const result = parseToolExecutionResult(rawResult);
+  const outputLimits = outputLimitsFromDetails(result?.details);
+  const outputArtifacts = outputArtifactsFromDetails(result?.details);
+
+  switch (toolCall.toolName) {
+    case "read": {
+      const path = resolveToolPath(result?.path ?? stringField(args.path), cwd);
+      const relPath = relativePath(path, cwd);
+      const imageBlock = result?.contentBlocks?.find(
+        (block) => block.type === "image",
+      );
+      if (imageBlock && imageBlock.type === "image") {
+        return {
+          kind: "read",
+          path,
+          relPath,
+          image: {
+            dataUrl: imageDataUrl(imageBlock.mimeType, imageBlock.data),
+            mimeType: imageBlock.mimeType,
+          },
+          truncated: false,
+          outputLimits,
+          outputArtifacts,
+        };
+      }
+      const content = result?.content;
+      const hasRange =
+        typeof args.offset === "number" || typeof args.limit === "number";
+      let lineLabel: string | undefined;
+      const lineCount =
+        content === undefined
+          ? undefined
+          : actualTextLineCount(
+              content,
+              toolCall,
+              "lines",
+              "head",
+              outputLimits,
+            );
+      if (lineCount !== undefined) {
+        if (hasRange && typeof args.offset === "number" && lineCount > 0) {
+          const start = args.offset as number;
+          lineLabel = `lines ${start}–${start + lineCount - 1}`;
+        } else {
+          lineLabel = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
+        }
+      }
+      return {
+        kind: "read",
+        path,
+        relPath,
+        lineLabel,
+        lineCount,
+        content,
+        truncated: detailsTruncated(result?.details),
+        outputLimits,
+        outputArtifacts,
+      };
+    }
+
+    case "bash": {
+      const command = stringField(args.command);
+      const details = bashResultDetailsSchema.safeParse(result?.details);
+      const output = resultOutputText(result, rawResult, liveOutput);
+      const outputLineCount = actualTextLineCount(
+        output,
+        toolCall,
+        "lines",
+        "tail",
+        outputLimits,
+      );
+      return {
+        kind: "bash",
+        command,
+        exitCode: result?.exitCode,
+        signal: details.success
+          ? (details.data.signal ?? undefined)
+          : undefined,
+        backgroundTask:
+          details.success &&
+          details.data.execution?.disposition === "backgrounded"
+            ? {
+                taskId: details.data.execution.taskId,
+                status: details.data.execution.status,
+                elapsedMs: details.data.execution.elapsedMs,
+                terminalUpdate: details.data.execution.terminalUpdate,
+              }
+            : undefined,
+        output,
+        outputLineCount,
+        savedTo: details.success ? details.data.fullOutputPath : undefined,
+        truncated: detailsTruncated(result?.details),
+        live: !result && Boolean(liveOutput?.text),
+        outputLimits: liveOutput?.outputLimits
+          ? { ...outputLimits, live: { ...liveOutput.outputLimits } }
+          : outputLimits,
+        outputArtifacts,
+      };
+    }
+
+    case "python":
+    case "python_exec": {
+      const code = stringField(args.code);
+      const scriptInputPath = stringField(args.path);
+      const details = pythonResultDetailsSchema.safeParse(result?.details);
+      const detailScriptPath = details.success
+        ? details.data.scriptPath
+        : undefined;
+      const scriptPath = resolveToolPath(
+        detailScriptPath ?? scriptInputPath,
+        cwd,
+      );
+      const output = resultOutputText(result, rawResult, liveOutput);
+      const codeLineCount = code
+        ? actualPreviewCount(countLogicalLines(code), toolCall, "lines", "head")
+        : 0;
+      const outputLineCount = actualTextLineCount(
+        output,
+        toolCall,
+        "lines",
+        "tail",
+        outputLimits,
+      );
+      const inputMode = details.success
+        ? (details.data.inputMode ?? (scriptPath ? "file" : "inline"))
+        : scriptInputPath
+          ? "file"
+          : "inline";
+      return {
+        kind: "python",
+        inputMode,
+        code,
+        codeLineCount,
+        scriptPath,
+        relScriptPath: relativePath(scriptPath, cwd),
+        exitCode: result?.exitCode,
+        signal: details.success
+          ? (details.data.signal ?? undefined)
+          : undefined,
+        output,
+        outputLineCount,
+        savedTo: details.success ? details.data.fullOutputPath : undefined,
+        truncated: detailsTruncated(result?.details),
+        live: !result && Boolean(liveOutput?.text),
+        allowNetwork: details.success ? details.data.allowNetwork : undefined,
+        allowFileWrite: details.success
+          ? details.data.allowFileWrite
+          : undefined,
+        durationMs: details.success ? details.data.durationMs : undefined,
+        timedOut: details.success ? details.data.timedOut : undefined,
+        timeoutKilled: details.success ? details.data.timeoutKilled : undefined,
+        envKeys: details.success ? details.data.envKeys : undefined,
+        artifactDir: details.success ? details.data.artifactDir : undefined,
+        artifacts: details.success ? details.data.artifacts : undefined,
+        streams: details.success ? details.data.streams : undefined,
+        outputLimits: liveOutput?.outputLimits
+          ? { ...outputLimits, live: { ...liveOutput.outputLimits } }
+          : outputLimits,
+        outputArtifacts,
+      };
+    }
+
+    case "edit": {
+      const path = resolveToolPath(result?.path ?? stringField(args.path), cwd);
+      const relPath = relativePath(path, cwd);
+      const rawDetails = asRecord(result?.details);
+      const details = editOperationResultDetailsSchema.safeParse(rawDetails);
+      const operationCount = details.success
+        ? details.data.operationCount
+        : (nonnegativeIntegerField(rawDetails.operationCount) ??
+          editOperationCount(args));
+      const diff = details.success
+        ? details.data.diff
+        : stringField(rawDetails.diff);
+      const diffLineCount = actualPreviewCount(
+        countLogicalLines(diff),
+        toolCall,
+        "lines",
+        "tail",
+      );
+      const { additions, deletions } = diffStats(diff);
+      return {
+        kind: "edit",
+        path,
+        relPath,
+        operationCount,
+        additions,
+        deletions,
+        diff,
+        diffLineCount,
+        dryRun: details.success
+          ? details.data.dryRun
+          : typeof rawDetails.dryRun === "boolean"
+            ? rawDetails.dryRun
+            : undefined,
+      };
+    }
+
+    case "write": {
+      const path = resolveToolPath(result?.path ?? stringField(args.path), cwd);
+      const relPath = relativePath(path, cwd);
+      const content = stringField(args.content);
+      const byteMatch = result?.content?.match(/Wrote (\d+) bytes/);
+      const bytes = byteMatch ? Number(byteMatch[1]) : undefined;
+      const lineCount =
+        content === undefined
+          ? undefined
+          : actualPreviewCount(
+              countLogicalLines(content),
+              toolCall,
+              "lines",
+              "tail",
+            );
+      const charCount = content?.length;
+      return {
+        kind: "write",
+        path,
+        relPath,
+        bytes,
+        lineCount,
+        charCount,
+        content,
+      };
+    }
+
+    case "grep": {
+      const pattern = stringField(args.pattern);
+      const searchRoot =
+        resolveToolPath(result?.path, cwd) ??
+        resolveToolPath(stringField(args.path) ?? ".", cwd) ??
+        cwd;
+      const matches = (result?.matches ?? []).map((match) =>
+        trimMatchText({
+          ...match,
+          openPath: resolveToolPath(match.path, searchRoot) ?? match.path,
+        }),
+      );
+      const all = groupMatchesByFile(matches);
+      return {
+        kind: "grep",
+        pattern,
+        matchCount: actualPreviewCount(
+          matches.length,
+          toolCall,
+          "matches",
+          "head",
+        ),
+        fileCount: all.length,
+        allMatches: all,
+      };
+    }
+
+    case "find": {
+      const pattern = stringField(args.pattern);
+      const entries = result?.entries ?? [];
+      const searchRoot =
+        resolveToolPath(result?.path, cwd) ??
+        resolveToolPath(stringField(args.path) ?? ".", cwd) ??
+        cwd;
+      const paths = entries.map((entry) => entry.path);
+      const openPaths = entries.map(
+        (entry) => resolveToolPath(entry.path, searchRoot) ?? entry.path,
+      );
+      return {
+        kind: "find",
+        pattern,
+        paths,
+        openPaths,
+        count: actualPreviewCount(paths.length, toolCall, "files", "head"),
+      };
+    }
+
+    case "ls": {
+      const path = resolveToolPath(result?.path ?? stringField(args.path), cwd);
+      const relPath = relativePath(path, cwd) ?? ".";
+      const entries = (result?.entries ?? []).map((entry) => ({
+        ...entry,
+        openPath: resolveToolPath(entry.path, path ?? cwd) ?? entry.path,
+      }));
+      return {
+        kind: "ls",
+        path,
+        relPath,
+        entries,
+        total: actualPreviewCount(entries.length, toolCall, "entries", "head"),
+      };
+    }
+
+    case "ask_user": {
+      const parsed = askUserResultSchema.safeParse(rawResult);
+      const data = parsed.success ? parsed.data : undefined;
+      return {
+        kind: "ask_user",
+        question: data?.question ?? stringField(args.question),
+        context: data?.context ?? stringField(args.context),
+        recommendation:
+          data?.recommendation ?? stringField(args.recommendation),
+        answer: data?.response,
+        dismissed: Boolean(data?.dismissed),
+        dismissedReason: data?.dismissedReason,
+      };
+    }
+
+    case "todos_set":
+    case "todos_get": {
+      const parsed = todosResultSchema.safeParse(rawResult);
+      const fromResult = parsed.success
+        ? parsed.data.details?.todos
+        : undefined;
+      const items = fromResult ?? todoItemsField(args.todos) ?? [];
+      const completed = items.filter((item) => item.done).length;
+      return {
+        kind: "todos",
+        items,
+        completed,
+        total: items.length,
+      };
+    }
+
+    case "task_start": {
+      const data = parseTaskStartResult(rawResult);
+      return {
+        kind: "task_action",
+        action: "start",
+        ...data,
+        liveLog: liveOutput?.text,
+      };
+    }
+
+    case "task_control": {
+      const data = parseTaskControlResult(rawResult);
+      const action =
+        stringField(args.action) === "restart" ? "restart" : "stop";
+      return {
+        kind: "task_action",
+        action,
+        ...data,
+        outcomeCount: data.outcomes?.length,
+        liveLog: liveOutput?.text,
+      };
+    }
+
+    case "task_status": {
+      const data = parseTaskStatusResult(rawResult);
+      const hiddenTaskCount = previewOverflowHidden(toolCall, "tasks", "head");
+      return {
+        kind: "task_status",
+        ...data,
+        hiddenTaskCount,
+        taskCount: data.tasks.length + hiddenTaskCount,
+      };
+    }
+
+    case "task_logs": {
+      const data = parseTaskLogsResult(rawResult);
+      return {
+        kind: "task_logs",
+        ...data,
+        eventCount: actualPreviewCount(
+          data.events.length,
+          toolCall,
+          "events",
+          "tail",
+        ),
+      };
+    }
+
+    case "explore": {
+      const parsed = exploreResultPreviewSchema.safeParse(rawResult);
+      const data = parsed.success ? parsed.data : undefined;
+      const task = stringField(args.task);
+      const liveProgress = parseExploreProgressLog(liveOutput?.text);
+      return {
+        kind: "explore",
+        task,
+        reports: data?.reports ?? [],
+        liveUpdates: liveProgress.updates,
+        liveLog: liveProgress.fallback,
+      };
+    }
+
+    case "plan_mode_enter": {
+      const resultRecord = asRecord(rawResult);
+      const planDir = stringField(resultRecord.planDir);
+      return {
+        kind: "plan_mode",
+        action: "enter",
+        summary: firstTextBlock(rawResult),
+        planPath: planDir,
+      };
+    }
+
+    case "plan_mode_present": {
+      const resultRecord = asRecord(rawResult);
+      const review = asRecord(resultRecord.review);
+      const interactionSummary = toolCall.interactions.find(
+        (interaction) => interaction.kind === "plan_review",
+      )?.request.summary;
+      const planPath =
+        stringField(review.planPath) ?? stringField(args.file_path);
+      const outcome =
+        stringField(resultRecord.outcome) ?? stringField(review.status);
+      return {
+        kind: "plan_mode",
+        action: "present",
+        summary:
+          stringField(resultRecord.feedback) ?? firstTextBlock(rawResult),
+        planPreview:
+          stringField(review.content) ??
+          stringField(review.summary) ??
+          interactionSummary,
+        planPath,
+        outcome,
+      };
+    }
+
+    case "plan_mode_force_exit": {
+      const resultRecord = asRecord(rawResult);
+      const reason = stringField(resultRecord.reason);
+      return {
+        kind: "plan_mode",
+        action: "force_exit",
+        summary: reason,
+      };
+    }
+
+    case "jira_search_users":
+    case "jira_search_issues":
+    case "jira_get_issue":
+    case "jira_get_project":
+    case "jira_search_boards":
+    case "jira_get_board":
+    case "jira_get_sprint":
+    case "jira_download_attachment":
+    case "jira_create_issue":
+    case "jira_update_issue":
+    case "jira_manage_comment":
+    case "jira_manage_worklog":
+    case "jira_manage_issue_link":
+    case "jira_manage_attachment":
+    case "jira_manage_sprint":
+    case "jira_manage_backlog":
+    case "jira_transition_issue":
+      return parseJiraView(toolCall, args, rawResult, liveOutput);
+
+    case "confluence_search_spaces":
+    case "confluence_search_pages":
+    case "confluence_get_page":
+    case "confluence_download_page":
+    case "confluence_create_page":
+    case "confluence_update_page":
+    case "confluence_manage_comment":
+    case "confluence_manage_page":
+    case "confluence_manage_label":
+    case "confluence_manage_restriction":
+    case "confluence_manage_attachment":
+      return parseConfluenceView(toolCall, args, rawResult, liveOutput);
+
+    case "web_search": {
+      const details = webSearchResultDetailsSchema.safeParse(result?.details);
+      const query = details.success
+        ? details.data.query
+        : stringField(args.query);
+      const results = details.success ? details.data.results : [];
+      return {
+        kind: "web_search",
+        query,
+        answer: details.success ? details.data.answer : undefined,
+        results,
+        outputLimits,
+        outputArtifacts,
+      };
+    }
+
+    case "explain_image": {
+      const details = explainImageResultDetailsSchema.safeParse(
+        result?.details,
+      );
+      const data = details.success ? details.data : undefined;
+      const path = resolveToolPath(
+        data?.path ?? result?.path ?? stringField(args.path),
+        cwd,
+      );
+      const live = toolCall.status === "running" && Boolean(liveOutput);
+      const boundedLiveChunks = (() => {
+        if (!liveOutput) return [];
+        let remaining = liveOutput.text.length;
+        const chunks = [] as typeof liveOutput.chunks;
+        for (let index = liveOutput.chunks.length - 1; index >= 0; index -= 1) {
+          if (remaining <= 0) break;
+          const chunk = liveOutput.chunks[index];
+          if (!chunk) continue;
+          const text = chunk.text.slice(
+            Math.max(0, chunk.text.length - remaining),
+          );
+          chunks.unshift({ ...chunk, text });
+          remaining -= text.length;
+        }
+        return chunks;
+      })();
+      const liveText = (stream: "thinking" | "text") =>
+        boundedLiveChunks
+          .filter((chunk) => chunk.stream === stream)
+          .map((chunk) => chunk.text)
+          .join("");
+      return {
+        kind: "explain_image",
+        path,
+        relPath: relativePath(path, cwd),
+        explanation: live
+          ? undefined
+          : (data?.explanation ?? resultOutputText(result, rawResult)) ||
+            undefined,
+        thinking: live ? liveText("thinking") : undefined,
+        liveExplanation: live ? liveText("text") : undefined,
+        live,
+        outputLimits: liveOutput?.outputLimits
+          ? {
+              ...outputLimits,
+              live: {
+                capped: liveOutput.outputLimits.capped,
+                direction: liveOutput.outputLimits.direction,
+                maxChars: liveOutput.outputLimits.maxChars,
+                maxChunks: liveOutput.outputLimits.maxChunks,
+                totalChars: liveOutput.outputLimits.totalChars,
+                displayedChars: liveOutput.outputLimits.displayedChars,
+                omittedChars: liveOutput.outputLimits.omittedChars,
+                totalLines: liveOutput.outputLimits.totalLines,
+                displayedLines: liveOutput.outputLimits.displayedLines,
+                omittedLines: liveOutput.outputLimits.omittedLines,
+              },
+            }
+          : outputLimits,
+      };
+    }
+
+    case "web_fetch": {
+      const details = webFetchResultDetailsSchema.safeParse(result?.details);
+      const data = details.success ? details.data : undefined;
+      const url = data?.url ?? stringField(args.url);
+      return {
+        kind: "web_fetch",
+        url,
+        status: data?.status,
+        contentType: data?.contentType,
+        size: data?.size,
+        savedTo: data?.savedTo,
+        converted: data?.converted ?? false,
+        content: result?.content,
+        outputLimits,
+        outputArtifacts,
+      };
+    }
+
+    default: {
+      const resultText = resultOutputText(result, rawResult, liveOutput);
+      const safeResultText = resultText
+        ? redactStructuredValue("result", resultText).slice(0, 6_000)
+        : undefined;
+      return {
+        kind: "generic",
+        toolName: toolCall.toolName,
+        args: toolArgumentSource({ args: rawArgs }).structuredEntries(),
+        result: toolArgumentSource({ args: rawResult }).structuredEntries(),
+        resultText: safeResultText,
+      };
+    }
+  }
+}

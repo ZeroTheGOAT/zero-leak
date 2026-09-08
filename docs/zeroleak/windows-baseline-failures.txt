@@ -1,0 +1,55 @@
+# Upstream Nerve test failures on Windows (host-environment, pre-existing)
+# Captured from the unmodified upstream tree at 265be58 on win32 x64, Node 24.13.1.
+# Upstream runs the full suite on ubuntu-latest only; see .github/workflows/ci.yml.
+
+✖ Explore report persistence
+✖ PromptSuggestionService
+✖ SQLite idempotency coalesces duplicates and survives reconstruction
+✖ Workbench tool permission
+✖ accepts project-relative task cwd and rejects absolute or traversing cwd
+✖ active run lookup is rebuilt from conversation journals
+✖ agent-attributed compaction replaces the shared model context
+✖ builds a bounded head-tail result for large foreground output
+✖ cancels all parallel explore children with their parent run
+✖ captures a process that closes before supervisor spawn returns
+✖ captures output before delayed runtime identity resolves
+✖ checkpointing atomically folds replay deltas
+✖ continues a non-retryable model failure after changing models
+✖ conversation commits materialize typed records and durable events
+✖ creates loadable user suggestions without overwriting and reports precedence
+✖ delivery recovery checkpoints candidates and skips settled runs
+✖ exhausts three retries for OpenAI processing errors and remains continuable
+✖ explore subagent transcript isolation
+✖ failed delta persistence leaves the resident projection unchanged
+✖ force-kills a promoted active task during shutdown
+✖ force-kills the process tree when foreground bash is aborted
+✖ hot commits append bounded deltas without rewriting the checkpoint
+✖ hot journal commits update only affected materialized records
+✖ hot leaf commits update only the affected context owner
+✖ hydrates exited foreground bash tasks as visible interrupted tasks
+✖ keeps a promoted task supervised for explicit cancellation
+✖ lists and evaluates the built-in Git suggestions
+✖ matches readyPattern across stdout chunks
+✖ orchestration task tools
+✖ passes stored env to replacement spawn on restart
+✖ persists per-suggestion enablement and publishes an event
+✖ polls readyUrl and marks the task ready on any HTTP response
+✖ preserves env when restarting an interrupted recovered record
+✖ projects external targets through the permission rule-set evaluator
+✖ promotes a still-running foreground bash task with agent scope
+✖ publishes, heartbeats, republishes, annotates, and removes one lease
+✖ repairs a persisted child active-agent reference during hydration
+✖ reports malformed user suggestion YAML without hiding built-ins
+✖ retries a valid checkpoint and projects completion back to idle
+✖ returns normal bash output and removes the hidden task when it finishes before promotion
+✖ run commits preserve per-run compare-and-swap
+✖ run state and deliveries replay from the conversation journal
+✖ stores env config-side and exposes only redacted envInfo
+✖ task manager cancel lifecycle
+✖ task manager foreground bash auto-promotion
+✖ task manager launch env
+✖ task manager log buffering and readiness
+✖ uses process exit evidence when inherited stdio remains open
+✖ waits for output streams to drain after process close
+✖ workbench coordinator-owned provider retry
+✖ wraps prose, preserves fenced code, and atomically reports exact size facts

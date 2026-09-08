@@ -1,0 +1,102 @@
+import type {
+  PermissionLevel,
+  ToolRisk,
+} from "@nervekit/contracts/permissions";
+import type { ToolGroupName, ToolName } from "@nervekit/contracts/tools";
+import type {
+  ToolExecutionContext,
+  ToolExecutionOutputUpdate,
+  ToolExecutionResult,
+} from "../execution/execution-context.js";
+
+export type ToolDecisionKind = "allow" | "approval" | "deny";
+
+export type ToolDecision = {
+  decision: ToolDecisionKind;
+  risk: ToolRisk;
+  reason: string;
+  normalizedArgs: Record<string, unknown>;
+};
+
+export type ToolHandlerContext = ToolExecutionContext & {
+  toolName: ToolName;
+  identity?: unknown;
+};
+
+export type ToolHandler = (
+  args: Record<string, unknown>,
+  context: ToolHandlerContext,
+) => Promise<ToolExecutionResult>;
+
+export type ToolHandlerRegistry = Partial<Record<ToolName, ToolHandler>>;
+
+export type ToolAvailabilityInput = {
+  permissionLevel?: PermissionLevel;
+  enabledNames?: readonly ToolName[];
+  disabledNames?: readonly ToolName[];
+  enabledGroups?: readonly ToolGroupName[];
+  disabledGroups?: readonly ToolGroupName[];
+  unavailableNames?: readonly ToolName[];
+  capabilities?: Partial<Record<string, boolean>>;
+  capabilityForTool?: Partial<Record<ToolName, string>>;
+  includeHostTools?: boolean;
+};
+
+export type ToolLifecycleHooks = {
+  requested?: (
+    name: ToolName,
+    args: Record<string, unknown>,
+  ) => void | Promise<void>;
+  started?: (
+    name: ToolName,
+    args: Record<string, unknown>,
+  ) => void | Promise<void>;
+  completed?: (
+    name: ToolName,
+    result: ToolExecutionResult,
+  ) => void | Promise<void>;
+  failed?: (name: ToolName, error: unknown) => void | Promise<void>;
+  output?: (
+    name: ToolName,
+    update: ToolExecutionOutputUpdate,
+  ) => void | Promise<void>;
+};
+
+export type RuntimeToolPermissionInput = {
+  permissionLevel: PermissionLevel;
+  permissionRuleSetId?: string;
+  projectDir?: string;
+  nerveHome?: string;
+  cwd?: string;
+  conversationId?: string;
+  groupRequireApproval?: "never" | "risky" | "always";
+};
+
+export class ToolRuntimeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "ToolRuntimeError";
+  }
+}
+
+export class ToolUnavailableError extends ToolRuntimeError {
+  constructor(toolName: string) {
+    super(
+      "TOOL_UNAVAILABLE",
+      `Tool '${toolName}' is not available in this host.`,
+      {
+        toolName,
+      },
+    );
+  }
+}
+
+export class ToolValidationError extends ToolRuntimeError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super("INVALID_TOOL_ARGUMENTS", message, details);
+  }
+}

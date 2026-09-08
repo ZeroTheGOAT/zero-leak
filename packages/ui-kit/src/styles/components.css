@@ -1,0 +1,5 @@
+/* Shared semantic component classes used across ZeroLeak AI Svelte apps. */
+
+@import "./components/dialog.css";
+@import "./components/popover.css";
+@import "./components/terminal-output.css";

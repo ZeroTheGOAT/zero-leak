@@ -1,0 +1,105 @@
+import { join } from "node:path";
+import type { ChildExit } from "./contracts.js";
+
+const MAX_OUTPUT_LINES = 200;
+
+/** Bounded rolling buffer of owned-child stdout/stderr lines. */
+export class OutputBuffer {
+  private readonly lines: string[] = [];
+
+  append(stream: "stdout" | "stderr", chunk: unknown): void {
+    const text = Buffer.isBuffer(chunk)
+      ? chunk.toString("utf8")
+      : String(chunk);
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      this.lines.push(`[${stream}] ${line}`);
+    }
+    if (this.lines.length > MAX_OUTPUT_LINES) {
+      this.lines.splice(0, this.lines.length - MAX_OUTPUT_LINES);
+    }
+  }
+
+  tail(): string {
+    return this.lines.length > 0 ? this.lines.join("\n") : "(no output)";
+  }
+}
+
+export function formatExit(exit: ChildExit): string {
+  if (exit.signal) return ` after signal ${exit.signal}`;
+  if (exit.code !== null) return ` with code ${exit.code}`;
+  return "";
+}
+
+export class DaemonStartupError extends Error {
+  constructor(
+    message: string,
+    readonly daemonOutput: string,
+  ) {
+    super(message);
+    this.name = "DaemonStartupError";
+  }
+
+  hasDaemonErrorCode(code: string): boolean {
+    return this.daemonOutput
+      .split(/[^A-Z0-9_]+/)
+      .some((token) => token === code);
+  }
+}
+
+export function isDaemonStartupErrorCode(
+  error: unknown,
+  code: string,
+): error is DaemonStartupError {
+  return error instanceof DaemonStartupError && error.hasDaemonErrorCode(code);
+}
+
+export function isHeapExhaustionOutput(output: string): boolean {
+  return /(?:heap out of memory|allocation failed[^\n]*javascript heap|young object promotion failed)/i.test(
+    output,
+  );
+}
+
+export function daemonStartupError(
+  message: string,
+  output: OutputBuffer,
+  context?: {
+    dataDir?: string;
+    readinessTimeoutMs?: number;
+    crashReportPath?: string;
+    effectiveMaxOldSpaceMb?: number;
+  },
+): DaemonStartupError {
+  const diagnostics = [
+    context?.readinessTimeoutMs
+      ? `Startup timeout: ${context.readinessTimeoutMs}ms`
+      : undefined,
+    context?.dataDir ? `Data dir: ${context.dataDir}` : undefined,
+    context?.dataDir
+      ? `Application log: ${join(
+          context.dataDir,
+          "logs",
+          `application-${new Date().toISOString().slice(0, 10)}.jsonl`,
+        )}`
+      : undefined,
+    context?.crashReportPath
+      ? `Crash report: ${context.crashReportPath}`
+      : undefined,
+    context?.effectiveMaxOldSpaceMb
+      ? `Effective daemon heap: ${context.effectiveMaxOldSpaceMb} MB`
+      : undefined,
+  ].filter((line): line is string => Boolean(line));
+
+  const daemonOutput = output.tail();
+  const heapGuidance = isHeapExhaustionOutput(daemonOutput)
+    ? "The daemon exhausted its JavaScript heap. Raise application.daemon.maxOldSpaceMb or NERVE_DAEMON_MAX_OLD_SPACE_MB and restart the desktop app."
+    : undefined;
+  return new DaemonStartupError(
+    `${message}\n\nDaemon output:\n${daemonOutput}${
+      diagnostics.length > 0
+        ? `\n\nDiagnostics:\n${diagnostics.map((line) => `- ${line}`).join("\n")}`
+        : ""
+    }${heapGuidance ? `\n\nGuidance:\n${heapGuidance}` : ""}`,
+    daemonOutput,
+  );
+}

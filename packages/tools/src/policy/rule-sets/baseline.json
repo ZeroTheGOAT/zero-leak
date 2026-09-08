@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "baseline",
+  "name": "Baseline",
+  "description": "Allow reads and interaction boundaries; prompt for everything else.",
+  "source": "builtin",
+  "enabled": true,
+  "rules": [
+    {
+      "id": "allow-interaction",
+      "enabled": true,
+      "priority": 200,
+      "enforcement": "overridable",
+      "when": { "baseRisks": ["interaction"] },
+      "decision": "allow"
+    },
+    {
+      "id": "allow-read",
+      "enabled": true,
+      "priority": 100,
+      "enforcement": "overridable",
+      "when": { "baseRisks": ["read"] },
+      "decision": "allow"
+    },
+    {
+      "id": "prompt-everything-else",
+      "enabled": true,
+      "priority": 0,
+      "enforcement": "overridable",
+      "when": {},
+      "decision": "prompt"
+    }
+  ]
+}

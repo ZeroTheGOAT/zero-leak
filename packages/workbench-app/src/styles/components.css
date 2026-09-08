@@ -1,0 +1,6 @@
+/* Workbench-specific semantic component classes. Shared primitives/helpers live
+ * in @nervekit/ui-kit/styles/components.css. */
+
+@import "./components/composer.css";
+@import "./components/shell.css";
+@import "./components/panel.css";

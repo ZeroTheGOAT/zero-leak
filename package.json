@@ -1,0 +1,40 @@
+{
+  "name": "zeroleak-ai",
+  "version": "0.26.0",
+  "private": true,
+  "author": "ThilinaTLM",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.20.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build && node scripts/copy-workbench-app-dist-to-workbench-server.mjs && node scripts/check-built-package-exports.mjs",
+    "build:native": "pnpm --filter @nervekit/native build:native",
+    "build:workbench-runtime": "pnpm --filter @nervekit/workbench-app... --filter @nervekit/workbench-server... build && node scripts/copy-workbench-app-dist-to-workbench-server.mjs",
+    "fix": "pnpm --filter @nervekit/native fix:native && oxfmt && eslint . --fix && oxfmt",
+    "check": "oxfmt --check && eslint . && node scripts/check-package-boundaries.mjs && pnpm -r check",
+    "test:affected": "pnpm build:native && node --test \"scripts/**/*.test.mjs\" && pnpm --workspace-concurrency=1 --filter \"...[origin/main]\" --if-present test",
+    "test:full": "pnpm build:native && node --test \"scripts/**/*.test.mjs\" && pnpm --workspace-concurrency=1 -r --if-present test",
+    "dev": "pnpm build:native && pnpm --filter @nervekit/contracts --filter @nervekit/protocol --filter @nervekit/harness --filter @nervekit/tools build && pnpm --parallel --stream --filter @nervekit/workbench-server --filter @nervekit/workbench-app dev",
+    "dev:ui": "pnpm --filter @nervekit/contracts --filter @nervekit/protocol --filter @nervekit/harness --filter @nervekit/tools build && pnpm --filter @nervekit/workbench-app dev",
+    "desktop": "pnpm --filter @nervekit/desktop-shell dev --"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.6.0",
+    "eslint-plugin-svelte": "3.20.0",
+    "globals": "17.7.0",
+    "oxfmt": "0.58.0",
+    "png-to-ico": "3.0.2",
+    "sharp": "^0.35.3",
+    "svelte": "5.56.3",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.63.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

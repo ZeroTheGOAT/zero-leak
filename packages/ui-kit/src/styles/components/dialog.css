@@ -1,0 +1,195 @@
+/*
+ * Shared modal chrome for DialogShell and ConfirmDialog/AlertDialog.
+ * One visual language across every modal: flat sidebar-tinted scrim, card
+ * surface with the theme radius and compact, unified chrome. Entrance and
+ * exit motion comes from tw-animate data-state utilities applied by the
+ * components; content inside a dialog body is styled by consumers with
+ * Tailwind token utilities.
+ */
+.dialog-overlay {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  isolation: isolate;
+  background: color-mix(in oklab, var(--sidebar) 72%, transparent);
+}
+
+.dialog-content {
+  position: fixed;
+  z-index: 50;
+  top: 50%;
+  top: 50dvh;
+  left: 50%;
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(760px, calc(100vw - 32px));
+  width: min(760px, calc(100dvw - 2rem));
+  max-height: 84vh;
+  max-height: min(84dvh, calc(100dvh - 2rem));
+  /* The translate property (not transform) so tw-animate zoom keyframes
+   * compose with centering instead of replacing it. */
+  translate: -50% -50%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: var(--shadow-xl);
+}
+
+.dialog-content-sm {
+  width: min(30rem, calc(100vw - 32px));
+  width: min(30rem, calc(100dvw - 2rem));
+}
+
+.dialog-content-md {
+  width: min(672px, calc(100vw - 32px));
+  width: min(672px, calc(100dvw - 2rem));
+  max-height: 90vh;
+  max-height: min(90dvh, calc(100dvh - 2rem));
+}
+
+.dialog-content-wide {
+  width: min(960px, calc(100vw - 32px));
+  width: min(960px, calc(100dvw - 2rem));
+  max-height: 90vh;
+  max-height: min(90dvh, calc(100dvh - 2rem));
+}
+
+.dialog-content-xl {
+  width: min(1152px, calc(100vw - 32px));
+  width: min(1152px, calc(100dvw - 2rem));
+  max-height: 44rem;
+  max-height: min(44rem, calc(100dvh - 2rem));
+}
+
+.dialog-content-wide-viewport {
+  width: min(960px, calc(100vw - 2rem));
+  width: min(960px, calc(100dvw - 2rem));
+  height: min(760px, calc(100vh - 2rem));
+  height: min(760px, calc(100dvh - 2rem));
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+}
+
+.dialog-content-viewport {
+  width: min(1440px, calc(100vw - 3rem));
+  width: min(1440px, calc(100dvw - 3rem));
+  height: min(900px, calc(100vh - 3rem));
+  height: min(900px, calc(100dvh - 3rem));
+  max-height: calc(100vh - 3rem);
+  max-height: calc(100dvh - 3rem);
+}
+
+/* Confirmation dialogs use the same surface in a tighter two-row layout. */
+.dialog-content-confirm {
+  grid-template-rows: auto auto;
+  width: min(26rem, calc(100vw - 32px));
+  width: min(26rem, calc(100dvw - 2rem));
+}
+
+/* Header and footer remain visually connected to the body. Hairlines clarify
+ * fixed chrome around scrolling content without introducing separate bands. */
+.dialog-header,
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--card);
+  padding: 0.5rem 0.75rem;
+}
+
+.dialog-header {
+  justify-content: space-between;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+.dialog-header-actions {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.dialog-footer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+.dialog-title-block {
+  display: grid;
+  min-width: min(16rem, 40%);
+  gap: 0.125rem;
+}
+
+.dialog-title {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.18;
+}
+
+.dialog-description {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+.dialog-close {
+  display: inline-grid;
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.dialog-close:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.dialog-close:focus-visible {
+  border-color: var(--ring);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 28%, transparent);
+}
+
+.dialog-body {
+  min-height: 0;
+  overflow: auto;
+  background: var(--card);
+  padding: 0.75rem 0.875rem;
+}
+
+/* Flush bodies host edge-to-edge lists that own their scrolling, so the shell
+ * must not add a second scrollbar around them. */
+.dialog-body-flush {
+  overflow: hidden;
+  padding: 0;
+}
+
+.dialog-content-confirm .dialog-header {
+  border-bottom: 0;
+  padding: 0.75rem 0.75rem 0.25rem;
+}
+
+.dialog-content-confirm .dialog-title-block {
+  min-width: 0;
+}
+
+.dialog-content-confirm .dialog-footer {
+  border-top: 0;
+  padding: 0.5rem 0.75rem 0.75rem;
+}

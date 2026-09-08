@@ -1,0 +1,127 @@
+import type { SetupGuideArea } from "./setup-content.js";
+
+export type GuideId =
+  | "atlassian"
+  | "open-project"
+  | "provider"
+  | "scoped-models"
+  | "agent-defaults"
+  | "web-search"
+  | "workbench";
+
+export type GuidePriority = "must-do" | "highly-recommended" | "optional";
+export type GuideCategory = "setup" | "walkthrough";
+export type GuideLifecycle = "available" | "new" | "upcoming";
+export type GuideCompletionSignal =
+  | "atlassian-ready"
+  | "project-open"
+  | "provider-ready"
+  | "web-search-ready";
+
+export type GuideRun =
+  | { kind: "setup-coach"; area: SetupGuideArea }
+  | { kind: "workbench-tour" };
+
+export type GuideDefinition = {
+  id: GuideId;
+  version: number;
+  title: string;
+  description: string;
+  category: GuideCategory;
+  priority: GuidePriority;
+  lifecycle: GuideLifecycle;
+  actionLabel?: string;
+  run?: GuideRun;
+  completionSignal?: GuideCompletionSignal;
+};
+
+export const guideCatalog: readonly GuideDefinition[] = [
+  {
+    id: "open-project",
+    version: 1,
+    title: "Open a project",
+    description:
+      "Choose a project folder so ZeroLeak AI can keep conversations, files, Git changes, and agent work together.",
+    category: "setup",
+    priority: "must-do",
+    lifecycle: "available",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "open-project" },
+    completionSignal: "project-open",
+  },
+  {
+    id: "provider",
+    version: 1,
+    title: "Connect a model provider",
+    description:
+      "Authenticate a subscription, API key, or compatible custom provider before prompting an agent.",
+    category: "setup",
+    priority: "must-do",
+    lifecycle: "available",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "provider" },
+    completionSignal: "provider-ready",
+  },
+  {
+    id: "scoped-models",
+    version: 1,
+    title: "Configure scoped models",
+    description:
+      "Choose which authenticated models appear in the composer so model selection stays focused.",
+    category: "setup",
+    priority: "highly-recommended",
+    lifecycle: "available",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "scoped-models" },
+  },
+  {
+    id: "agent-defaults",
+    version: 1,
+    title: "Configure agent defaults",
+    description:
+      "Choose the mode, permissions, model, and thinking defaults used by new agents.",
+    category: "setup",
+    priority: "highly-recommended",
+    lifecycle: "available",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "agent-defaults" },
+  },
+  {
+    id: "web-search",
+    version: 1,
+    title: "Set up web search",
+    description:
+      "Add a Tavily API key to let agents use the web_search tool for current information.",
+    category: "setup",
+    priority: "optional",
+    lifecycle: "available",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "web-search" },
+    completionSignal: "web-search-ready",
+  },
+  {
+    id: "atlassian",
+    version: 1,
+    title: "Connect Jira and Confluence",
+    description:
+      "Add an Atlassian profile, choose it for Jira and Confluence, and enable both tool groups for agent access.",
+    category: "setup",
+    priority: "optional",
+    lifecycle: "new",
+    actionLabel: "Start guide",
+    run: { kind: "setup-coach", area: "atlassian" },
+    completionSignal: "atlassian-ready",
+  },
+  {
+    id: "workbench",
+    version: 1,
+    title: "Work through the Workbench",
+    description:
+      "Tour conversations, composer controls, panels, Git workflows, tasks, providers, settings, and Help.",
+    category: "walkthrough",
+    priority: "highly-recommended",
+    lifecycle: "available",
+    actionLabel: "Start tour",
+    run: { kind: "workbench-tour" },
+  },
+];

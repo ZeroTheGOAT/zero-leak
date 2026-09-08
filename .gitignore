@@ -1,0 +1,42 @@
+node_modules/
+dist/
+.svelte-kit/
+.astro/
+.vite/
+.DS_Store
+*.tsbuildinfo
+packages/desktop-shell/build/
+packages/desktop-shell/release/
+packages/native/prebuilds/
+target/
+release/
+.env
+.env.*
+!.env.example
+
+# Editor & Agents
+.vscode
+.zed
+.nerve
+.zeroleak
+.pi
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated brand assets
+assets/brand/*
+!assets/brand/nerve-mark.svg
+!assets/brand/nerve-mark-small.svg
+!assets/brand/nerve-app-icon.svg
+dogfood-output/
+.idea/

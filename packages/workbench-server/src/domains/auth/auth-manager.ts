@@ -1,0 +1,276 @@
+import {
+  type Api,
+  type AuthInteraction,
+  type AuthResult,
+  type Credential,
+  type CredentialStore,
+  type Model,
+  type MutableModels,
+  type OAuthCredentials,
+  type Provider,
+} from "@earendil-works/pi-ai";
+import {
+  isLocalRuntimeProvider,
+  localModels,
+  localRuntimeEnvVarName,
+} from "@nervekit/harness/models";
+import type { AuthProviderMetadata } from "@nervekit/contracts/auth";
+import type { ModelSelection } from "@nervekit/contracts/models";
+import type { SecretProvider } from "../../infrastructure/secrets/index.js";
+import {
+  PiAiCredentialStore,
+  providerApiKeySecretName,
+  providerOAuthSecretName,
+} from "./pi-ai-credential-store.js";
+
+export { providerApiKeySecretName, providerOAuthSecretName };
+
+export type ApiKeyCredential = {
+  type: "api_key";
+  key: string;
+};
+
+export type OAuthCredential = {
+  type: "oauth";
+} & OAuthCredentials;
+
+export type ProviderCredential = ApiKeyCredential | OAuthCredential;
+
+export interface ModelRequestAuth {
+  apiKey?: string;
+  baseUrl?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+}
+
+const ANTHROPIC_OAUTH_WARNING =
+  "Anthropic subscription auth may use paid extra usage outside normal Claude plan limits.";
+
+function displayNameForProvider(provider: string): string {
+  if (provider.startsWith("atlassian:")) return "Atlassian profile";
+  if (provider.startsWith("tavily:")) return "Tavily profile";
+  const known: Record<string, string> = {
+    confluence: "Confluence",
+    jira: "Jira",
+    tavily: "Tavily",
+  };
+  return known[provider] ?? provider;
+}
+
+function isIntegrationProfileProvider(provider: string): boolean {
+  return provider.startsWith("atlassian:") || provider.startsWith("tavily:");
+}
+
+/**
+ * The ambient variable a provider reads its key from. Local runtimes own a
+ * `ZEROLEAK_*` namespace of their own, so they are resolved from the provider
+ * object rather than from this table.
+ */
+export function providerEnvVarName(provider: string): string {
+  const known: Record<string, string> = {
+    anthropic: "ANTHROPIC_API_KEY",
+    google: "GOOGLE_API_KEY",
+    groq: "GROQ_API_KEY",
+    openai: "OPENAI_API_KEY",
+    openrouter: "OPENROUTER_API_KEY",
+    radius: "RADIUS_API_KEY",
+    confluence: "CONFLUENCE_API_TOKEN",
+    jira: "JIRA_API_TOKEN",
+    tavily: "TAVILY_API_KEY",
+    xai: "XAI_API_KEY",
+  };
+  return (
+    known[provider] ??
+    `${provider.replaceAll(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_API_KEY`
+  );
+}
+
+function asProviderCredential(
+  credential: Credential | undefined,
+): ProviderCredential | undefined {
+  if (!credential) return undefined;
+  if (credential.type === "oauth") return credential;
+  return credential.key ? { type: "api_key", key: credential.key } : undefined;
+}
+
+function requestAuth(
+  resolution: AuthResult | undefined,
+): ModelRequestAuth | undefined {
+  if (!resolution) return undefined;
+  const headers = resolution.auth.headers
+    ? Object.fromEntries(
+        Object.entries(resolution.auth.headers).filter(
+          (entry): entry is [string, string] => entry[1] !== null,
+        ),
+      )
+    : undefined;
+  const result: ModelRequestAuth = {
+    apiKey: resolution.auth.apiKey,
+    baseUrl: resolution.auth.baseUrl,
+    headers,
+    env: resolution.env,
+  };
+  return Object.values(result).some((value) => value !== undefined)
+    ? result
+    : undefined;
+}
+
+export type AuthManagerOptions = {
+  credentials?: CredentialStore;
+  models?: MutableModels;
+};
+
+export class AuthManager {
+  readonly credentials: CredentialStore;
+  readonly models: MutableModels;
+
+  constructor(
+    private readonly secrets: SecretProvider,
+    options: AuthManagerOptions = {},
+  ) {
+    this.credentials = options.credentials ?? new PiAiCredentialStore(secrets);
+    // No runtimes by default: a caller that does not supply `models` gets an
+    // empty registry rather than pi-ai's public cloud catalogue.
+    this.models =
+      options.models ??
+      localModels({ credentials: this.credentials, runtimes: [] });
+  }
+
+  getProvider(providerId: string): Provider | undefined {
+    return this.models.getProvider(providerId);
+  }
+
+  async getCredential(
+    provider: string,
+  ): Promise<ProviderCredential | undefined> {
+    return asProviderCredential(await this.credentials.read(provider));
+  }
+
+  async setApiKey(provider: string, apiKey: string): Promise<void> {
+    await this.credentials.modify(provider, async () => ({
+      type: "api_key",
+      key: apiKey,
+    }));
+  }
+
+  async setOAuth(
+    provider: string,
+    credential: OAuthCredentials,
+  ): Promise<void> {
+    await this.credentials.modify(provider, async () => ({
+      type: "oauth",
+      ...credential,
+    }));
+  }
+
+  async loginOAuth(
+    provider: string,
+    interaction: AuthInteraction,
+  ): Promise<OAuthCredential> {
+    const credential = await this.models.login(provider, "oauth", interaction);
+    if (credential.type !== "oauth") {
+      throw new Error(
+        `OAuth login for ${provider} returned a non-OAuth credential`,
+      );
+    }
+    await this.models.refresh({ force: true, signal: interaction.signal });
+    return credential;
+  }
+
+  async deleteCredential(provider: string): Promise<void> {
+    if (this.models.getProvider(provider)) await this.models.logout(provider);
+    else await this.credentials.delete(provider);
+  }
+
+  async credentialType(
+    provider: string,
+  ): Promise<ProviderCredential["type"] | undefined> {
+    return (await this.getCredential(provider))?.type;
+  }
+
+  async getApiKey(provider: string): Promise<string | undefined> {
+    const knownProvider = this.models.getProvider(provider);
+    if (knownProvider) {
+      return (await this.models.getAuth(provider))?.auth.apiKey;
+    }
+    const credential = await this.getCredential(provider);
+    return credential?.type === "api_key" ? credential.key : credential?.access;
+  }
+
+  async requestAuthForModel(
+    model: ModelSelection | undefined,
+  ): Promise<ModelRequestAuth | undefined> {
+    if (!model || model.provider === "nerve-faux") return undefined;
+    const registered = this.models.getModel(model.provider, model.modelId);
+    if (registered) return this.requestAuthForPiModel(registered);
+    const apiKey = await this.getApiKey(model.provider);
+    return apiKey ? { apiKey } : undefined;
+  }
+
+  async requestAuthForPiModel(
+    model: Model<Api>,
+  ): Promise<ModelRequestAuth | undefined> {
+    if (model.provider === "nerve-faux") return undefined;
+    if (this.models.getProvider(model.provider)) {
+      return requestAuth(await this.models.getAuth(model));
+    }
+    const apiKey = await this.getApiKey(model.provider);
+    return apiKey ? { apiKey } : undefined;
+  }
+
+  async refreshModels(options: { allowNetwork?: boolean } = {}): Promise<void> {
+    await this.models.refresh({ allowNetwork: options.allowNetwork ?? true });
+  }
+
+  async listProviderMetadata(
+    customProviderNames?: ReadonlyMap<string, string>,
+  ): Promise<AuthProviderMetadata[]> {
+    const runtimeProviders = new Map(
+      this.models.getProviders().map((provider) => [provider.id, provider]),
+    );
+    const providers = new Set<string>(runtimeProviders.keys());
+    for (const providerId of customProviderNames?.keys() ?? []) {
+      providers.add(providerId);
+    }
+    for (const credential of await this.credentials.list()) {
+      providers.add(credential.providerId);
+    }
+
+    const items = await Promise.all(
+      [...providers].sort().map(async (providerId) => {
+        const provider = runtimeProviders.get(providerId);
+        const credential = await this.getCredential(providerId);
+        const checked = provider
+          ? await this.models.checkAuth(providerId).catch(() => undefined)
+          : undefined;
+        const supportsApiKey = provider ? Boolean(provider.auth.apiKey) : true;
+        const supportsOAuth = Boolean(provider?.auth.oauth);
+        return {
+          provider: providerId,
+          displayName:
+            provider?.name ??
+            customProviderNames?.get(providerId) ??
+            displayNameForProvider(providerId),
+          supportsApiKey,
+          supportsOAuth,
+          oauthName:
+            provider?.auth.oauth?.loginLabel ?? provider?.auth.oauth?.name,
+          configured: Boolean(credential ?? checked),
+          credentialType: credential?.type ?? checked?.type,
+          envVar:
+            supportsApiKey && !isIntegrationProfileProvider(providerId)
+              ? provider && isLocalRuntimeProvider(provider)
+                ? localRuntimeEnvVarName(providerId)
+                : providerEnvVarName(providerId)
+              : undefined,
+          warning:
+            providerId === "anthropic" && credential?.type === "oauth"
+              ? ANTHROPIC_OAUTH_WARNING
+              : undefined,
+        } satisfies AuthProviderMetadata;
+      }),
+    );
+
+    return items.filter((item) => item.supportsApiKey || item.supportsOAuth);
+  }
+}

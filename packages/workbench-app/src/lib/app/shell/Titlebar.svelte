@@ -1,0 +1,188 @@
+<script lang="ts">
+import Logs from "@lucide/svelte/icons/logs";
+import Compass from "@lucide/svelte/icons/compass";
+import Settings from "@lucide/svelte/icons/settings";
+import { Toolbar } from "bits-ui";
+import { NerveMark } from "$lib/presentation";
+import { ShellTitlebar } from "$lib/presentation/shell";
+import {
+  ProjectSwitcher,
+  type ProjectSwitcherItem,
+} from "$lib/features/projects";
+import { Button } from "@nervekit/ui-kit/components/ui/button";
+import type { ContextMenuItem } from "@nervekit/ui-kit/components/composites/context-menu-list";
+import VersionIndicator from "$lib/app/shell/VersionIndicator.svelte";
+import WindowControls from "$lib/app/shell/WindowControls.svelte";
+import type { ResolvedHeaderType } from "$lib/app/shell/header-type";
+
+type Props = {
+  projects?: ProjectSwitcherItem[];
+  activeProjectKey?: string;
+  desktop?: boolean;
+  headerType?: ResolvedHeaderType;
+  maximized?: boolean;
+  closeToTray?: boolean;
+  quitting?: boolean;
+  settingsActive?: boolean;
+  discoverActive?: boolean;
+  discoverAttentionCount?: number;
+  logsActive?: boolean;
+  applicationLogsEnabled?: boolean;
+  currentVersion?: string;
+  buildProjectMenuItems?: (item: ProjectSwitcherItem) => ContextMenuItem[];
+  onOpenProject?: () => void;
+  onSelectProject?: (projectId: string) => void;
+  onOpenLogs?: () => void;
+  onOpenDiscover?: () => void;
+  onOpenSettings?: () => void;
+  onMinimize?: () => void;
+  onToggleMaximize?: () => void;
+  onClose?: () => void;
+};
+
+let {
+  projects = [],
+  activeProjectKey,
+  desktop = false,
+  headerType = "linux",
+  maximized = false,
+  closeToTray = true,
+  quitting = false,
+  settingsActive = false,
+  discoverActive = false,
+  discoverAttentionCount = 0,
+  logsActive = false,
+  applicationLogsEnabled = false,
+  currentVersion,
+  buildProjectMenuItems,
+  onOpenProject,
+  onSelectProject,
+  onOpenLogs,
+  onOpenDiscover,
+  onOpenSettings,
+  onMinimize,
+  onToggleMaximize,
+  onClose,
+}: Props = $props();
+</script>
+
+<ShellTitlebar {desktop}>
+  {#snippet leadingControls()}
+    {#if desktop && headerType === "macos"}
+      <WindowControls
+        {headerType}
+        {maximized}
+        {closeToTray}
+        {quitting}
+        {onMinimize}
+        {onToggleMaximize}
+        {onClose}
+      />
+    {/if}
+  {/snippet}
+  {#snippet left()}
+    <span class="inline-flex items-center gap-1.5 text-foreground">
+      <span class="brand-mark"><NerveMark compact /></span>
+    </span>
+    <ProjectSwitcher
+      items={projects}
+      activeKey={activeProjectKey}
+      buildMenuItems={buildProjectMenuItems}
+      onSelect={onSelectProject}
+      onOpenPicker={onOpenProject}
+    />
+  {/snippet}
+
+  {#snippet actions()}
+    <Toolbar.Root
+      class="flex min-w-0 flex-none items-center gap-1.5 [-webkit-app-region:no-drag]"
+      aria-label="Application actions"
+    >
+      {#if currentVersion}
+        <VersionIndicator {currentVersion} />
+      {/if}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="relative max-sm:hidden"
+        data-tour-id="help"
+        ariaLabel={discoverAttentionCount > 0
+          ? `Open Discover, ${discoverAttentionCount} items need attention`
+          : "Open Discover"}
+        title="Open Discover"
+        active={discoverActive}
+        pressed={discoverActive}
+        onclick={() => onOpenDiscover?.()}
+      >
+        <Compass size={16} strokeWidth={2.1} />
+        {#if discoverAttentionCount > 0}
+          <span
+            class="absolute -right-1 -top-1 inline-flex min-w-4 items-center justify-center rounded-full bg-info px-1 text-xs font-medium text-info-foreground"
+            aria-hidden="true"
+          >
+            {discoverAttentionCount}
+          </span>
+        {/if}
+      </Button>
+      {#if applicationLogsEnabled}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          ariaLabel="Open ZeroLeak AI logs"
+          title="Open ZeroLeak AI logs"
+          active={logsActive}
+          pressed={logsActive}
+          onclick={() => onOpenLogs?.()}
+        >
+          <Logs size={16} strokeWidth={2.1} />
+        </Button>
+      {/if}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        ariaLabel="Open settings"
+        title="Open settings"
+        data-tour-id="settings"
+        active={settingsActive}
+        pressed={settingsActive}
+        onclick={() => onOpenSettings?.()}
+      >
+        <Settings size={16} strokeWidth={2.1} />
+      </Button>
+      {#if desktop && headerType !== "macos"}
+        <span class="mx-0.5 h-5 w-px bg-border" aria-hidden="true"></span>
+        <WindowControls
+          {headerType}
+          {maximized}
+          {closeToTray}
+          {quitting}
+          {onMinimize}
+          {onToggleMaximize}
+          {onClose}
+        />
+      {/if}
+    </Toolbar.Root>
+  {/snippet}
+</ShellTitlebar>
+
+<style>
+/* NerveMark renders its own svg (escape-hatch reason 5). */
+.brand-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: var(--radius-sm);
+  color: var(--background);
+  background: var(--foreground);
+}
+
+.brand-mark :global(svg) {
+  width: 0.625rem;
+  height: 0.625rem;
+  /* Compensate for the mark's top-left visual weight at titlebar size. */
+  transform: translate(5%, 5%);
+}
+</style>

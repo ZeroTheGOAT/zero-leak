@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { adjacentSetupStep, setupStepsForArea } from "./setup-policy.js";
+
+describe("setup guide policy", () => {
+  it("opens the project picker before highlighting Browse", () => {
+    const steps = setupStepsForArea("open-project");
+    assert.deepEqual(
+      steps.map((step) => step.targetId),
+      ["guide-project-open", "guide-project-browse"],
+    );
+    assert.equal(steps[0]?.advanceByClickingTarget, true);
+  });
+
+  it("ends the provider guide on standard API-key setup", () => {
+    const steps = setupStepsForArea("provider");
+    assert.deepEqual(
+      steps.map((step) => step.id),
+      ["provider-subscription", "provider-api-key"],
+    );
+    assert.deepEqual(steps.at(-1)?.preparation, {
+      kind: "settings",
+      pageId: "providers",
+      sectionId: "api-keys",
+    });
+  });
+
+  it("guides web-search setup through Tavily configuration and saving", () => {
+    const steps = setupStepsForArea("web-search");
+    assert.deepEqual(
+      steps.map((step) => step.targetId),
+      ["setup-tavily-add-profile", "setup-tavily-api-key", "setup-tavily-save"],
+    );
+    assert.deepEqual(steps[0]?.preparation, {
+      kind: "settings",
+      pageId: "providers",
+      sectionId: "tavily-profiles",
+    });
+    assert.equal(steps[0]?.advanceByClickingTarget, true);
+  });
+
+  it("guides Atlassian profile setup and both tool integrations", () => {
+    const steps = setupStepsForArea("atlassian");
+    assert.deepEqual(
+      steps.map((step) => step.targetId),
+      [
+        "setup-atlassian-add-profile",
+        "setup-atlassian-profile-form",
+        "setup-atlassian-configure-jira",
+        "setup-atlassian-select-jira-profile",
+        "setup-atlassian-enable-jira",
+        "setup-atlassian-configure-confluence",
+        "setup-atlassian-select-confluence-profile",
+        "setup-atlassian-enable-confluence",
+      ],
+    );
+    assert.deepEqual(steps[0]?.preparation, {
+      kind: "settings",
+      pageId: "providers",
+      sectionId: "atlassian-profiles",
+    });
+    assert.deepEqual(steps[2]?.preparation, {
+      kind: "settings",
+      pageId: "tools",
+      sectionId: "third-party",
+    });
+    assert.equal(steps[0]?.advanceByClickingTarget, true);
+    assert.equal(steps[2]?.advanceByClickingTarget, true);
+    assert.equal(steps[5]?.advanceByClickingTarget, true);
+  });
+
+  it("opens required dialogs when advancing to dialog-backed steps", () => {
+    assert.equal(
+      setupStepsForArea("scoped-models")[0]?.advanceByClickingTarget,
+      true,
+    );
+    assert.equal(
+      setupStepsForArea("web-search")[0]?.advanceByClickingTarget,
+      true,
+    );
+    assert.equal(
+      setupStepsForArea("atlassian")[0]?.advanceByClickingTarget,
+      true,
+    );
+  });
+
+  it("ends each configuration guide at its most likely action", () => {
+    assert.equal(
+      setupStepsForArea("scoped-models").at(-1)?.targetId,
+      "setup-scoped-models-save",
+    );
+    assert.equal(
+      setupStepsForArea("agent-defaults").at(-1)?.targetId,
+      "setup-agent-default-model",
+    );
+  });
+
+  it("clamps coach navigation to its sequence", () => {
+    assert.equal(adjacentSetupStep(0, 3, -1), 0);
+    assert.equal(adjacentSetupStep(1, 3, 1), 2);
+    assert.equal(adjacentSetupStep(2, 3, 1), 2);
+  });
+});

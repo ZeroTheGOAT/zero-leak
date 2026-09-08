@@ -1,0 +1,56 @@
+{
+  "name": "@nervekit/desktop-shell",
+  "version": "0.26.0",
+  "private": true,
+  "description": "Electron packaging and desktop bridge shell for Nerve.",
+  "author": "ThilinaTLM",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThilinaTLM/nerve.git",
+    "directory": "packages/desktop-shell"
+  },
+  "homepage": "https://github.com/ThilinaTLM/nerve#readme",
+  "desktopName": "ai.zeroleak.workbench.desktop",
+  "main": "dist/main.js",
+  "bin": {
+    "zeroleak-desktop": "./dist/bin.js"
+  },
+  "files": [
+    "dist/**",
+    "build/**",
+    "package.json",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "icons": "node ../../scripts/generate-brand-assets.mjs --desktop",
+    "build": "pnpm run icons && tsc -b && node scripts/copy-preload.mjs",
+    "check": "tsc -b --pretty false",
+    "test": "tsx --test \"test/**/*.test.ts\"",
+    "start": "node scripts/start-electron.mjs",
+    "dev": "pnpm -w build:native && pnpm -w build && node scripts/start-electron.mjs",
+    "build:package": "pnpm -w build:workbench-runtime && pnpm --filter @nervekit/desktop-shell build && electron-builder --publish never",
+    "package:dir": "electron-builder --dir --publish never",
+    "package:linux": "pnpm -w build:workbench-runtime && pnpm --filter @nervekit/desktop-shell build && electron-builder --linux AppImage deb rpm --publish never"
+  },
+  "dependencies": {
+    "@nervekit/contracts": "workspace:*",
+    "@nervekit/workbench-server": "workspace:*"
+  },
+  "peerDependencies": {
+    "electron": "^43.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "electron": "^43.0.0",
+    "esbuild": "0.28.1",
+    "electron-builder": "^26.15.0",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

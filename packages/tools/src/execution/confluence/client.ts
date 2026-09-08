@@ -1,0 +1,257 @@
+import { Buffer } from "node:buffer";
+import type { IntegrationExecutionContext } from "../execution-context.js";
+import { withTimeoutSignal } from "../process/abort.js";
+import { safeAtlassianError } from "../atlassian/atlassian-error.js";
+import { ToolExecutionError } from "../errors/tool-error.js";
+
+export type ConfluenceConnection = {
+  siteUrl: string;
+  email: string;
+  token: string;
+  defaultSpaceKey?: string;
+};
+
+type ConfluenceConfig = {
+  enabled?: unknown;
+  siteUrl?: unknown;
+  email?: unknown;
+  defaultSpaceKey?: unknown;
+};
+
+export type ConfluenceApiVersion = "v1" | "v2";
+
+type QueryValue = string | number | boolean | string[] | number[] | undefined;
+
+type ConfluenceRequestOptions = {
+  api?: ConfluenceApiVersion;
+  method?: string;
+  path: string;
+  query?: Record<string, QueryValue>;
+  body?: unknown;
+  signal?: AbortSignal;
+};
+
+type MultipartAttachmentOptions = {
+  method: "POST" | "PUT";
+  pageId: string;
+  form: FormData;
+  query?: Record<string, QueryValue>;
+  signal?: AbortSignal;
+};
+
+export async function requireConfluenceConnection(
+  context: IntegrationExecutionContext,
+): Promise<ConfluenceConnection> {
+  const token = await context.getApiKey?.("confluence");
+  const rawConfig = (await context.getProviderConfig?.("confluence")) as
+    | ConfluenceConfig
+    | undefined;
+  const siteUrl = normalizeSiteUrl(
+    typeof rawConfig?.siteUrl === "string" ? rawConfig.siteUrl : "",
+  );
+  const email =
+    typeof rawConfig?.email === "string" ? rawConfig.email.trim() : "";
+  const defaultSpaceKey =
+    typeof rawConfig?.defaultSpaceKey === "string" &&
+    rawConfig.defaultSpaceKey.trim().length > 0
+      ? rawConfig.defaultSpaceKey.trim()
+      : undefined;
+
+  if (rawConfig?.enabled !== true || !siteUrl || !email || !token) {
+    throw new ToolExecutionError(
+      "CONFLUENCE_NOT_CONFIGURED",
+      "Confluence is not configured or enabled. Configure Confluence site URL, Atlassian email, and API token in ZeroLeak AI Settings, then enable the Confluence module.",
+      {
+        enabled: rawConfig?.enabled === true,
+        hasSiteUrl: Boolean(siteUrl),
+        hasEmail: Boolean(email),
+        hasToken: Boolean(token),
+      },
+    );
+  }
+  return { siteUrl, email, token, defaultSpaceKey };
+}
+
+export function normalizeSiteUrl(value: string): string {
+  let siteUrl = value.trim().replace(/\/+$/, "");
+  if (siteUrl.endsWith("/wiki")) siteUrl = siteUrl.slice(0, -5);
+  return siteUrl.replace(/\/+$/, "");
+}
+
+export async function confluenceRequest<T = unknown>(
+  connection: ConfluenceConnection,
+  options: ConfluenceRequestOptions,
+): Promise<T> {
+  const apiRoot = options.api === "v1" ? "/wiki/rest/api" : "/wiki/api/v2";
+  const url = new URL(`${connection.siteUrl}${apiRoot}${options.path}`);
+  appendQuery(url, options.query);
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    Authorization: basicAuth(connection),
+  };
+  const init: RequestInit = {
+    method: options.method ?? "GET",
+    headers,
+    signal: withTimeoutSignal(options.signal, 60_000),
+  };
+  if (options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(options.body);
+  }
+
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    await throwConfluenceError(response, init.method ?? "GET", options.path);
+  }
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (!text.trim()) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as T;
+  }
+}
+
+export async function confluenceAttachmentRequest<T = unknown>(
+  connection: ConfluenceConnection,
+  options: MultipartAttachmentOptions,
+): Promise<T> {
+  const url = new URL(
+    `${connection.siteUrl}/wiki/rest/api/content/${pathSegment(options.pageId)}/child/attachment`,
+  );
+  appendQuery(url, options.query);
+  const response = await fetch(url, {
+    method: options.method,
+    headers: {
+      Accept: "application/json",
+      Authorization: basicAuth(connection),
+      "X-Atlassian-Token": "nocheck",
+    },
+    body: options.form,
+    signal: withTimeoutSignal(options.signal, 60_000),
+  });
+  if (!response.ok) {
+    await throwConfluenceError(
+      response,
+      options.method,
+      `/content/${pathSegment(options.pageId)}/child/attachment`,
+    );
+  }
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (!text.trim()) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as T;
+  }
+}
+
+export async function confluenceDownload(
+  connection: ConfluenceConnection,
+  downloadLink: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const url = resolveConfluenceDownloadUrl(connection, downloadLink);
+  const response = await fetch(url, {
+    headers: { Authorization: basicAuth(connection) },
+    signal: withTimeoutSignal(signal, 60_000),
+  });
+  if (!response.ok) {
+    await throwConfluenceError(response, "GET", url.pathname);
+  }
+  const maximum = 25 * 1024 * 1024;
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (declared > maximum) {
+    throw new ToolExecutionError(
+      "CONFLUENCE_ATTACHMENT_TOO_LARGE",
+      "Confluence attachment exceeds the 25 MiB download limit.",
+      { bytes: declared, maximum },
+    );
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maximum) {
+    throw new ToolExecutionError(
+      "CONFLUENCE_ATTACHMENT_TOO_LARGE",
+      "Confluence attachment exceeds the 25 MiB download limit.",
+      { bytes: bytes.byteLength, maximum },
+    );
+  }
+  return bytes;
+}
+
+function resolveConfluenceDownloadUrl(
+  connection: ConfluenceConnection,
+  downloadLink: string,
+): URL {
+  const trimmed = downloadLink.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    const absoluteUrl = new URL(trimmed);
+    const configuredOrigin = new URL(connection.siteUrl).origin;
+    if (absoluteUrl.origin !== configuredOrigin) {
+      throw new ToolExecutionError(
+        "CONFLUENCE_UNTRUSTED_DOWNLOAD_URL",
+        "Confluence attachment download URL is outside the configured site.",
+        { configuredOrigin, downloadOrigin: absoluteUrl.origin },
+      );
+    }
+    return absoluteUrl;
+  }
+
+  const path = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const wikiPath =
+    path === "/wiki" || path.startsWith("/wiki/") ? path : `/wiki${path}`;
+  return new URL(`${connection.siteUrl}${wikiPath}`);
+}
+
+function appendQuery(url: URL, query: Record<string, QueryValue> | undefined) {
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) url.searchParams.append(key, String(item));
+    } else {
+      url.searchParams.set(key, String(value));
+    }
+  }
+}
+
+function basicAuth(connection: ConfluenceConnection): string {
+  return `Basic ${Buffer.from(`${connection.email}:${connection.token}`, "utf8").toString("base64")}`;
+}
+
+async function throwConfluenceError(
+  response: Response,
+  method: string,
+  path: string,
+): Promise<never> {
+  const body = await response.text().catch(() => "");
+  const code = confluenceErrorCode(response.status);
+  const retryable = response.status === 429 || response.status >= 500;
+  const error = safeAtlassianError({
+    service: "confluence",
+    code,
+    method,
+    path,
+    status: response.status,
+    statusText: response.statusText,
+    body,
+  });
+  throw new ToolExecutionError(code, error.message, error.details, retryable);
+}
+
+function confluenceErrorCode(status: number): string {
+  if (status === 400) return "CONFLUENCE_BAD_REQUEST";
+  if (status === 401) return "CONFLUENCE_UNAUTHORIZED";
+  if (status === 403) return "CONFLUENCE_FORBIDDEN";
+  if (status === 404) return "CONFLUENCE_NOT_FOUND";
+  if (status === 409) return "CONFLUENCE_CONFLICT";
+  if (status === 429) return "CONFLUENCE_RATE_LIMITED";
+  if (status >= 500) return "CONFLUENCE_SERVER_ERROR";
+  return "CONFLUENCE_API_ERROR";
+}
+
+export function pathSegment(value: string): string {
+  return encodeURIComponent(value);
+}

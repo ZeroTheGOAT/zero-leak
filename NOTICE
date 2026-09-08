@@ -1,0 +1,63 @@
+ZeroLeak AI
+Copyright © 2026 ZeroLeak AI contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for details.
+
+-------------------------------------------------------------------------------
+ATTRIBUTION
+-------------------------------------------------------------------------------
+
+ZeroLeak AI is a derivative work of Nerve, a transparent, local-first desktop
+coding harness.
+
+    Nerve
+    Copyright © 2026 ThilinaTLM
+    https://github.com/ThilinaTLM/nerve
+    Licensed under the Apache License, Version 2.0.
+
+The original Nerve source is retained here substantially unmodified. The
+workbench application, UI kit, design tokens, component library, layouts,
+interactions, contracts, protocol, harness, storage architecture, memory and
+context handling, tool registry, suggestions, artifacts, plans, permissions,
+tasks, and settings implementation are Nerve's work, used under the terms of
+the Apache License, Version 2.0.
+
+-------------------------------------------------------------------------------
+MODIFICATION NOTICE (Apache-2.0 Section 4(b))
+-------------------------------------------------------------------------------
+
+This distribution contains modifications to the original Nerve source. The
+complete, itemized list of changes is maintained in:
+
+    docs/zeroleak/MODIFICATIONS.md
+
+Summary of the changes carried by ZeroLeak AI:
+
+  1. Product name and branding changed from "Nerve" to "ZeroLeak AI",
+     including application identity, icons, window and tray presentation, and
+     the on-disk state directory.
+  2. Air-gapped / local-only security posture stated and enforced as a product
+     requirement.
+  3. Provider surface restricted to local runtimes (llama.cpp, Ollama, vLLM,
+     approved local Python runtimes, and optional private on-premise
+     OpenAI-compatible endpoints). Public cloud providers are not offered.
+  4. Local model lifecycle management added (import, configure, test, enable,
+     disable, load, unload) with persistence.
+  5. Transcription retargeted from a hosted service to local speech-to-text:
+     audio is decoded by the whisper.cpp CLI runtime on the same machine
+     (multilingual Tiny/Base/Small models), and the hosted ChatGPT
+     transcription path is removed.
+
+-------------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+-------------------------------------------------------------------------------
+
+Nerve's model routing, provider integrations, and streaming are built on
+@earendil-works/pi-ai, a unified LLM API client by Mario Zechner, distributed
+under the MIT license.
+
+    https://github.com/earendil-works/pi
+
+Additional third-party dependencies and their licenses are declared in the
+package manifests and lockfile of this repository.

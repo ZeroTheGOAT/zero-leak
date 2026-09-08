@@ -1,0 +1,62 @@
+{
+  "name": "@nervekit/workbench-server",
+  "version": "0.26.0",
+  "private": true,
+  "author": "ThilinaTLM",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThilinaTLM/nerve.git",
+    "directory": "packages/workbench-server"
+  },
+  "homepage": "https://github.com/ThilinaTLM/nerve#readme",
+  "files": [
+    "dist/**",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./main": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "dev": "tsx src/main.ts",
+    "test": "tsx --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "test:migrations": "tsx --test \"test/infrastructure/persistence/*.test.ts\" test/domains/projects/project-permissions.test.ts",
+    "test:native": "tsx --test test/infrastructure/persistence/file-mutations.test.ts test/domains/tasks/process-runtime-driver.test.ts test/domains/tasks/task-port-inspector.test.ts test/domains/tasks/task-scope.test.ts test/domains/tasks/task-supervisor.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@hono/node-server": "2.0.12",
+    "@nervekit/contracts": "workspace:*",
+    "@nervekit/harness": "workspace:*",
+    "@nervekit/native": "workspace:*",
+    "@nervekit/protocol": "workspace:*",
+    "@nervekit/tools": "workspace:*",
+    "@peculiar/x509": "^2.0.0",
+    "fdir": "6.5.0",
+    "hono": "4.12.34",
+    "reflect-metadata": "^0.2.2",
+    "ws": "8.21.0",
+    "yaml": "2.9.0",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/ws": "8.18.1",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

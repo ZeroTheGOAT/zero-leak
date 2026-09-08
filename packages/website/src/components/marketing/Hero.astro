@@ -1,0 +1,395 @@
+---
+/* The hero.
+ *
+ * Instead of a screenshot, the stage is a live simulated run: typed events
+ * arriving in a transcript, a review gate pausing the stream, a diff landing.
+ * `scripts/run-sim.ts` drives it; the rows authored below are the same
+ * canonical turn, so no-JS and reduced-motion visitors read an identical,
+ * complete transcript.
+ */
+
+import DendriteField from "./DendriteField.astro";
+import DeviceFrame from "./DeviceFrame.astro";
+import InstallCommand from "./InstallCommand.astro";
+import Reveal from "./Reveal.astro";
+import RunPanel, { type StaticRow } from "./RunPanel.astro";
+
+/* Mirrors `buildTurn(TASKS[0], defaults)` with the gate already resolved. */
+const staticRows: StaticRow[] = [
+  { kind: "prompt", text: "Add a retry budget to the run recovery path." },
+  {
+    kind: "thinking",
+    text: "Recovery lives in run-recovery.ts. A budget needs the retry count and the base delay in one place, so both call sites read one constant.",
+  },
+  {
+    kind: "tool",
+    tool: {
+      name: "read",
+      args: "packages/harness/src/run-recovery.ts",
+      out: ["Read 214 lines"],
+      lines: "214 lines",
+    },
+  },
+  { kind: "gate", text: "edit needs review" },
+  {
+    kind: "tool",
+    tool: {
+      name: "edit",
+      args: "packages/harness/src/run-recovery.ts",
+      out: ["+12 −3 · retry budget wired into the recovery loop"],
+      lines: "2 hunks",
+    },
+  },
+  {
+    kind: "tool",
+    tool: {
+      name: "bash",
+      args: "pnpm test --filter @nervekit/harness -- run-recovery",
+      out: ["✓ recovery continues from checkpoint (12 tests)", "Done in 3.2s"],
+      lines: "6 lines",
+    },
+  },
+  {
+    kind: "prose",
+    text: "Retry budget added: three attempts on a 2s exponential base.",
+  },
+];
+---
+
+<section class="hero" data-hero>
+  <DendriteField class="hero-dendrites" />
+  <span class="hero-glow" aria-hidden="true"></span>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div class="container-page hero-shell">
+    <div class="hero-copy" data-hero-copy>
+      <Reveal>
+        <span class="badge">
+          <span class="badge-dot animate-pulse-ring" aria-hidden="true"></span>
+          Free &amp; open source · Beta
+        </span>
+      </Reveal>
+
+      <Reveal delay={80}>
+        <h1 class="display-title">
+          See everything.<br /><span class="gradient-text hero-charge"
+            >Steer it live.</span
+          >
+        </h1>
+      </Reveal>
+
+      <Reveal delay={160}>
+        <p class="lede hero-lede">
+          A local-first coding harness where every prompt, thought, tool call,
+          approval, and diff is a typed event you can inspect — and a running
+          agent you can retune without stopping it.
+        </p>
+      </Reveal>
+
+      <Reveal delay={240}>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="/start/install/">
+            Get started <span aria-hidden="true">→</span>
+          </a>
+          <a
+            class="btn btn-ghost"
+            href="https://github.com/ThilinaTLM/nerve"
+            aria-label="Nerve on GitHub"
+            data-github-star-link
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.35-1.3-1.7-1.3-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.2 1.78 1.2 1.03 1.78 2.7 1.27 3.36.97.1-.75.4-1.27.73-1.56-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.5 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.27 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.2.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"
+              ></path>
+            </svg>
+            <span>GitHub</span>
+            <span class="hero-star-separator" aria-hidden="true"></span>
+            <span
+              class="hero-star-count"
+              data-github-star-count
+              aria-hidden="true"
+              >00</span
+            >
+          </a>
+        </div>
+      </Reveal>
+
+      <Reveal delay={320} class="hero-install">
+        <InstallCommand />
+        <p class="meta-text">
+          Runs locally. Bring your own API key or supported provider
+          subscription.
+        </p>
+      </Reveal>
+    </div>
+
+    <Reveal variant="scale" delay={140} class="hero-stage stage-3d">
+      <div
+        class="hero-deck tilt-target"
+        data-hero-deck
+        data-tilt
+        data-tilt-max="3"
+      >
+        <DeviceFrame label="nerve · live run" depth={3}>
+          <RunPanel
+            sim="hero"
+            rows={staticRows}
+            description="Simulated Nerve run: the user prompt, the agent's reasoning, a read tool call with its bounded output, an approval gate for an edit, the applied diff, a verification command, and the final reply."
+          />
+        </DeviceFrame>
+      </div>
+    </Reveal>
+  </div>
+
+  <div class="hero-cue" aria-hidden="true">
+    <span class="cue-track"></span>
+    <span class="cue-label">Follow the signal</span>
+  </div>
+<script>
+  import "../../scripts/marketing/github-stars";
+</script>
+</section>
+
+<style>
+  .hero {
+    position: relative;
+    isolation: isolate;
+    overflow: clip;
+    min-height: calc(100svh - var(--nav-height));
+    padding-block: clamp(3.5rem, 7vw, 6.5rem) clamp(5rem, 8vw, 7rem);
+    display: grid;
+    align-content: center;
+  }
+
+  .hero-dendrites {
+    z-index: 0;
+    transform: translateZ(var(--z-back));
+  }
+
+  /* The dendrite field belongs behind the run panel, not behind the headline:
+   * fade it out across the copy column so branches never run through type. */
+  @media (min-width: 1200px) {
+    .hero-dendrites {
+      mask-image:
+        linear-gradient(
+          to bottom,
+          transparent,
+          black 18%,
+          black 72%,
+          transparent
+        ),
+        linear-gradient(to right, transparent 6%, black 46%);
+      -webkit-mask-image:
+        linear-gradient(
+          to bottom,
+          transparent,
+          black 18%,
+          black 72%,
+          transparent
+        ),
+        linear-gradient(to right, transparent 6%, black 46%);
+      mask-composite: intersect;
+      -webkit-mask-composite: source-in;
+    }
+  }
+
+  .hero-glow {
+    position: absolute;
+    z-index: 0;
+    inset: 20% 8% 25% 40%;
+    background: radial-gradient(circle, var(--primary), transparent 62%);
+    opacity: 0.18;
+    filter: blur(90px);
+    pointer-events: none;
+  }
+
+  :global(:root[data-theme="light"]) .hero-glow {
+    opacity: 0.12;
+  }
+
+  .hero-shell {
+    position: relative;
+    z-index: 2;
+    display: grid;
+    align-items: center;
+    gap: clamp(3rem, 5vw, 5rem);
+  }
+
+  .hero-copy {
+    display: grid;
+    gap: 1.5rem;
+    transform: translateY(var(--copy-shift, 0px));
+    will-change: transform;
+  }
+
+  .hero-lede {
+    max-width: 34rem;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .hero-star-separator {
+    width: 1px;
+    height: 1rem;
+    background-color: var(--hairline);
+  }
+
+  .hero-star-count {
+    min-width: 1.6em;
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+
+  .hero-install {
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  .badge-dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: var(--radius-pill);
+    background: var(--warning);
+    color: var(--warning);
+  }
+
+  /* The headline's second line charges like an axon on first paint. `--charge`
+   * is 1 in the authored state, so the underline exists with no script. */
+  .hero-charge {
+    position: relative;
+  }
+
+  .hero-charge::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -0.14em;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--primary),
+      var(--signal),
+      transparent
+    );
+    opacity: var(--charge, 1);
+    transform: scaleX(var(--charge, 1));
+    transform-origin: left;
+  }
+
+  :global(html[data-motion-ready]) .hero-charge {
+    --charge: 0;
+  }
+
+  /* Stage --------------------------------------------------------------- */
+
+  .hero-stage {
+    position: relative;
+  }
+
+  /* One composed transform, several owners: the scroll stage writes
+   * --deck-rotate-x and --deck-lift, the entrance writes --deck-enter-*, and
+   * pointer tilt writes --tilt-*. Nothing animates `transform` directly. */
+  .hero-deck {
+    position: relative;
+    transform: rotateX(
+        calc(
+          var(--deck-rotate-x, 3deg) + var(--tilt-x, 0deg) +
+            var(--deck-enter-rotate, 0deg)
+        )
+      )
+      rotateY(calc(-7deg + var(--tilt-y, 0deg)))
+      translateY(calc(var(--deck-lift, 0px) + var(--deck-enter-y, 0px)))
+      scale(var(--deck-scale, 1));
+    transform-style: preserve-3d;
+    transition: transform 120ms linear;
+  }
+
+  /* Cue ------------------------------------------------------------------ */
+
+  .hero-cue {
+    position: absolute;
+    z-index: 2;
+    bottom: 1.75rem;
+    left: 50%;
+    display: grid;
+    justify-items: center;
+    gap: 0.5rem;
+    transform: translateX(-50%);
+  }
+
+  .cue-track {
+    position: relative;
+    width: 1px;
+    height: 2.5rem;
+    background-color: var(--myelin-dim);
+    overflow: hidden;
+  }
+
+  .cue-track::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -0.125rem;
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: var(--radius-pill);
+    background-color: var(--signal);
+    box-shadow: var(--glow-signal);
+    animation: cue-drop 2.2s var(--ease-out-expo) infinite;
+  }
+
+  .cue-label {
+    color: var(--muted-foreground);
+    font-size: var(--text-eyebrow);
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  /* Responsive ----------------------------------------------------------- */
+
+  @media (min-width: 1200px) {
+    .hero-shell {
+      grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    }
+  }
+
+  @media (max-width: 1199px) {
+    .hero {
+      min-height: 0;
+    }
+
+    .hero-cue {
+      display: none;
+    }
+
+    /* Fully flat on small screens: the tilt controller does not run, and the
+     * perspective context plus `will-change` promotion would rasterize the
+     * panel as a texture — visibly soft text on high-DPR phone screens. */
+    .hero-stage {
+      perspective: none;
+      transform-style: flat;
+    }
+
+    .hero-deck {
+      transform: none;
+      will-change: auto;
+      transition: none;
+    }
+  }
+</style>

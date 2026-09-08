@@ -1,0 +1,299 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { buildCommittedTimeline, buildConversationTimeline } from "./timeline";
+import { keys, toolCall } from "./timeline.fixtures";
+import type { TranscriptItem } from "./transcript-types";
+
+describe("buildConversationTimeline committed transcript", () => {
+  it("includes hidden tool previews only for an explicit child transcript", () => {
+    const hidden = toolCall(
+      "tool_hidden",
+      "2026-01-01T00:00:01.000Z",
+      "read",
+      undefined,
+      { hidden: true },
+    );
+
+    assert.equal(buildCommittedTimeline([], [hidden]).items.length, 0);
+    const child = buildCommittedTimeline([], [hidden], {
+      includeHiddenToolCalls: true,
+      includeUnanchoredTerminalToolCalls: true,
+    });
+    assert.equal(child.items.length, 1);
+    assert.equal(child.items[0]?.kind, "tool");
+  });
+
+  it("includes unanchored cancelled tools in explicit child transcripts", () => {
+    const cancelled = toolCall(
+      "tool_cancelled",
+      "2026-01-01T00:00:01.000Z",
+      "python_exec",
+      undefined,
+      { status: "cancelled", runId: "run_cancelled" },
+    );
+
+    const child = buildCommittedTimeline([], [cancelled], {
+      includeUnanchoredTerminalToolCalls: true,
+    });
+
+    assert.equal(child.items.length, 1);
+    assert.equal(child.items[0]?.kind, "tool");
+  });
+
+  it("does not append unmatched terminal tools to a primary conversation", () => {
+    const terminal = toolCall(
+      "tool_orphaned",
+      "2026-01-01T00:00:01.000Z",
+      "bash",
+      undefined,
+      { status: "failed", runId: "run_failed" },
+    );
+
+    const timeline = buildConversationTimeline(
+      [{ id: "entry_final", role: "assistant", text: "All done." }],
+      [terminal],
+    );
+
+    assert.deepEqual(keys(timeline), ["entry_final"]);
+  });
+
+  it("anchors historical tool cards at matching tool-result entries", () => {
+    const transcript: TranscriptItem[] = [
+      {
+        id: "entry_user",
+        role: "user",
+        text: "Read package.json",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "entry_result",
+        role: "system",
+        text: "{ name: 'nerve' }",
+        toolCallId: "provider_call_1",
+        toolRecordId: "tool_01",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      },
+      {
+        id: "entry_assistant",
+        role: "assistant",
+        text: "It is named nerve.",
+        createdAt: "2026-01-01T00:00:03.000Z",
+      },
+    ];
+    const toolCalls = [toolCall("tool_01", "2026-01-01T00:00:01.000Z")];
+
+    const timeline = buildConversationTimeline(transcript, toolCalls);
+
+    assert.deepEqual(keys(timeline), [
+      "entry_user",
+      "tool:tool_01",
+      "entry_assistant",
+    ]);
+    assert.deepEqual(
+      timeline.map((item) => item.kind),
+      ["message", "tool", "message"],
+    );
+    assert.equal(timeline[1]?.kind, "tool");
+    if (timeline[1]?.kind === "tool") {
+      assert.equal(timeline[1].anchorEntryId, "entry_result");
+    }
+  });
+
+  it("anchors errored validation tool cards at matching tool-result entries", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Edit file" },
+      {
+        id: "entry_result",
+        role: "system",
+        text: "Validation failed for tool edit.",
+        toolCallId: "provider_call_1",
+        toolName: "edit",
+        isToolError: true,
+      },
+    ];
+    const toolCalls = [
+      toolCall(
+        "tool_error",
+        "2026-01-01T00:00:01.000Z",
+        "edit",
+        "provider_call_1",
+        {
+          status: "failed",
+          error: "Validation failed for tool edit.",
+        },
+      ),
+    ];
+
+    const timeline = buildConversationTimeline(transcript, toolCalls);
+
+    assert.deepEqual(keys(timeline), ["entry_user", "tool:tool_error"]);
+    assert.equal(timeline[1]?.kind, "tool");
+    if (timeline[1]?.kind === "tool") {
+      assert.equal(timeline[1].anchorEntryId, "entry_result");
+    }
+  });
+
+  it("renders unmatched historical tool-result errors as fallback error cards", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Edit file" },
+      {
+        id: "entry_result",
+        role: "system",
+        text: "Validation failed for tool edit.",
+        toolCallId: "provider_call_1",
+        toolName: "edit",
+        isToolError: true,
+      },
+    ];
+
+    const timeline = buildConversationTimeline(transcript, []);
+
+    assert.deepEqual(keys(timeline), ["entry_user", "entry_result"]);
+    assert.equal(timeline[1]?.kind, "tool_result_error");
+    if (timeline[1]?.kind === "tool_result_error") {
+      assert.equal(timeline[1].toolName, "edit");
+      assert.equal(timeline[1].error, "Validation failed for tool edit.");
+    }
+  });
+
+  it("keeps accepted plan tool cards before the follow-up implementation instruction", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Create a plan" },
+      {
+        id: "entry_plan_placeholder",
+        role: "assistant",
+        text: "[Tool call: plan_mode_present({})]",
+      },
+      {
+        id: "entry_plan_result",
+        role: "system",
+        text: "Plan accepted. Proceed with implementation.",
+        toolCallId: "call_plan",
+        toolRecordId: "tool_plan",
+      },
+      {
+        id: "entry_plan_followup",
+        role: "user",
+        text: "The user accepted the plan. Proceed with implementation.",
+      },
+      {
+        id: "entry_next_assistant",
+        role: "assistant",
+        text: "I will start coding.",
+      },
+    ];
+    const toolCalls = [
+      toolCall(
+        "tool_plan",
+        "2026-01-01T00:00:01.000Z",
+        "plan_mode_present",
+        "call_plan",
+        { risk: "interaction" },
+      ),
+    ];
+
+    const timeline = buildConversationTimeline(transcript, toolCalls);
+
+    assert.deepEqual(keys(timeline), [
+      "entry_user",
+      "tool:tool_plan",
+      "entry_plan_followup",
+      "entry_next_assistant",
+    ]);
+  });
+
+  it("keeps a tool at its invocation slot when its result arrives later", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Run it" },
+      {
+        id: "entry_invocation",
+        role: "assistant",
+        text: "[Tool call: read({})]",
+        liveMessageId: "message_invocation",
+      },
+      { id: "entry_followup", role: "user", text: "Queued while waiting" },
+      {
+        id: "entry_result",
+        role: "system",
+        text: "done",
+        toolRecordId: "tool_invocation",
+      },
+    ];
+    const call = {
+      ...toolCall("tool_invocation", "2026-01-01T00:00:04.000Z"),
+      liveMessageId: "message_invocation",
+      contentIndex: 0,
+    };
+
+    const timeline = buildConversationTimeline(transcript, [call]);
+
+    assert.deepEqual(keys(timeline), [
+      "entry_user",
+      "tool-slot:message_invocation:0",
+      "entry_followup",
+    ]);
+  });
+
+  it("anchors tool cards by source tool-call id when no internal id exists", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Use a failing tool" },
+      {
+        id: "entry_error_result",
+        role: "system",
+        text: "Tool failed",
+        toolCallId: "provider_call_1",
+      },
+      { id: "entry_assistant", role: "assistant", text: "It failed." },
+    ];
+    const toolCalls = [
+      toolCall(
+        "tool_error",
+        "2026-01-01T00:00:01.000Z",
+        "read",
+        "provider_call_1",
+      ),
+    ];
+
+    const timeline = buildConversationTimeline(transcript, toolCalls);
+
+    assert.deepEqual(keys(timeline), [
+      "entry_user",
+      "tool:tool_error",
+      "entry_assistant",
+    ]);
+    assert.equal(timeline[1]?.kind, "tool");
+    if (timeline[1]?.kind === "tool") {
+      assert.equal(timeline[1].anchorEntryId, "entry_error_result");
+    }
+  });
+
+  it("preserves anchored branch order for multiple tool calls", () => {
+    const transcript: TranscriptItem[] = [
+      { id: "entry_user", role: "user", text: "Use tools" },
+      {
+        id: "entry_result_b",
+        role: "system",
+        text: "second in branch",
+        toolRecordId: "tool_b",
+      },
+      {
+        id: "entry_result_a",
+        role: "system",
+        text: "third in branch",
+        toolRecordId: "tool_a",
+      },
+    ];
+    const toolCalls = [
+      toolCall("tool_a", "2026-01-01T00:00:01.000Z"),
+      toolCall("tool_b", "2026-01-01T00:00:02.000Z"),
+    ];
+
+    const timeline = buildConversationTimeline(transcript, toolCalls);
+
+    assert.deepEqual(keys(timeline), [
+      "entry_user",
+      "tool:tool_b",
+      "tool:tool_a",
+    ]);
+  });
+});

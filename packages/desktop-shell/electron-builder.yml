@@ -1,0 +1,55 @@
+appId: ai.zeroleak.workbench
+productName: ZeroLeak AI
+executableName: zeroleak-desktop
+artifactName: ZeroLeak-AI-Desktop-${version}-${arch}.${ext}
+copyright: Copyright © 2026 ZeroLeak AI contributors. Portions copyright © 2026 ThilinaTLM (Nerve, Apache-2.0).
+
+directories:
+  output: release
+
+files:
+  - dist/**
+  - build/**
+  - package.json
+
+asarUnpack:
+  - build/**
+  - node_modules/@nervekit/native/prebuilds/**
+
+extraResources:
+  - from: ../workbench-app/dist
+    to: web-dist
+  - from: ../../LICENSE
+    to: LICENSE
+  - from: ../../NOTICE
+    to: NOTICE
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  icon: build/icon.svg
+  darkModeSupport: true
+
+win:
+  target:
+    - nsis
+  icon: build/icon.svg
+
+linux:
+  target:
+    - AppImage
+    - deb
+    - rpm
+  category: Development
+  executableName: zeroleak-desktop
+  maintainer: ZeroLeak AI contributors
+  icon: build/icons
+  syncDesktopName: true
+  desktop:
+    entry:
+      Name: ZeroLeak AI
+      GenericName: AI coding harness
+      Comment: UI-first personal AI coding harness
+      Keywords: AI;Coding;Agent;Developer;ZeroLeak;Local;Offline;

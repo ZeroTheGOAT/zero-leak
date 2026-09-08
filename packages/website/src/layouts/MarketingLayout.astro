@@ -1,0 +1,182 @@
+---
+import SiteHeader from "../components/marketing/SiteHeader.astro";
+import SiteFooter from "../components/marketing/SiteFooter.astro";
+import "../styles/app.css";
+
+interface Props {
+  title: string;
+  description: string;
+  canonical?: string;
+  ogImage?: string;
+  noindex?: boolean;
+  structuredData?: boolean;
+}
+
+const {
+  title,
+  description,
+  canonical,
+  ogImage,
+  noindex = false,
+  structuredData = false,
+} = Astro.props;
+
+const canonicalUrl = canonical ?? new URL(Astro.url.pathname, Astro.site).href;
+
+const softwareApplication = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "Nerve",
+  description,
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Linux, macOS, Windows 11",
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+  url: "https://nerve.tlmtech.dev/",
+  codeRepository: "https://github.com/ThilinaTLM/nerve",
+};
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: dark)"
+      content="#292724"
+    />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: light)"
+      content="#faf9f5"
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="canonical" href={canonicalUrl} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalUrl} />
+    {ogImage && <meta property="og:image" content={ogImage} />}
+    {ogImage && <meta property="og:image:type" content="image/png" />}
+    {ogImage && <meta property="og:image:width" content="1280" />}
+    {ogImage && <meta property="og:image:height" content="640" />}
+    {
+      ogImage && (
+        <meta
+          property="og:image:alt"
+          content="Nerve — see everything, steer it live"
+        />
+      )
+    }
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    {ogImage && <meta name="twitter:image" content={ogImage} />}
+    {
+      ogImage && (
+        <meta
+          name="twitter:image:alt"
+          content="Nerve — see everything, steer it live"
+        />
+      )
+    }
+    <title>{title}</title>
+
+    {/* Applied before first paint so the stored theme never flashes. Mirrors
+    Starlight's storage contract in `src/scripts/theme.ts`. */}
+    <script is:inline>
+      (() => {
+        let stored = null;
+        try {
+          stored = localStorage.getItem("starlight-theme");
+        } catch {
+          stored = null;
+        }
+        const preference =
+          stored === "light" || stored === "dark" ? stored : "auto";
+        const resolved =
+          preference === "auto"
+            ? matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark"
+            : preference;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themePreference = preference;
+        // Seeds the theme switch indicator so it never jumps on hydration.
+        document.documentElement.style.setProperty(
+          "--switch-index",
+          String(["light", "dark", "auto"].indexOf(preference)),
+        );
+
+        // Arms the pre-hidden reveal state before the first paint, so the
+        // choreography never has to hide content a reader has already seen.
+        // If the stage module has not reported in shortly after load, the
+        // marker is removed and every reveal resolves to its authored,
+        // fully visible state.
+        if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          document.documentElement.dataset.motionReady = "true";
+          setTimeout(() => {
+            if (!document.documentElement.dataset.stageReady) {
+              delete document.documentElement.dataset.motionReady;
+            }
+          }, 1800);
+        }
+      })();
+    </script>
+
+    {
+      structuredData && (
+        <script
+          is:inline
+          type="application/ld+json"
+          set:html={JSON.stringify(softwareApplication)}
+        />
+      )
+    }
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    {/* The page as one axon: the rail carries scroll position as a travelling
+    charge. Decorative, desktop only, and removed under reduced motion. */}
+    <div class="axon-rail" aria-hidden="true" data-axon-rail>
+      <span class="axon-rail-track"></span>
+      <span class="axon-rail-head"></span>
+    </div>
+    <SiteHeader />
+    <main id="main">
+      <slot />
+    </main>
+    <SiteFooter />
+    <script>
+      import "../scripts/motion/index";
+    </script>
+
+    <style>
+      .skip-link {
+        position: absolute;
+        left: 50%;
+        top: 0.5rem;
+        z-index: 100;
+        translate: -50% -200%;
+        padding: 0.6rem 1rem;
+        border: 1px solid var(--hairline);
+        border-radius: 0.6rem;
+        background-color: var(--card);
+        color: var(--foreground);
+        font-size: 0.9rem;
+        font-weight: 600;
+        text-decoration: none;
+        transition: translate 200ms var(--ease-out-expo);
+      }
+
+      .skip-link:focus-visible {
+        translate: -50% 0;
+      }
+    </style>
+  </body>
+</html>

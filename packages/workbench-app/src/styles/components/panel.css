@@ -1,0 +1,38 @@
+/* Cross-component contracts of the workbench panel primitives.
+ * Everything here spans two or more components: the shared indent step is set
+ * by PanelRow and PanelPropertyRow, the hover-reveal is read by both of them,
+ * and the card hover tint is a parent/child rule that Svelte scoping cannot
+ * express because PanelRowCard and PanelRow are separate components. */
+
+/* One indentation step per nesting level, on top of the base row inset. Rows can
+ * drop the base inset (`--panel-row-inset: 0px`) to align with the panel edge. */
+.panel-row {
+  padding-left: calc(
+    var(--panel-row-inset, 0.5rem) + var(--panel-indent, 0) * 0.75rem
+  );
+}
+
+.panel-row-hoverable:hover {
+  background: color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+/* ItemSurface owns the card background. Rows inside a panel card hover with a
+ * softer tint so the composited result matches a standalone row. */
+.panel-row-card .panel-row-hoverable:hover {
+  background: color-mix(in oklab, var(--accent) 38%, transparent);
+}
+
+.panel-hover-actions {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.panel-row:hover .panel-hover-actions {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  .panel-hover-actions {
+    opacity: 1;
+  }
+}

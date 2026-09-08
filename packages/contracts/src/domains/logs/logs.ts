@@ -1,0 +1,195 @@
+import { z } from "zod";
+
+export const applicationLogLevelSchema = z.enum([
+  "debug",
+  "info",
+  "warn",
+  "error",
+]);
+export type ApplicationLogLevel = z.infer<typeof applicationLogLevelSchema>;
+
+export const applicationLogSourceSchema = z.enum([
+  "orchestrator",
+  "desktop",
+  "web",
+  "cli",
+]);
+export type ApplicationLogSource = z.infer<typeof applicationLogSourceSchema>;
+
+export const applicationLogErrorSchema = z.object({
+  name: z.string().optional(),
+  message: z.string(),
+  stack: z.string().optional(),
+  cause: z.string().optional(),
+});
+export type ApplicationLogError = z.infer<typeof applicationLogErrorSchema>;
+
+export const applicationLogRecordSchema = z.object({
+  seq: z.number().int().positive(),
+  id: z.string().startsWith("log_"),
+  ts: z.string().datetime(),
+  level: applicationLogLevelSchema,
+  source: applicationLogSourceSchema,
+  component: z.string().min(1),
+  message: z.string().min(1),
+  requestId: z.string().optional(),
+  projectId: z.string().startsWith("proj_").optional(),
+  conversationId: z.string().startsWith("conv_").optional(),
+  agentId: z.string().startsWith("agent_").optional(),
+  runId: z.string().startsWith("run_").optional(),
+  toolCallId: z.string().startsWith("tool_").optional(),
+  taskId: z.string().startsWith("task_").optional(),
+  durationMs: z.number().nonnegative().optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
+  error: applicationLogErrorSchema.optional(),
+});
+export type ApplicationLogRecord = z.infer<typeof applicationLogRecordSchema>;
+
+export const daemonCrashReportKindSchema = z.enum([
+  "uncaughtException",
+  "unhandledRejection",
+  "childExit",
+  "healthFailure",
+  "startupExit",
+  "startupTimeout",
+  "startupError",
+  "previousUncleanExit",
+]);
+export type DaemonCrashReportKind = z.infer<typeof daemonCrashReportKindSchema>;
+
+export const daemonCrashReportSchema = z.object({
+  id: z.string().startsWith("crash_"),
+  ts: z.string().datetime(),
+  source: applicationLogSourceSchema,
+  kind: daemonCrashReportKindSchema,
+  message: z.string().min(1),
+  pid: z.number().int().positive().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  signal: z.string().nullable().optional(),
+  uptimeMs: z.number().int().nonnegative().optional(),
+  dataDir: z.string().optional(),
+  error: applicationLogErrorSchema.optional(),
+  outputTail: z.string().optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
+  runtime: z
+    .object({
+      node: z.string(),
+      platform: z.string(),
+      arch: z.string(),
+    })
+    .optional(),
+});
+export type DaemonCrashReport = z.infer<typeof daemonCrashReportSchema>;
+
+const applicationLogQueryFieldsSchema = z.object({
+  level: applicationLogLevelSchema.optional(),
+  source: applicationLogSourceSchema.optional(),
+  component: z.string().min(1).optional(),
+  contains: z.string().optional(),
+  /** Return records newer than this exclusive sequence cursor. */
+  sinceSeq: z.number().int().nonnegative().optional(),
+  /** Return records older than this exclusive sequence cursor. */
+  beforeSeq: z.number().int().positive().optional(),
+  limit: z.number().int().positive().max(500).optional(),
+  requestId: z.string().optional(),
+  projectId: z.string().startsWith("proj_").optional(),
+  conversationId: z.string().startsWith("conv_").optional(),
+  agentId: z.string().startsWith("agent_").optional(),
+  runId: z.string().startsWith("run_").optional(),
+  toolCallId: z.string().startsWith("tool_").optional(),
+  taskId: z.string().startsWith("task_").optional(),
+});
+
+export const applicationLogQuerySchema = applicationLogQueryFieldsSchema.refine(
+  (query) => query.sinceSeq === undefined || query.beforeSeq === undefined,
+  {
+    message: "sinceSeq and beforeSeq cannot be combined",
+    path: ["beforeSeq"],
+  },
+);
+export type ApplicationLogQuery = z.infer<typeof applicationLogQuerySchema>;
+
+export const applicationLogQueryResponseSchema = z.object({
+  /** Records are always returned in ascending sequence order. */
+  logs: z.array(applicationLogRecordSchema),
+  /** Newest sequence returned, suitable for a later sinceSeq query. */
+  nextCursor: z.number().int().nonnegative(),
+  /** Whether another matching historical page exists. */
+  hasMoreBefore: z.boolean(),
+});
+export type ApplicationLogQueryResponse = z.infer<
+  typeof applicationLogQueryResponseSchema
+>;
+
+export const applicationLogPruneRequestSchema =
+  applicationLogQueryFieldsSchema.omit({
+    limit: true,
+    sinceSeq: true,
+    beforeSeq: true,
+  });
+export type ApplicationLogPruneRequest = z.infer<
+  typeof applicationLogPruneRequestSchema
+>;
+
+export const applicationLogPruneResponseSchema = z.object({
+  pruned: z.number().int().nonnegative(),
+  remaining: z.number().int().nonnegative(),
+});
+export type ApplicationLogPruneResponse = z.infer<
+  typeof applicationLogPruneResponseSchema
+>;
+
+export const managerLogTailRecordSchema = z
+  .object({
+    seq: z.number().int().nonnegative(),
+    ts: z.string().datetime(),
+    level: applicationLogLevelSchema,
+    message: z.string(),
+  })
+  .passthrough();
+export type ManagerLogTailRecord = z.infer<typeof managerLogTailRecordSchema>;
+
+export const managerLogTailQuerySchema = z.object({
+  /** Minimum level to include (this level and above). */
+  level: applicationLogLevelSchema.optional(),
+  /** Case-insensitive message substring filter. */
+  contains: z.string().min(1).optional(),
+  /** Only return records with seq greater than this cursor. */
+  sinceSeq: z.number().int().nonnegative().optional(),
+  /** Max records to return (most recent). */
+  limit: z.number().int().positive().max(1000).optional(),
+});
+export type ManagerLogTailQuery = z.infer<typeof managerLogTailQuerySchema>;
+
+export const managerLogTailResponseSchema = z.object({
+  logs: z.array(managerLogTailRecordSchema),
+  /** Pass back as `sinceSeq` to poll for newer records. */
+  nextCursor: z.number().int().nonnegative(),
+  /** Records evicted from the buffer since process start. */
+  dropped: z.number().int().nonnegative(),
+});
+export type ManagerLogTailResponse = z.infer<
+  typeof managerLogTailResponseSchema
+>;
+
+export const clientApplicationLogRequestSchema = z.object({
+  logs: z
+    .array(
+      applicationLogRecordSchema
+        .omit({
+          seq: true,
+          id: true,
+          ts: true,
+          source: true,
+        })
+        .extend({
+          ts: z.string().datetime().optional(),
+          source: z.literal("web").optional(),
+        }),
+    )
+    .min(1)
+    .max(50),
+});
+export type ClientApplicationLogRequest = z.infer<
+  typeof clientApplicationLogRequestSchema
+>;

@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "planning",
+  "name": "Planning",
+  "description": "Allow read-only research, interaction, Explore, and plan writes; prompt for local analysis commands.",
+  "source": "builtin",
+  "enabled": true,
+  "compatibleModes": ["planning"],
+  "rules": [
+    {
+      "id": "allow-interaction",
+      "enabled": true,
+      "priority": 300,
+      "enforcement": "overridable",
+      "when": { "baseRisks": ["interaction"] },
+      "decision": "allow"
+    },
+    {
+      "id": "allow-plan-file-writes",
+      "enabled": true,
+      "priority": 200,
+      "enforcement": "overridable",
+      "when": {
+        "toolNames": ["write", "edit"],
+        "baseRisks": ["write"],
+        "targets": {
+          "quantifier": "all",
+          "matcher": {
+            "kind": "path",
+            "access": "write",
+            "scope": "exact",
+            "root": "plans",
+            "pattern": "**"
+          }
+        }
+      },
+      "decision": "allow"
+    },
+    {
+      "id": "allow-network-research",
+      "enabled": true,
+      "priority": 175,
+      "enforcement": "overridable",
+      "when": {
+        "toolGroups": ["web", "vision", "jira", "confluence"],
+        "baseRisks": ["network"]
+      },
+      "decision": "allow"
+    },
+    {
+      "id": "allow-explore",
+      "enabled": true,
+      "priority": 150,
+      "enforcement": "overridable",
+      "when": { "toolNames": ["explore"] },
+      "decision": "allow"
+    },
+    {
+      "id": "allow-read",
+      "enabled": true,
+      "priority": 100,
+      "enforcement": "overridable",
+      "when": { "baseRisks": ["read"] },
+      "decision": "allow"
+    },
+    {
+      "id": "prompt-local-analysis",
+      "enabled": true,
+      "priority": 50,
+      "enforcement": "overridable",
+      "when": { "toolNames": ["bash", "python_exec"] },
+      "decision": "prompt"
+    },
+    {
+      "id": "deny-everything-else",
+      "enabled": true,
+      "priority": 0,
+      "enforcement": "overridable",
+      "when": {},
+      "decision": "deny"
+    }
+  ]
+}

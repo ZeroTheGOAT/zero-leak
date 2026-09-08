@@ -1,0 +1,531 @@
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  type ApplicationLogLevel,
+  type ApplicationLogPruneRequest,
+  type ApplicationLogPruneResponse,
+  type ApplicationLogQuery,
+  type ApplicationLogRecord,
+  type ApplicationLogSource,
+  applicationLogRecordSchema,
+} from "@nervekit/contracts/logs";
+import { createId } from "@nervekit/contracts";
+import {
+  appendJsonLine,
+  forEachJsonLineReverse,
+  readJsonLines,
+  readJsonLinesTail,
+  rewriteJsonLines,
+} from "../storage-bootstrap/index.js";
+
+export type ApplicationLogContext = Partial<
+  Pick<
+    ApplicationLogRecord,
+    | "requestId"
+    | "projectId"
+    | "conversationId"
+    | "agentId"
+    | "runId"
+    | "toolCallId"
+    | "taskId"
+    | "durationMs"
+  >
+> & {
+  context?: Record<string, unknown>;
+  error?: unknown;
+};
+
+interface ApplicationLoggerOptions {
+  dataDir: string;
+  source?: ApplicationLogSource;
+  component?: string;
+  level?: ApplicationLogLevel;
+  retentionDays?: number;
+  maxBufferedLogs?: number;
+  inherited?: ApplicationLogContext;
+  mirrorToConsole?: boolean;
+  enabled?: boolean;
+  root?: ApplicationLogger;
+}
+
+const levelRank: Record<ApplicationLogLevel, number> = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
+const sensitiveKeyPattern =
+  /authorization|cookie|token|apikey|api_key|password|passwd|secret|credential|private.?key|nerve_daemon_token/i;
+
+export class ApplicationLogger {
+  #seq = 0;
+  #buffer: ApplicationLogRecord[] = [];
+  #appendTail: Promise<void> = Promise.resolve();
+
+  private readonly root: ApplicationLogger;
+  private readonly dataDir: string;
+  private readonly source: ApplicationLogSource;
+  private readonly component: string;
+  private readonly level: ApplicationLogLevel;
+  private readonly retentionDays: number;
+  private readonly maxBufferedLogs: number;
+  private readonly inherited: ApplicationLogContext;
+  private readonly mirrorToConsole: boolean;
+  private readonly enabled: boolean;
+
+  constructor(options: ApplicationLoggerOptions) {
+    this.root = options.root ?? this;
+    this.dataDir = options.dataDir;
+    this.source = options.source ?? "orchestrator";
+    this.component = options.component ?? "app";
+    this.level = options.level ?? "info";
+    this.retentionDays = options.retentionDays ?? 14;
+    this.maxBufferedLogs = options.maxBufferedLogs ?? 2000;
+    this.inherited = options.inherited ?? {};
+    this.mirrorToConsole = options.mirrorToConsole ?? true;
+    this.enabled = options.enabled ?? true;
+  }
+
+  child(
+    context: ApplicationLogContext & {
+      component?: string;
+      source?: ApplicationLogSource;
+    } = {},
+  ): ApplicationLogger {
+    const { component, source, ...rest } = context;
+    return new ApplicationLogger({
+      dataDir: this.dataDir,
+      source: source ?? this.source,
+      component: component ?? this.component,
+      level: this.level,
+      retentionDays: this.retentionDays,
+      maxBufferedLogs: this.maxBufferedLogs,
+      inherited: mergeContext(this.inherited, rest),
+      mirrorToConsole: this.mirrorToConsole,
+      enabled: this.enabled,
+      root: this.root,
+    });
+  }
+
+  async hydrate(): Promise<void> {
+    if (!this.enabled) return;
+    if (this.root !== this) return this.root.hydrate();
+    await mkdir(this.logsDir(), { recursive: true });
+    const logs = await this.readRecentLogs();
+    this.#buffer = logs;
+    this.#seq = logs.at(-1)?.seq ?? 0;
+  }
+
+  async pruneRetention(): Promise<void> {
+    if (!this.enabled) return;
+    if (this.root !== this) return this.root.pruneRetention();
+    const cutoff = Date.now() - this.retentionDays * 24 * 60 * 60 * 1000;
+    const files = await readdir(this.logsDir()).catch(() => []);
+    for (const file of files) {
+      const date = dateFromDatedDiagnosticLogFile(file);
+      if (!date || date.getTime() >= cutoff) continue;
+      await rm(join(this.logsDir(), file), { force: true }).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  debug(message: string, context?: ApplicationLogContext): Promise<void> {
+    return this.write("debug", message, context);
+  }
+
+  info(message: string, context?: ApplicationLogContext): Promise<void> {
+    return this.write("info", message, context);
+  }
+
+  warn(message: string, context?: ApplicationLogContext): Promise<void> {
+    return this.write("warn", message, context);
+  }
+
+  error(message: string, context?: ApplicationLogContext): Promise<void> {
+    return this.write("error", message, context);
+  }
+
+  async withTiming<T>(
+    level: ApplicationLogLevel,
+    message: string,
+    operation: () => Promise<T>,
+    context?: ApplicationLogContext,
+  ): Promise<T> {
+    if (!this.enabled) return operation();
+    const started = performance.now();
+    try {
+      const result = await operation();
+      await this.write(level, message, {
+        ...context,
+        durationMs: Math.round(performance.now() - started),
+      });
+      return result;
+    } catch (error) {
+      await this.error(`${message} failed`, {
+        ...context,
+        durationMs: Math.round(performance.now() - started),
+        error,
+      });
+      throw error;
+    }
+  }
+
+  async query(query: ApplicationLogQuery = {}): Promise<{
+    logs: ApplicationLogRecord[];
+    nextCursor: number;
+    hasMoreBefore: boolean;
+  }> {
+    if (!this.enabled) return { logs: [], nextCursor: 0, hasMoreBefore: false };
+    if (this.root !== this) return this.root.query(query);
+
+    const limit = query.limit ?? 100;
+    if (query.sinceSeq !== undefined) {
+      const sinceSeq = query.sinceSeq;
+      const matches = (await this.readAllLogs()).filter(
+        (log) => log.seq > sinceSeq && matchesLogQuery(log, query),
+      );
+      const logs = matches.slice(0, limit);
+      return {
+        logs,
+        nextCursor: logs.at(-1)?.seq ?? sinceSeq,
+        hasMoreBefore: false,
+      };
+    }
+
+    const newestFirst: ApplicationLogRecord[] = [];
+    const files = (await this.applicationLogFiles()).reverse();
+    for (const file of files) {
+      await forEachJsonLineReverse<unknown>(
+        join(this.logsDir(), file),
+        (value) => {
+          const parsed = applicationLogRecordSchema.safeParse(value);
+          if (!parsed.success) return;
+          const log = parsed.data;
+          if (query.beforeSeq !== undefined && log.seq >= query.beforeSeq)
+            return;
+          if (!matchesLogQuery(log, query)) return;
+          newestFirst.push(log);
+          return newestFirst.length < limit + 1;
+        },
+      );
+      if (newestFirst.length >= limit + 1) break;
+    }
+
+    const logs = newestFirst.slice(0, limit).reverse();
+    return {
+      logs,
+      nextCursor: logs.at(-1)?.seq ?? 0,
+      hasMoreBefore: newestFirst.length > limit,
+    };
+  }
+
+  async prune(
+    query: ApplicationLogPruneRequest = {},
+  ): Promise<ApplicationLogPruneResponse> {
+    if (!this.enabled) return { pruned: 0, remaining: 0 };
+    if (this.root !== this) return this.root.prune(query);
+    if (!hasPruneFilter(query)) {
+      const logs = await this.readAllLogs();
+      for (const file of await this.applicationLogFiles()) {
+        await rm(join(this.logsDir(), file), { force: true }).catch(
+          () => undefined,
+        );
+      }
+      this.#buffer = [];
+      return { pruned: logs.length, remaining: 0 };
+    }
+
+    let pruned = 0;
+    let remaining = 0;
+    this.#buffer = this.#buffer.filter((log) => !matchesLogPrune(log, query));
+    for (const file of await this.applicationLogFiles()) {
+      const path = join(this.logsDir(), file);
+      const parsed = (await readJsonLines<unknown>(path).catch(() => []))
+        .map((value) => applicationLogRecordSchema.safeParse(value))
+        .filter((result) => result.success)
+        .map((result) => result.data);
+      const kept = parsed.filter((log) => !matchesLogPrune(log, query));
+      pruned += parsed.length - kept.length;
+      remaining += kept.length;
+      await rewriteJsonLines(path, kept, 0o600);
+    }
+    return { pruned, remaining };
+  }
+
+  async removeLogsForConversations(
+    conversationIds: Iterable<string>,
+  ): Promise<void> {
+    if (!this.enabled) return;
+    if (this.root !== this)
+      return this.root.removeLogsForConversations(conversationIds);
+    const conversations = new Set(conversationIds);
+    if (conversations.size === 0) return;
+    this.#buffer = this.#buffer.filter(
+      (log) => !log.conversationId || !conversations.has(log.conversationId),
+    );
+    for (const file of await this.applicationLogFiles()) {
+      const path = join(this.logsDir(), file);
+      const logs = await readJsonLines<unknown>(path).catch(() => []);
+      const kept = logs
+        .map((value) => applicationLogRecordSchema.safeParse(value))
+        .filter((result) => result.success)
+        .map((result) => result.data)
+        .filter(
+          (log) =>
+            !log.conversationId || !conversations.has(log.conversationId),
+        );
+      await rewriteJsonLines(path, kept, 0o600);
+    }
+  }
+
+  private async write(
+    level: ApplicationLogLevel,
+    message: string,
+    context: ApplicationLogContext = {},
+  ): Promise<void> {
+    if (!this.enabled || !this.shouldLog(level)) return;
+    const merged = mergeContext(this.inherited, context);
+    const record: ApplicationLogRecord = {
+      seq: this.root.nextSeq(),
+      id: createId("log"),
+      ts: new Date().toISOString(),
+      level,
+      source: this.source,
+      component: this.component,
+      message,
+      ...pickLogRefs(merged),
+      durationMs: merged.durationMs,
+      context: sanitizeContext(merged.context),
+      error: merged.error ? serializeError(merged.error) : undefined,
+    };
+    await this.root.append(record);
+    if (this.mirrorToConsole && (level === "warn" || level === "error")) {
+      const line = `[${record.ts}] ${record.level.toUpperCase()} ${record.source}/${record.component}: ${record.message}`;
+      if (level === "error") console.error(line, record.error ?? "");
+      else console.warn(line);
+    }
+  }
+
+  private shouldLog(level: ApplicationLogLevel): boolean {
+    return levelRank[level] >= levelRank[this.level];
+  }
+
+  private nextSeq(): number {
+    this.#seq += 1;
+    return this.#seq;
+  }
+
+  /**
+   * Serializes all root appends through one tracked promise tail so ignored
+   * fire-and-forget diagnostic writes cannot race each other or teardown.
+   * Each caller still observes its own write failure; the tracked tail
+   * swallows rejections so later appends continue.
+   */
+  private append(record: ApplicationLogRecord): Promise<void> {
+    const queued = this.#appendTail
+      .catch(() => undefined)
+      .then(() => this.appendDirect(record));
+    this.#appendTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  private async appendDirect(record: ApplicationLogRecord): Promise<void> {
+    await appendJsonLine(this.logPathFor(record.ts), record, 0o600);
+    this.#buffer.push(record);
+    if (this.#buffer.length > this.maxBufferedLogs) this.#buffer.shift();
+  }
+
+  /**
+   * Waits until every queued append (including ignored fire-and-forget
+   * diagnostic writes) has settled. Individual write errors stay with their
+   * original callers; flush itself never rejects for a past append failure.
+   */
+  async flush(): Promise<void> {
+    if (this.root !== this) return this.root.flush();
+    await this.#appendTail;
+  }
+
+  private async readRecentLogs(): Promise<ApplicationLogRecord[]> {
+    const files = (await this.applicationLogFiles()).reverse();
+    const recent: ApplicationLogRecord[] = [];
+    for (const file of files) {
+      const remaining = this.maxBufferedLogs - recent.length;
+      if (remaining <= 0) break;
+      const values = await readJsonLinesTail<unknown>(
+        join(this.logsDir(), file),
+        remaining,
+      ).catch(() => []);
+      const parsed = values
+        .map((value) => applicationLogRecordSchema.safeParse(value))
+        .filter((result) => result.success)
+        .map((result) => result.data);
+      recent.unshift(...parsed);
+    }
+    return recent.sort((a, b) => a.seq - b.seq).slice(-this.maxBufferedLogs);
+  }
+
+  private async readAllLogs(): Promise<ApplicationLogRecord[]> {
+    const files = await this.applicationLogFiles();
+    const values = (
+      await Promise.all(
+        files.map((file) =>
+          readJsonLines<unknown>(join(this.logsDir(), file)).catch(() => []),
+        ),
+      )
+    ).flat();
+    return values
+      .map((value) => applicationLogRecordSchema.safeParse(value))
+      .filter((result) => result.success)
+      .map((result) => result.data)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  private async applicationLogFiles(): Promise<string[]> {
+    await mkdir(this.logsDir(), { recursive: true });
+    return (await readdir(this.logsDir()))
+      .filter((file) => /^application-\d{4}-\d{2}-\d{2}\.jsonl$/.test(file))
+      .sort();
+  }
+
+  private logPathFor(ts: string): string {
+    return join(this.logsDir(), `application-${ts.slice(0, 10)}.jsonl`);
+  }
+
+  private logsDir(): string {
+    return join(this.dataDir, "logs");
+  }
+}
+
+export function serializeError(error: unknown): ApplicationLogRecord["error"] {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      cause: error.cause === undefined ? undefined : String(error.cause),
+    };
+  }
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string") {
+      return {
+        name: typeof record.name === "string" ? record.name : undefined,
+        message: record.message,
+        stack: typeof record.stack === "string" ? record.stack : undefined,
+        cause: record.cause === undefined ? undefined : String(record.cause),
+      };
+    }
+    return { message: safeStringify(error) };
+  }
+  return { message: String(error) };
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+export function sanitizeContext(
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  return redactValue(value, 0) as Record<string, unknown>;
+}
+
+function redactValue(value: unknown, depth: number): unknown {
+  if (depth > 8) return "[Truncated]";
+  if (Array.isArray(value))
+    return value.map((item) => redactValue(item, depth + 1));
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = sensitiveKeyPattern.test(key)
+      ? "[Redacted]"
+      : redactValue(child, depth + 1);
+  }
+  return output;
+}
+
+function mergeContext(
+  base: ApplicationLogContext,
+  next: ApplicationLogContext,
+): ApplicationLogContext {
+  return {
+    ...base,
+    ...next,
+    context:
+      base.context || next.context
+        ? { ...(base.context ?? {}), ...(next.context ?? {}) }
+        : undefined,
+  };
+}
+
+function pickLogRefs(context: ApplicationLogContext) {
+  return {
+    requestId: context.requestId,
+    projectId: context.projectId,
+    conversationId: context.conversationId,
+    agentId: context.agentId,
+    runId: context.runId,
+    toolCallId: context.toolCallId,
+    taskId: context.taskId,
+  };
+}
+
+function hasPruneFilter(query: ApplicationLogPruneRequest): boolean {
+  return Object.values(query).some(
+    (value) => value !== undefined && value !== "",
+  );
+}
+
+function matchesLogPrune(
+  log: ApplicationLogRecord,
+  query: ApplicationLogPruneRequest,
+): boolean {
+  return matchesLogQuery(log, query);
+}
+
+function matchesLogQuery(
+  log: ApplicationLogRecord,
+  query: ApplicationLogPruneRequest,
+): boolean {
+  if (query.level && log.level !== query.level) return false;
+  if (query.source && log.source !== query.source) return false;
+  if (query.component && log.component !== query.component) return false;
+  for (const key of [
+    "requestId",
+    "projectId",
+    "conversationId",
+    "agentId",
+    "runId",
+    "toolCallId",
+    "taskId",
+  ] as const) {
+    const value = query[key];
+    if (value && log[key] !== value) return false;
+  }
+  if (
+    query.contains &&
+    !JSON.stringify(log).toLowerCase().includes(query.contains.toLowerCase())
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function dateFromDatedDiagnosticLogFile(file: string): Date | undefined {
+  const match = /^(?:application|desktop)-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(
+    file,
+  );
+  if (!match) return undefined;
+  const date = new Date(`${match[1]}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) ? date : undefined;
+}

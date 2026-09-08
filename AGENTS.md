@@ -1,0 +1,9 @@
+- Nerve defaults portable state to `~/.zeroleak`, daemon HTTP to `3747`, and mobile HTTPS to `3748` when enabled. Never debug or run test servers against the live home; use a copied or fresh `ZEROLEAK_HOME` under `/tmp` and explicit ports. Desktop tests requiring full isolation must also use a separate Electron `userData` profile outside `ZEROLEAK_HOME`.
+- Prefer clean, simple architecture over compatibility layers and workaround shims.
+- Keep shared API, event, policy, and storage schemas in `packages/contracts`; keep session, RPC, replay, and transport lifecycle mechanics in `packages/protocol`. Both must remain transport-neutral.
+- Use official shadcn-svelte components from `packages/ui-kit/src/lib/components/ui` and `@lucide/svelte` icons. Style with theme-token Tailwind utilities, including `success`/`warning`/`info`; use `destructive` for readable red text/tints and `destructive-solid` with `destructive-solid-foreground` for opaque destructive fills. Use monospace only for code, logs, and paths.
+- Shared CSS and tokens live in `packages/ui-kit/src/styles/`, with `app.css` as the entrypoint. Global classes must be deliberate cross-component contracts used by at least two components; `scripts/lib/style-policy.mjs` is the authoritative partial allowlist. Follow `packages/workbench-app/AGENTS.md` for its full styling model.
+- Add automated tests for important behavior, not static exports, pass-through adapters, cosmetic details, or behavior already covered at its owning layer.
+- Before completing package-scoped code changes, run `pnpm fix && pnpm check && pnpm run test:affected` in one Bash invocation. Use `pnpm run test:full` instead when changing root, workspace, or test infrastructure, or when broad validation is required. Fix failures, then rerun the same chain.
+- Run the UI against an existing daemon with `NERVE_API_TARGET=http://127.0.0.1:3747 pnpm dev:ui`.
+- Use the `gh` CLI for GitHub operations.

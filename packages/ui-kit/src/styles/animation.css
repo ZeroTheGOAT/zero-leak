@@ -1,0 +1,221 @@
+/* Centralized keyframes and animation utility classes.
+ * Never define @keyframes inside a component; add them here. */
+
+/* Native startup badge breathing shared by shell-level loading surfaces. */
+.startup-breathe {
+  animation: startup-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes startup-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+/* Shared rotation used by every spinner. Apply with class="spin". */
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Uniform-thickness ring spinner (ui-kit spinner.svelte).
+ * Solid color, symmetric, GPU-composited to avoid sub-pixel wobble at small
+ * sizes. transform-box:fill-box pins rotation to the circle's geometric center. */
+.spinner-ring {
+  animation: spin 1s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform;
+}
+
+/* Hard blink shared by streaming carets / pending indicators.
+ * Components keep their own `animation:` shorthand (timings differ) and only
+ * reference this keyframe. */
+@keyframes pulse {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Status dot pulse (status-dot.svelte). Keep this finite: an infinite paint
+ * animation makes an otherwise idle Electron window redraw continuously. */
+.status-pulse {
+  animation: status-pulse 1.5s ease-in-out 2;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+/* Transcription activity chip entrance (TranscriptionActivity.svelte). */
+@keyframes activity-enter {
+  from {
+    opacity: 0;
+    transform: translateX(0.15rem) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* Stable tool-status glyph swap inside its fixed-size icon box. */
+@keyframes tool-status-enter {
+  from {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Center tab "running" status indicator pulse (editor-tabs.css). */
+@keyframes tab-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--info) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0.36rem transparent;
+  }
+}
+
+/* One-shot entrance for genuinely new live transcript content and the
+ * short-lived waiting row. Applied inside virtual rows so their translated
+ * positioning remains owned by the virtualizer. */
+.transcript-enter-standard,
+.transcript-enter-compact,
+.transcript-enter-minimal {
+  animation-name: transcript-live-enter;
+  animation-timing-function: var(--motion-enter-easing);
+  animation-delay: var(--transcript-enter-delay, 0ms);
+  animation-fill-mode: both;
+  will-change: transform, opacity;
+}
+
+.transcript-enter-standard {
+  --transcript-enter-offset: 0.25rem;
+  animation-duration: var(--motion-enter-duration);
+}
+
+.transcript-enter-compact {
+  --transcript-enter-offset: 0.125rem;
+  animation-duration: var(--motion-enter-compact-duration);
+}
+
+.transcript-enter-minimal {
+  --transcript-enter-offset: 0;
+  animation-duration: var(--motion-enter-minimal-duration);
+}
+
+@keyframes transcript-live-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--transcript-enter-offset, 0.25rem));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript-enter-standard,
+  .transcript-enter-compact,
+  .transcript-enter-minimal {
+    animation-delay: 0ms !important;
+    will-change: auto;
+  }
+}
+
+/* One-shot attention wash for a jump target (settings section navigation).
+ * Applied via class="animate-section-flash"; remove on animationend. */
+.animate-section-flash {
+  animation: section-flash 1.2s ease-out both;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes section-flash {
+  0% {
+    background-color: color-mix(in oklab, var(--primary) 12%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+/* Collapsible content slide (collapsible-content.svelte). Heights come from
+ * bits-ui's measured CSS variable; the animate-collapsible-* utilities are
+ * generated from theme.css tokens. */
+@keyframes collapsible-down {
+  from {
+    height: 0;
+  }
+  to {
+    height: var(--bits-collapsible-content-height);
+  }
+}
+
+@keyframes collapsible-up {
+  from {
+    height: var(--bits-collapsible-content-height);
+  }
+  to {
+    height: 0;
+  }
+}
+
+/* Compositor-friendly working-label activity (WorkingIndicator.svelte). */
+@keyframes working-label-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Directory picker skeleton shimmer (directory-picker.css). */
+@keyframes picker-sheen {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+/* One-time entrance for large brand surfaces (conversation empty states).
+ * Applied via class="brand-signal-enter". Idle views must not loop motion. */
+.brand-signal-enter {
+  animation: brand-signal-enter var(--motion-enter-duration)
+    var(--motion-enter-easing) both;
+}
+
+@keyframes brand-signal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(0.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
