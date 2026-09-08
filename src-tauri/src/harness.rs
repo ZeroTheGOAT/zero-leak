@@ -349,7 +349,7 @@ pub fn remove(st: &AppState, id: &str) -> CoreResult<()> {
     sync_memory_files(st)
 }
 
-pub fn prompt_memories(st: &AppState, workspace_id: Option<&str>) -> String {
+pub fn prompt_memories_for_task(st: &AppState, workspace_id: Option<&str>, prompt: &str) -> String {
     let settings = st.settings();
     if !settings.use_global_memories && !settings.use_project_memories {
         return String::new();
@@ -357,25 +357,49 @@ pub fn prompt_memories(st: &AppState, workspace_id: Option<&str>) -> String {
     let memories = st
         .with_db(|c| crate::db::memories_for_context(c, workspace_id, false))
         .unwrap_or_default();
+    render_memory_context(memories, workspace_id, prompt, settings.use_global_memories, settings.use_project_memories)
+}
+
+fn render_memory_context(mut memories: Vec<MemoryEntry>, workspace_id: Option<&str>, prompt: &str, use_global: bool, use_project: bool) -> String {
+    memories.retain(|memory| memory.enabled && !looks_secret(&memory.content));
+    memories.sort_by_key(|memory| std::cmp::Reverse((memory_relevance(memory, prompt), memory.updated_at)));
     let mut out = String::new();
+    let mut seen = std::collections::HashSet::new();
     for memory in memories {
-        if matches!(memory.scope, MemoryScope::Global) && !settings.use_global_memories {
+        if memory_relevance(&memory, prompt) == 0 { continue; }
+        if matches!(memory.scope, MemoryScope::Global) && !use_global {
             continue;
         }
-        if matches!(memory.scope, MemoryScope::Project) && !settings.use_project_memories {
+        if matches!(memory.scope, MemoryScope::Project) && (!use_project || memory.workspace_id.as_deref() != workspace_id || workspace_id.is_none()) {
             continue;
         }
         let scope = match memory.scope {
             MemoryScope::Global => "global",
             MemoryScope::Project => "project",
         };
-        let line = format!("- [{scope}/{:?}] {}: {}\n", memory.kind, memory.title, memory.content);
+        let key = memory.content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        if !seen.insert(key) { continue; }
+        let line = format!("- [{scope}/{:?}; memory {}; source chat {}; updated {}] {}: {}\n", memory.kind,
+            memory.id, memory.source_session_id.as_deref().unwrap_or("manual"), memory.updated_at, memory.title, memory.content);
         if out.len() + line.len() > PROMPT_MEMORY_BUDGET {
-            break;
+            continue;
         }
         out.push_str(&line);
     }
     out
+}
+
+fn memory_relevance(memory: &MemoryEntry, prompt: &str) -> usize {
+    if prompt.is_empty() { return 1; }
+    let stable = matches!(memory.kind, MemoryKind::Preference | MemoryKind::Instruction)
+        || memory.title.eq_ignore_ascii_case("Operator name") || memory.title.eq_ignore_ascii_case("Project purpose");
+    let text = format!("{} {}", memory.title, memory.content).to_lowercase();
+    let words: std::collections::HashSet<_> = text.split(|c: char| !c.is_alphanumeric()).collect();
+    let query = prompt.to_lowercase();
+    let matches = query.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() > 2 && !["the", "this", "that", "with", "for", "and", "you", "can", "please", "what", "how"].contains(word))
+        .filter(|word| words.contains(word)).count();
+    usize::from(stable) * 10 + matches * 4
 }
 
 pub fn capture_explicit(
@@ -651,9 +675,19 @@ pub fn store_automatic(
         MemoryScope::Global
     };
     let workspace = workspace_id.map(str::to_string);
+    let session = st.with_db(|c| crate::db::session(c, session_id))?;
+    if session.workspace_id.as_deref() != workspace_id {
+        return Err(CoreError::Denied("Automatic memory scope must match its source chat.".into()));
+    }
+    if let Some(existing) = st.with_db(|c| crate::db::memory_by_content(c, scope, workspace.as_deref(), content))? {
+        return Ok(existing.enabled.then_some(existing));
+    }
     if let Some(existing) = st.with_db(|c| {
         crate::db::memory_by_title(c, scope, workspace.as_deref(), title)
     })? {
+        // Disabling is an operator decision, not an invitation for the curator
+        // to restore the same item on the next turn.
+        if !existing.enabled { return Ok(None); }
         if existing.content.eq_ignore_ascii_case(content)
             && existing.kind == kind
             && existing.enabled
@@ -666,7 +700,7 @@ pub fn store_automatic(
             MemoryPatch {
                 content: Some(content.to_string()),
                 kind: Some(kind),
-                enabled: Some(true),
+                enabled: None,
                 source_session_id: Some(session_id.to_string()),
                 ..Default::default()
             },
@@ -1031,6 +1065,40 @@ pub fn rewrite_session_mirror(session_id: &str, messages: &[StoredMessage]) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved(title: &str, content: &str, scope: MemoryScope, workspace: Option<&str>, kind: MemoryKind) -> MemoryEntry {
+        MemoryEntry { id: title.into(), title: title.into(), content: content.into(), scope,
+            workspace_id: workspace.map(str::to_string), kind, source_session_id: Some("source-chat".into()),
+            enabled: true, created_at: 1, updated_at: 2 }
+    }
+
+    #[test]
+    fn memory_context_is_relevant_scoped_and_inspectable() {
+        let mut disabled = saved("Disabled", "Prefer enormous answers", MemoryScope::Global, None, MemoryKind::Preference);
+        disabled.enabled = false;
+        let rows = vec![
+            saved("Style", "Prefer concise answers", MemoryScope::Global, None, MemoryKind::Preference),
+            saved("Renderer", "Dashboard uses local assets", MemoryScope::Project, Some("alpha"), MemoryKind::Decision),
+            saved("Other project", "Dashboard is private beta", MemoryScope::Project, Some("beta"), MemoryKind::Decision),
+            saved("Old task", "Completed spreadsheet import", MemoryScope::Project, Some("alpha"), MemoryKind::Summary),
+            saved("Secret", "api_key=secret", MemoryScope::Global, None, MemoryKind::Preference), disabled,
+        ];
+        let text = render_memory_context(rows.clone(), Some("alpha"), "Fix dashboard", true, true);
+        assert!(text.contains("Prefer concise answers"));
+        assert!(text.contains("Dashboard uses local assets"));
+        assert!(text.contains("source chat source-chat; updated 2"));
+        for absent in ["private beta", "spreadsheet import", "enormous", "api_key"] { assert!(!text.contains(absent)); }
+        let personal = render_memory_context(rows.clone(), None, "Fix dashboard", true, true);
+        assert!(!personal.contains("local assets"));
+        assert!(render_memory_context(rows, Some("alpha"), "Fix dashboard", false, false).is_empty());
+    }
+
+    #[test]
+    fn duplicate_content_is_injected_once() {
+        let rows = vec![saved("Style", "Prefer concise answers", MemoryScope::Global, None, MemoryKind::Preference),
+            saved("Answer style", "Prefer concise answers", MemoryScope::Project, Some("alpha"), MemoryKind::Preference)];
+        assert_eq!(render_memory_context(rows, Some("alpha"), "hello", true, true).matches("Prefer concise answers").count(), 1);
+    }
 
     #[test]
     fn first_start_builds_the_complete_harness_contract() {

@@ -345,7 +345,15 @@ fn classify_task(
         return (TaskKind::EngineeringDrawing, why);
     }
 
-    // 2. Attachments, by file type. When a file is attached and the prompt named
+    // 2. Attachments, by file type. Explicit software work takes precedence:
+    // a specification or tracker is input, not the requested deliverable.
+    if subject.is_some() {
+        let (intent, why) = classify_task(prompt, &[], has_workspace, 0);
+        if intent == TaskKind::Code {
+            return (intent, format!("{why} {attached_wording}; these files are supporting inputs."));
+        }
+    }
+    // When a file is attached and the prompt named
     //    no kind, the file's own type routes the turn — the attachment is the
     //    subject, not a general request for the reasoning rule at the bottom to
     //    absorb. The file the prompt named (if any) is the one classified.
@@ -377,7 +385,7 @@ fn classify_task(
         "python", "rust", "javascript", "sql", "script", "component", "compiler",
         "error", "stack trace", "repository", "repo", "commit", "endpoint", "struct",
         "interface", "import", "dependency", "package.json", "cargo",
-        "tests", "unit test", "test case", "test suite", "pytest",
+        "tests", "unit test", "test case", "test suite", "pytest", "dashboard", "website", "web app",
     ];
     let words = words_of(&p);
     let verb = CODE_VERBS.iter().find(|v| verb_used(&words, v));
@@ -520,7 +528,7 @@ fn select_model(
             };
             format!("Selected {name}")
         }
-        None => "No model needed".to_string(),
+        None => "No suitable model available".to_string(),
     };
 
     Step::start(st, StepKind::SelectingModel, title)
@@ -1331,6 +1339,27 @@ fn tool_name_of(raw: &str) -> Option<ToolName> {
 
 /// The step kind a tool shows up as, so the timeline reads as actions rather
 /// than as a list of function names.
+fn tool_progress(calls: &[ToolCall]) -> String {
+    let mut actions = Vec::new();
+    for call in calls {
+        let action = match call.name.as_str() {
+            "read_file" | "read_spreadsheet" | "list_files" | "search_files" => "inspect the relevant local files",
+            "search_knowledge" => "look for supporting information in local knowledge",
+            "ocr_document" | "analyze_image" => "read the attached document or image",
+            "write_file" | "edit_file" | "write_spreadsheet" | "create_directory" => "make the requested file changes",
+            "run_command" | "execute_python" => "run the next local command and check its result",
+            "generate_docx" | "generate_xlsx" | "generate_pptx" | "generate_pdf" | "generate_text" => "prepare the requested output files",
+            "inspect_artifact" | "check_page" | "analyze_data" => "check the generated result",
+            "serve_folder" | "start_dev_server" => "start the local preview",
+            "ask_operator" => "ask for the missing information before continuing",
+            _ => continue,
+        };
+        if !actions.contains(&action) { actions.push(action); }
+    }
+    if actions.is_empty() { String::new() }
+    else { format!("I'll {}.", actions.into_iter().take(2).collect::<Vec<_>>().join(" and ")) }
+}
+
 fn step_kind_of(t: ToolName) -> StepKind {
     match t {
         ToolName::ListFiles | ToolName::ReadFile | ToolName::ReadSpreadsheet => StepKind::ReadingFile,
@@ -3860,6 +3889,7 @@ engineering drawings, equipment photographs, handwritten notes and scanned docum
 the operator brings up such material, treat it as confidential and apply the accuracy rules \
 below exactly; until they do, keep the conversation on what they actually asked about.\n\n\
 How to work:\n\
+- Communicate in brief, plain progress sentences in your visible response text, separate from thinking. Before the first tool call, say what you will do. Between meaningful batches, state what the actual results established and what you will do next. Do not merely announce tool names, repeat the checklist, or claim success before verification. Include this visible text alongside tool calls; private reasoning is not a progress update.\n\
 - Plan before you act. If the task will take more than one tool call, call update_plan with \
 the steps first, then work them in order, calling update_plan again each time a step starts \
 or finishes. Send the complete list every time. The plan is what the operator watches, so \
@@ -6221,6 +6251,11 @@ fn project_session_recall(
     current_session_id: &str,
     prompt: &str,
 ) -> (String, usize) {
+    // Past conversations are fetched on demand, not injected into every task
+    // merely because it shares a word with an older request.
+    if !st.settings().use_project_memories || !asks_for_prior_context(prompt) {
+        return (String::new(), 0);
+    }
     let rows = match st.with_db(|c| {
         crate::db::project_session_messages(
             c,
@@ -6352,7 +6387,7 @@ fn memory_transcript(st: &AppState, session_id: &str) -> String {
     let mut budget = MEMORY_SYNTHESIS_CHARS;
     let mut kept = Vec::new();
     for message in stored.iter().rev() {
-        if message.content.trim().is_empty() {
+        if message.content.trim().is_empty() || crate::harness::looks_secret(&message.content) {
             continue;
         }
         let role = if message.sender == "user" { "Operator" } else { "Assistant" };
@@ -6389,7 +6424,10 @@ async fn synthesize_memories(
     if transcript.trim().is_empty() {
         return Ok(MemoryUpdate::default());
     }
-    let existing = crate::harness::prompt_memories(st, workspace.map(|w| w.id.as_str()));
+    let memory_scope = if workspace.is_some() { MemoryScope::Project } else { MemoryScope::Global };
+    let existing = st.with_db(|c| crate::db::memories_by_scope(c, memory_scope, workspace.map(|w| w.id.as_str())))?
+        .into_iter().filter(|m| !crate::harness::looks_secret(&m.content))
+        .take(100).map(|m| json!({"title":m.title,"content":m.content,"enabled":m.enabled})).collect::<Vec<_>>();
     let scope = workspace
         .map(|w| format!("project '{}'", w.name))
         .unwrap_or_else(|| "the operator's global personal context".to_string());
@@ -6404,6 +6442,7 @@ Do not retain one-off requests, live status, guesses, pleasantries, generic advi
 The current operator request overrides stored memories. A brief acceptance such as "sounds good" confirms only the decision or gist the operator engaged with, not every detail in an assistant proposal. Store what the operator stated or clearly adopted at that level, not the assistant's reasoning. Use an existing semantic title when refining or correcting a memory, and return no new item when the durable meaning is already represented. Never store preferences that would suppress verification, honest criticism, safety checks or approval rules. Memory is context, not evidence, and is best-effort rather than load-bearing; do not announce a save in the conversation.
 
 Produce both layers:
+Disabled existing memories reflect an operator decision: never re-enable or recreate them under a new title. The supplied transcript contains operator statements and assistant prose, not independently verified tool evidence. Never promote an assistant's claimed success into a proven workflow. Only retain decisions clearly adopted by the operator, and label uncertain prior-work summaries as unverified.
 - raw_memory: compact task-grouped evidence and reusable takeaways from this chat, including outcome, preference signals, failures, verification, and retrieval handles when present;
 - rollout_summary: a concise but sufficient recap so future agents usually do not need the raw transcript;
 - memories: at most five consolidated, self-contained items that deserve direct injection into future chats in this exact scope. Use stable semantic titles and reuse an existing title when refining or correcting it.
@@ -7218,14 +7257,21 @@ in the request; asked again with them named.",
     // Models may introduce a tool call with a short, useful progress sentence.
     // It is ordinary visible prose, not reasoning_content, and emitting it here
     // preserves the real text/action order in the conversation.
-    if !result.text.trim().is_empty() {
+    let progress = if result.text.trim().is_empty() {
+        let fallback = tool_progress(&result.tool_calls);
+        if fallback.is_empty() && ctx.run.current_plan().is_empty()
+            && result.tool_calls.iter().any(|call| call.name == "update_plan") {
+            "I'll outline the steps, then work through your request.".to_string()
+        } else { fallback }
+    } else { result.text.clone() };
+    if !progress.trim().is_empty() {
         ctx.st.emit(
             "agent://text",
             RunText {
                 run_id: ctx.run.run_id.clone(),
                 session_id: ctx.session_id.clone(),
                 kind: RunTextKind::Commentary,
-                delta: result.text.clone(),
+                delta: progress,
             },
         );
     }
@@ -7314,7 +7360,13 @@ in the request; asked again with them named.",
         // ninety seconds and "Run command: npm install" for ninety seconds.
         emit_phase(&ctx.st, &ctx.run.run_id, &ctx.session_id, RunPhaseKind::Executing, Some(&title));
 
-        let step = Step::start(&ctx.st, step_kind_of(tool), title).tool(tool);
+        let input_detail = match tool {
+            ToolName::RunCommand => call.arguments.get("command").and_then(Value::as_str),
+            ToolName::ExecutePython => call.arguments.get("code").and_then(Value::as_str),
+            _ => None,
+        }.unwrap_or(&title).to_string();
+        let step = Step::start(&ctx.st, step_kind_of(tool), title).tool(tool)
+            .detail(input_detail.clone());
         let started = now_ms();
         let summary = if target.is_empty() { call.name.clone() } else { target.clone() };
 
@@ -7335,8 +7387,9 @@ in the request; asked again with them named.",
                 // `read_file` that failed grounds nothing.
                 ctx.note_tool(tool, &summary);
 
-                let first = body.lines().next().unwrap_or("").chars().take(160).collect::<String>();
-                step.detail(first).citations(cites.clone()).ok(&ctx.st);
+                let mut output = body.chars().take(8000).collect::<String>();
+                if body.chars().count() > 8000 { output.push_str("\n[Output truncated]"); }
+                step.detail(format!("{input_detail}\n\nResult:\n{output}")).citations(cites.clone()).ok(&ctx.st);
                 all_citations.extend(cites);
                 messages.push(ChatMessage::tool_result(
                     &call.id,
@@ -7356,7 +7409,7 @@ in the request; asked again with them named.",
                     Some(e.message()),
                 );
                 if denied {
-                    step.detail(e.message()).skip(&ctx.st);
+                    step.detail(format!("{input_detail}\n\n{}", e.message())).skip(&ctx.st);
                 } else {
                     step.fail(&ctx.st, &e.message());
                 }
@@ -7401,7 +7454,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
     let indexed_docs = crate::knowledge::stats(&st).map(|s| s.documents).unwrap_or(0);
     let instructions = crate::harness::prompt_instructions(workspace.as_ref());
     let memories = if input.use_memories {
-        crate::harness::prompt_memories(&st, ctx.workspace_id.as_deref())
+        crate::harness::prompt_memories_for_task(&st, ctx.workspace_id.as_deref(), &input.prompt)
     } else {
         String::new()
     };
@@ -8762,6 +8815,13 @@ mod routing {
         let (kind,why) = super::classify_task("[Workflow: dashboard]\nVerified internal dashboard", &["actions.xlsx".into()], true, 1);
         assert_eq!(kind,TaskKind::Code);
         assert!(why.contains("supporting data"));
+    }
+    #[test]
+    fn software_deliverables_outrank_supporting_documents() {
+        for prompt in ["Build a dashboard from this tracker", "Write a Python script using this specification", "Create a website from this document"] {
+            assert_eq!(super::classify_task(prompt, &["input.xlsx".into()], true, 0).0, TaskKind::Code);
+        }
+        assert_eq!(super::classify_task("Summarize this inspection report", &["report.docx".into()], true, 0).0, TaskKind::DigitalDocument);
     }
     #[test]
     fn attachment_basenames_are_resolved_without_accepting_traversal_or_ambiguity() {

@@ -93,7 +93,8 @@ const StepRow: React.FC<{ step: AgentStep }> = ({ step }) => {
   const [open, setOpen] = useState(false);
   const Icon = STEP_ICON[step.kind] ?? ListChecks;
   const model = modelById(step.modelId);
-  const hasDetail = Boolean(step.detail || step.error || step.citations?.length);
+  const hasDetail = true;
+  const command = step.kind === 'running_command' || step.kind === 'running_python';
 
   const tone =
     step.status === 'failed'
@@ -106,6 +107,7 @@ const StepRow: React.FC<{ step: AgentStep }> = ({ step }) => {
     <div>
       <button
         onClick={() => hasDetail && setOpen(!open)}
+        aria-expanded={open}
         className={`w-full flex items-start space-x-2 py-1 text-left group ${
           hasDetail ? 'cursor-pointer' : 'cursor-default'
         }`}
@@ -124,10 +126,10 @@ const StepRow: React.FC<{ step: AgentStep }> = ({ step }) => {
         <Icon size={12} className={`flex-shrink-0 mt-[3px] ${tone}`} />
         <span className="flex-1 min-w-0">
           <span className={`text-xs ${tone} ${step.status === 'skipped' ? 'line-through' : ''}`}>
-            {step.title}
+            {command ? (step.status === 'running' ? 'Running command' : step.status === 'done' ? 'Ran command' : 'Command attempt') : step.title}
           </span>
-          {model && (
-            <span className="ml-2 text-[10px] text-[var(--muted-foreground)]">{model.displayName}</span>
+          {step.modelId && (
+            <span className="ml-2 text-[10px] text-[var(--muted-foreground)]">{model?.displayName ?? step.modelId}</span>
           )}
           {step.durationMs !== undefined && step.status !== 'running' && (
             <span className="ml-2 text-[10px] text-[var(--muted-foreground)] tabular-nums">
@@ -143,9 +145,10 @@ const StepRow: React.FC<{ step: AgentStep }> = ({ step }) => {
       </button>
       {open && (
         <div className="ml-[26px] mb-1.5 pl-2.5 border-l border-[var(--border)] space-y-1.5">
-          {step.detail && (
-            <p className="text-[11px] text-[var(--muted-foreground)] leading-relaxed whitespace-pre-wrap font-mono">
-              {step.detail}
+          <p className="text-[11px] text-[var(--muted-foreground)]">Status: {step.status}</p>
+          {(step.detail || step.title) && (
+            <p className="max-h-80 overflow-auto break-words text-[12px] text-[var(--muted-foreground)] leading-relaxed whitespace-pre-wrap font-mono">
+              {step.detail || step.title}
             </p>
           )}
           {step.error && (
@@ -176,15 +179,14 @@ const StepRow: React.FC<{ step: AgentStep }> = ({ step }) => {
 
 const ActionGroup: React.FC<{ steps: AgentStep[]; defaultOpen?: boolean }> = ({
   steps,
-  defaultOpen = false,
 }) => {
   const hasRunning = steps.some((s) => s.status === 'running');
   // Manual override wins; otherwise auto-open running groups. No effect needed,
   // so no cascading render — the open state derives from props until touched.
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? defaultOpen ?? hasRunning;
+  const open = manualOpen ?? false;
 
-  const label = describeSteps(steps);
+  const label = hasRunning ? (steps.find((s) => s.status === 'running')?.kind === 'running_command' || steps.find((s) => s.status === 'running')?.kind === 'running_python' ? 'Running commands' : steps.find((s) => s.status === 'running')!.title) : describeSteps(steps);
   const total = groupDuration(steps);
   const failed = steps.filter((s) => s.status === 'failed').length;
   const FirstIcon = STEP_ICON[steps[0]?.kind] ?? ListChecks;
@@ -321,25 +323,39 @@ export const WorkSummary: React.FC<{
   const total = allSteps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0) + thinkingMs;
 
   const runningStep = allSteps.find((s) => s.status === 'running');
-  const headline = runningStep?.title ?? allSteps[allSteps.length - 1]?.title ?? 'Working';
+  const headline = thinkingLive ? 'Thinking' : runningStep?.kind === 'running_command' || runningStep?.kind === 'running_python' ? 'Running commands' : runningStep?.title ?? 'Working';
+  const selection = [...allSteps].reverse().find((s) => s.kind === 'selecting_model');
   const actionCount = allSteps.length;
 
   const titles = allSteps.map((s) => s.title).join('\n');
+  // Commentary divides meaningful batches. Thinking and internal bookkeeping
+  // must not fragment a batch into a dozen single-action dropdowns.
+  const timeline: ChatActivityBlock[] = [];
+  const diagnostics: ChatActivityBlock[] = [];
+  for (const block of workBlocks) {
+    if (block.type === 'text' && block.kind === 'commentary') {
+      timeline.push(block);
+    } else if (block.type === 'actions') {
+      const internal = block.steps.filter((s) => ['planning', 'selecting_model', 'loading_model'].includes(s.kind));
+      const visible = block.steps.filter((s) => !['planning', 'selecting_model', 'loading_model'].includes(s.kind));
+      if (internal.length) diagnostics.push({ ...block, steps: internal });
+      if (visible.length) {
+        const previous = timeline[timeline.length - 1];
+        if (previous?.type === 'actions') previous.steps.push(...visible);
+        else timeline.push({ ...block, steps: [...visible] });
+      }
+    } else diagnostics.push(block);
+  }
 
   return (
-    <div className="border border-[var(--border)] rounded-lg bg-[var(--sidebar)] overflow-hidden">
+    <div className="border-b border-[var(--border)] pb-2 overflow-hidden">
       <button
         onClick={() => setManualCollapsed(!collapsed)}
         aria-expanded={!collapsed}
         title={titles}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-[var(--accent)] transition"
+        className="w-full flex items-center gap-2 py-2 hover:text-[var(--foreground)] transition"
       >
-        <span className="flex items-center space-x-2 text-[11px] text-[var(--muted-foreground)] min-w-0">
-          {collapsed ? (
-            <ChevronRight size={12} className="flex-shrink-0" />
-          ) : (
-            <ChevronDown size={12} className="flex-shrink-0" />
-          )}
+        <span className="flex items-center space-x-2 text-[14px] text-[var(--muted-foreground)] min-w-0">
           {live ? (
             <>
               <Loader2 size={12} className="animate-spin text-[var(--info)] flex-shrink-0" />
@@ -366,15 +382,27 @@ export const WorkSummary: React.FC<{
             </>
           )}
         </span>
-        {live && <Loader2 size={12} className="animate-spin text-[var(--info)] flex-shrink-0" />}
+        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </button>
+      {selection && (
+        <details className="text-[12px] text-[var(--muted-foreground)] mb-1">
+          <summary className="cursor-pointer py-1">{selection.title}</summary>
+          <p className="pl-3 py-1 whitespace-pre-wrap">{selection.detail ?? 'Selection reason was not recorded.'}</p>
+        </details>
+      )}
 
       {!collapsed && (
         <div className="px-3 pb-2.5 pt-1 space-y-1.5">
-          {workBlocks.map((block, index) => {
+          {timeline.map((block) => {
             if (block.type === 'actions') {
               const hasRunning = block.steps.some((s) => s.status === 'running');
-              return <ActionGroup key={block.id} steps={block.steps} defaultOpen={hasRunning} />;
+              const groups: AgentStep[][] = [];
+              for (const step of block.steps) {
+                const previous = groups[groups.length - 1];
+                if (previous && GROUP_PHRASE[previous[0].kind] === GROUP_PHRASE[step.kind]) previous.push(step);
+                else groups.push([step]);
+              }
+              return <React.Fragment key={block.id}>{groups.map((steps) => <ActionGroup key={steps[0].id} steps={steps} defaultOpen={hasRunning && steps.some((s) => s.status === 'running')} />)}</React.Fragment>;
             }
             if (block.type === 'console') {
               return (
@@ -388,26 +416,24 @@ export const WorkSummary: React.FC<{
             }
             // text thinking / commentary — thinkingLive applies to the LAST
             // block only, same rule as before so only one spinner ever shows.
-            if (block.kind === 'thinking') {
-              return (
-                <ThinkingRow
-                  key={block.id}
-                  text={block.text}
-                  live={thinkingLive && index === workBlocks.length - 1}
-                  startedAt={block.startedAt}
-                  endedAt={block.endedAt}
-                />
-              );
-            }
             return (
               <div
                 key={block.id}
-                className="text-[13px] leading-relaxed text-[var(--foreground)] whitespace-pre-wrap"
+                className="py-3 text-[14px] leading-relaxed text-[var(--foreground)] whitespace-pre-wrap"
               >
                 {block.text}
               </div>
             );
           })}
+          {diagnostics.length > 0 && <details className="pt-2 text-[12px] text-[var(--muted-foreground)]">
+            <summary className="cursor-pointer">Technical details · planning, model loading and thinking</summary>
+            <div className="mt-2 space-y-2">
+              {diagnostics.map((block) => block.type === 'actions'
+                ? <ActionGroup key={block.id} steps={block.steps} />
+                : block.type === 'text' ? <ThinkingRow key={block.id} text={block.text} startedAt={block.startedAt} endedAt={block.endedAt} />
+                : <details key={block.id}><summary className="cursor-pointer">Console output</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.text}</pre></details>)}
+            </div>
+          </details>}
         </div>
       )}
     </div>

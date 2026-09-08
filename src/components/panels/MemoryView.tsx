@@ -57,7 +57,7 @@ export const MemoryView: React.FC = () => {
   } = useApp();
 
   const [surface, setSurface] = useState<'memories' | 'instructions'>('memories');
-  const [scope, setScope] = useState<MemoryScope>('global');
+  const [scope, setScope] = useState<MemoryScope>(activeWorkspace ? 'project' : 'global');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [kind, setKind] = useState<MemoryKind>('preference');
@@ -294,6 +294,9 @@ export const MemoryView: React.FC = () => {
                       </div>
                     </div>
                     <p className="mt-1.5 whitespace-pre-wrap text-[10.5px] leading-relaxed text-[var(--muted-foreground)]">{memory.content}</p>
+                    <p className="mt-1.5 text-[10px] text-[var(--muted-foreground)]">
+                      {memory.enabled ? 'Available when relevant' : 'Disabled · excluded from memory context'} · Updated {new Date(memory.updatedAt).toLocaleDateString()}
+                    </p>
                     {memory.sourceSessionId && (
                       <p className="mt-1.5 truncate font-mono text-[9px] text-[var(--muted-foreground)]">from {memory.sourceSessionId}</p>
                     )}

@@ -53,6 +53,14 @@ export const ROUTER_BIND_HOST = '127.0.0.1';
 
 export const MODEL_REGISTRY: ModelEntry[] = [
   {
+    id: 'qwen3.5-9b', displayName: 'Qwen 3.5 9B', backend: 'llama.cpp',
+    location: 'this_device', source: `${MODELS_ROOT}/qwen3.5-9b/Qwen_Qwen3.5-9B-Q4_K_M.gguf`,
+    architecture: 'qwen35', quantization: 'Q4_K_M', contextSize: 8192,
+    trainedContext: 262144, kvCacheType: 'f16', capabilities: ['general', 'reasoning', 'coding', 'tools'],
+    estimatedVramMb: 6900, fileSizeBytes: 6169341984, priority: 'primary',
+    note: 'Local coding model; conservative 8K text-only profile. VRAM is estimated. Gemma E4B is the coding fallback.',
+  },
+  {
     id: 'gemma-4-e4b',
     displayName: 'Gemma 4 E4B',
     backend: 'llama.cpp',
@@ -64,7 +72,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     contextSize: 16384,
     trainedContext: 131072,
     kvCacheType: 'q8_0',
-    capabilities: ['general', 'reasoning', 'vision', 'drawings', 'documents', 'tools'],
+    capabilities: ['general', 'reasoning', 'coding', 'vision', 'drawings', 'documents', 'tools'],
     estimatedVramMb: 4373,
     fileSizeBytes: 5154941280 + 991552256,
     priority: 'primary',
@@ -247,9 +255,9 @@ export const ROUTING_RULES: RouteRule[] = [
     kind: 'code',
     label: 'Source code',
     basis: 'file_type',
-    modelId: 'nemotron-cascade-8b',
+    modelId: 'qwen3.5-9b',
     fallbackModelId: 'gemma-4-e4b',
-    detail: 'Matched on extension against the known source-file set.',
+    detail: 'Coding uses local Qwen 3.5 9B when installed, with Gemma 4 E4B as fallback.',
   },
   {
     kind: 'long_context',
