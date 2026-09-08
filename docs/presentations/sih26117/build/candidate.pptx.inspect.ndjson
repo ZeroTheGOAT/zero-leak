@@ -1,0 +1,198 @@
+{"kind":"deck","id":"pr/ayl6lz","name":"Deck"}
+{"kind":"layout","layoutId":"ffe6d4c1-533f-4bf7-89de-f798a459b7ef","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"9647d0ed-3d99-422c-8ff5-5193b1589961","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/y06122","slide":1,"title":"SMART INDIA HACKATHON 2026","textShapes":11}
+{"kind":"shape","id":"sh/6lczixs3","slide":1,"bbox":[64,60,116,5]}
+{"kind":"textbox","id":"sh/tonytcre","slide":1,"text":"SMART INDIA HACKATHON 2026","textPreview":"SMART INDIA HACKATHON 2026","textChars":26,"textLines":1,"bbox":[64,80,520,24]}
+{"kind":"textbox","id":"sh/snuhk7a9","slide":1,"text":"117","textPreview":"117","textChars":3,"textLines":1,"bbox":[872,48,304,155]}
+{"kind":"textbox","id":"sh/fq5gv29k","slide":1,"text":"SOVEREIGN\nON-PREMISE\nAGENTIC AI","textPreview":"SOVEREIGN | ON-PREMISE | AGENTIC AI","textChars":31,"textLines":3,"bbox":[944,224,240,116]}
+{"kind":"textbox","id":"sh/epwzmxsz","slide":1,"text":"ZeroLeak AI","textPreview":"ZeroLeak AI","textChars":11,"textLines":1,"bbox":[64,214,800,76]}
+{"kind":"textbox","id":"sh/1snyxcrq","slide":1,"text":"A local workbench for confidential industrial work","textPreview":"A local workbench for confidential industrial work","textChars":50,"textLines":1,"bbox":[68,300,720,40]}
+{"kind":"shape","id":"sh/greho7a5","slide":1,"bbox":[68,366,720,1]}
+{"kind":"textbox","id":"sh/vu1gji9g","slide":1,"text":"Problem Statement","textPreview":"Problem Statement","textChars":17,"textLines":1,"bbox":[68,397,220,22]}
+{"kind":"textbox","id":"sh/atsfadsv","slide":1,"text":"SIH26117  |  Sovereign On-Premise Agentic AI Workbench using Open-Weight Multimodal LLMs for Confidential Industrial Work","textPreview":"SIH26117  |  Sovereign On-Premise Agentic AI Workbench using Open-Weight Multimodal LLMs for Confidential Industrial Work","textChars":121,"textLines":1,"bbox":[68,423,730,58]}
+{"kind":"textbox","id":"sh/g7uxk7ix","slide":1,"text":"Mangalore Refinery and Petrochemicals Limited (MRPL)  •  Smart Automation  •  Software","textPreview":"Mangalore Refinery and Petrochemicals Limited (MRPL)  •  Smart Automation  •  Software","textChars":86,"textLines":1,"bbox":[68,523,820,25]}
+{"kind":"textbox","id":"sh/h83etcji","slide":1,"text":"Team: [TEAM NAME]   •   Team ID: [TEAM ID]","textPreview":"Team: [TEAM NAME]   •   Team ID: [TEAM ID]","textChars":42,"textLines":1,"bbox":[68,589,520,25]}
+{"kind":"textbox","id":"sh/u5cfix07","slide":1,"text":"Idea submission deck","textPreview":"Idea submission deck","textChars":20,"textLines":1,"bbox":[68,625,240,20]}
+{"kind":"textbox","id":"sh/f6lwr21c","slide":1,"text":"Prototype evidence from a local ZeroLeak AI workstation","textPreview":"Prototype evidence from a local ZeroLeak AI workstation","textChars":55,"textLines":1,"bbox":[690,625,520,20]}
+{"kind":"notes","id":"nt/y06122","slide":1,"text":"Problem statement metadata: SIH26117, S.No. 117, title, MRPL, category Software and theme Smart Automation.\nPrimary source: https://sih.gov.in/sih2026PS\nCross-check: https://github.com/jeevansai-hub/SIH-2026-/blob/main/ps_2026/SIH26117.md\nProject source: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/README.md\nReplace [TEAM NAME] and [TEAM ID] with portal-registered values before submission."}
+{"kind":"slide","id":"sl/kl91hb","slide":2,"title":"01  /  PROPOSED SOLUTION","textShapes":17}
+{"kind":"textbox","id":"sh/zepkfyhw","slide":2,"text":"01  /  PROPOSED SOLUTION","textPreview":"01  /  PROPOSED SOLUTION","textChars":24,"textLines":1,"bbox":[64,42,600,22]}
+{"kind":"textbox","id":"sh/0fy1o3ih","slide":2,"text":"A private agent for work that cannot leave the site","textPreview":"A private agent for work that cannot leave the site","textChars":51,"textLines":1,"bbox":[64,72,900,92]}
+{"kind":"textbox","id":"sh/1g72h8z2","slide":2,"text":"The workbench keeps documents local while still acting like a useful task partner.","textPreview":"The workbench keeps documents local while still acting like a useful task partner.","textChars":82,"textLines":1,"bbox":[66,170,1100,30]}
+{"kind":"shape","id":"sh/qpgjit0f","slide":2,"bbox":[66,210,27,27]}
+{"kind":"textbox","id":"sh/rqp0by10","slide":2,"text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[66,213,27,18]}
+{"kind":"textbox","id":"sh/cry1k3i5","slide":2,"text":"Self-hosted","textPreview":"Self-hosted","textChars":11,"textLines":1,"bbox":[110,208,280,25]}
+{"kind":"textbox","id":"sh/dc7idozq","slide":2,"text":"Runs on the organization’s own workstation or GPU server. Public cloud assistants never sit in the workflow.","textPreview":"Runs on the organization’s own workstation or GPU server. Public cloud assistants never sit in the workflow.","textChars":108,"textLines":1,"bbox":[110,235,520,44]}
+{"kind":"shape","id":"sh/ilwje903","slide":2,"bbox":[66,311,27,27]}
+{"kind":"textbox","id":"sh/3m507e1o","slide":2,"text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[66,314,27,18]}
+{"kind":"textbox","id":"sh/rmpc32hg","slide":2,"text":"Task-aware","textPreview":"Task-aware","textChars":10,"textLines":1,"bbox":[110,309,280,25]}
+{"kind":"textbox","id":"sh/qlgbax0v","slide":2,"text":"Routes coding, long-document, OCR and vision work to the right local model on demand.","textPreview":"Routes coding, long-document, OCR and vision work to the right local model on demand.","textChars":85,"textLines":1,"bbox":[110,336,520,44]}
+{"kind":"shape","id":"sh/do7u5cz6","slide":2,"bbox":[66,412,27,27]}
+{"kind":"textbox","id":"sh/cnytc7i1","slide":2,"text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[66,415,27,18]}
+{"kind":"textbox","id":"sh/zqpc7mhc","slide":2,"text":"Actionable","textPreview":"Actionable","textChars":10,"textLines":1,"bbox":[110,410,280,25]}
+{"kind":"textbox","id":"sh/epgbeh0r","slide":2,"text":"Reads files, searches local knowledge, runs sandboxed tools and creates reviewable deliverables.","textPreview":"Reads files, searches local knowledge, runs sandboxed tools and creates reviewable deliverables.","textChars":96,"textLines":1,"bbox":[110,437,520,44]}
+{"kind":"shape","id":"sh/1cru9czi","slide":2,"bbox":[66,548,550,74]}
+{"kind":"textbox","id":"sh/0rytg7ix","slide":2,"text":"The output is a work package","textPreview":"The output is a work package","textChars":28,"textLines":1,"bbox":[88,566,480,23]}
+{"kind":"textbox","id":"sh/vu5cvi18","slide":2,"text":"Source citations  +  approval note  +  action tracker","textPreview":"Source citations  +  approval note  +  action tracker","textChars":53,"textLines":1,"bbox":[88,595,460,22]}
+{"kind":"shape","id":"sh/utwb2d0n","slide":2,"bbox":[694,205,512,419]}
+{"kind":"shape","id":"sh/jatwjq1w","slide":2,"bbox":[726,575,448,30]}
+{"kind":"textbox","id":"sh/kbmxcv21","slide":2,"text":"IMAGE-ONLY PAGE  •  OCR + EVIDENCE EXTRACTION","textPreview":"IMAGE-ONLY PAGE  •  OCR + EVIDENCE EXTRACTION","textChars":45,"textLines":1,"bbox":[742,582,416,16]}
+{"kind":"shape","id":"sh/lcvel0jm","slide":2,"bbox":[64,676,1152,1]}
+{"kind":"textbox","id":"sh/alkf6lkz","slide":2,"text":"SIH 2026  •  SIH26117","textPreview":"SIH 2026  •  SIH26117","textChars":21,"textLines":1,"bbox":[64,687,240,18]}
+{"kind":"textbox","id":"sh/b6twf61k","slide":2,"text":"ZeroLeak AI  •  02","textPreview":"ZeroLeak AI  •  02","textChars":18,"textLines":1,"bbox":[1010,687,206,18]}
+{"kind":"image","id":"im/xovulcv2","slide":2,"name":"","geometry":"roundRect","alt":"Synthetic inspection note used to demonstrate local OCR","bbox":[726,230,448,325]}
+{"kind":"notes","id":"nt/kl91hb","slide":2,"text":"Solution claims are based on the SIH26117 description, which calls for a self-hosted, air-gapped workbench that supports multiple open-weight models, local tools, multimodal inputs and real deliverables.\nProduct evidence: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/README.md and MRPL_WORKFLOWS.md.\nVisual asset: synthetic inspection note at C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/examples/mrpl-demo/turbine-cdu4/turbine-reports/scan-inspection-note.png.\nThe sample corpus is synthetic and contains no proprietary MRPL record."}
+{"kind":"slide","id":"sl/mgqxov","slide":3,"title":"02  /  TECHNICAL APPROACH","textShapes":26}
+{"kind":"textbox","id":"sh/qpsbmlkv","slide":3,"text":"02  /  TECHNICAL APPROACH","textPreview":"02  /  TECHNICAL APPROACH","textChars":25,"textLines":1,"bbox":[64,42,600,22]}
+{"kind":"textbox","id":"sh/dcjux036","slide":3,"text":"Local models, one controlled path","textPreview":"Local models, one controlled path","textChars":33,"textLines":1,"bbox":[64,72,900,92]}
+{"kind":"textbox","id":"sh/cbatov2l","slide":3,"text":"Route the task, ground it in local evidence, act through tools and verify the result.","textPreview":"Route the task, ground it in local evidence, act through tools and verify the result.","textChars":85,"textLines":1,"bbox":[66,170,1100,30]}
+{"kind":"shape","id":"sh/3mhcrql4","slide":3,"bbox":[64,222,180,200]}
+{"kind":"textbox","id":"sh/2l8bilkj","slide":3,"text":"INPUTS","textPreview":"INPUTS","textChars":6,"textLines":1,"bbox":[84,242,140,20]}
+{"kind":"textbox","id":"sh/pojut03a","slide":3,"text":"Scanned PDFs\nP&IDs\nCode and spreadsheets\nSOPs and manuals","textPreview":"Scanned PDFs | P&IDs | Code and spreadsheets | SOPs and manuals","textChars":57,"textLines":4,"bbox":[84,275,140,90]}
+{"kind":"shape","id":"sh/4nqtkv2p","slide":3,"bbox":[290,206,190,200]}
+{"kind":"textbox","id":"sh/nilc3al8","slide":3,"text":"ROUTER","textPreview":"ROUTER","textChars":6,"textLines":1,"bbox":[312,228,145,22]}
+{"kind":"textbox","id":"sh/mhcvu5k3","slide":3,"text":"Task-aware\nmodel\nselection","textPreview":"Task-aware | model | selection","textChars":26,"textLines":3,"bbox":[312,264,145,78]}
+{"kind":"textbox","id":"sh/g3qxgfmx","slide":3,"text":"127.0.0.1\nload on demand","textPreview":"127.0.0.1 | load on demand","textChars":24,"textLines":2,"bbox":[312,350,145,36]}
+{"kind":"shape","id":"sh/14ze9k32","slide":3,"bbox":[530,222,185,200]}
+{"kind":"textbox","id":"sh/e18fe54r","slide":3,"text":"LOCAL TOOLS","textPreview":"LOCAL TOOLS","textChars":11,"textLines":1,"bbox":[550,242,145,20]}
+{"kind":"textbox","id":"sh/f2hw7alc","slide":3,"text":"OCR + vision\nKnowledge + citations\nSandbox\nDocument generators","textPreview":"OCR + vision | Knowledge + citations | Sandbox | Document generators","textChars":62,"textLines":4,"bbox":[550,275,150,90]}
+{"kind":"shape","id":"sh/sf6xcvml","slide":3,"bbox":[765,222,160,200]}
+{"kind":"textbox","id":"sh/t0ze5036","slide":3,"text":"OUTPUTS","textPreview":"OUTPUTS","textChars":7,"textLines":1,"bbox":[784,242,122,20]}
+{"kind":"textbox","id":"sh/6dofal4f","slide":3,"text":"DOCX\nXLSX\nPPTX / PDF\nWorking code","textPreview":"DOCX | XLSX | PPTX / PDF | Working code","textChars":33,"textLines":4,"bbox":[784,275,122,90]}
+{"kind":"shape","id":"sh/rexw3q50","slide":3,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/4b6d8vmp","slide":3,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/5cfe10na","slide":3,"bbox":[0,0,0,0]}
+{"kind":"textbox","id":"sh/lwnmpsbm","slide":3,"text":"MODEL ROLES","textPreview":"MODEL ROLES","textChars":11,"textLines":1,"bbox":[64,434,220,22]}
+{"kind":"textbox","id":"sh/kvelgna1","slide":3,"text":"Gemma 4 E4B","textPreview":"Gemma 4 E4B","textChars":11,"textLines":1,"bbox":[64,468,185,21]}
+{"kind":"textbox","id":"sh/zu54nitg","slide":3,"text":"Reasoning and vision","textPreview":"Reasoning and vision","textChars":20,"textLines":1,"bbox":[252,468,200,21]}
+{"kind":"textbox","id":"sh/ytw3edsb","slide":3,"text":"PaddleOCR-VL 1.6","textPreview":"PaddleOCR-VL 1.6","textChars":16,"textLines":1,"bbox":[64,501,185,21]}
+{"kind":"textbox","id":"sh/xsn2l8bq","slide":3,"text":"Printed scan specialist","textPreview":"Printed scan specialist","textChars":23,"textLines":1,"bbox":[252,501,200,21]}
+{"kind":"textbox","id":"sh/crelc3a5","slide":3,"text":"olmOCR 2","textPreview":"olmOCR 2","textChars":8,"textLines":1,"bbox":[64,534,185,21]}
+{"kind":"textbox","id":"sh/bqlkjytk","slide":3,"text":"Handwriting fallback","textPreview":"Handwriting fallback","textChars":20,"textLines":1,"bbox":[252,534,200,21]}
+{"kind":"textbox","id":"sh/apc3adsz","slide":3,"text":"Nemotron 3 Nano 4B","textPreview":"Nemotron 3 Nano 4B","textChars":18,"textLines":1,"bbox":[64,567,185,21]}
+{"kind":"textbox","id":"sh/ho7mxcbu","slide":3,"text":"Long-document context","textPreview":"Long-document context","textChars":21,"textLines":1,"bbox":[252,567,200,21]}
+{"kind":"textbox","id":"sh/wnylo7a9","slide":3,"text":"BGE-M3","textPreview":"BGE-M3","textChars":6,"textLines":1,"bbox":[64,600,185,21]}
+{"kind":"textbox","id":"sh/etsji98r","slide":3,"text":"Local embeddings","textPreview":"Local embeddings","textChars":16,"textLines":1,"bbox":[252,600,200,21]}
+{"kind":"shape","id":"sh/fu10re9c","slide":3,"bbox":[970,424,236,206]}
+{"kind":"textbox","id":"sh/1wjit4ri","slide":3,"text":"Vision input\nP&ID-CDU4-1102","textPreview":"Vision input | P&ID-CDU4-1102","textChars":27,"textLines":2,"bbox":[986,603,204,37]}
+{"kind":"shape","id":"sh/658zep8v","slide":3,"bbox":[64,676,1152,1]}
+{"kind":"textbox","id":"sh/r6h0nu9g","slide":3,"text":"SIH 2026  •  SIH26117","textPreview":"SIH 2026  •  SIH26117","textChars":21,"textLines":1,"bbox":[64,687,240,18]}
+{"kind":"textbox","id":"sh/s7q1gzql","slide":3,"text":"ZeroLeak AI  •  03","textPreview":"ZeroLeak AI  •  03","textChars":18,"textLines":1,"bbox":[1010,687,206,18]}
+{"kind":"image","id":"im/36xsjm9o","slide":3,"name":"","geometry":"roundRect","alt":"Synthetic P&ID used to demonstrate local multimodal analysis","bbox":[986,440,204,154]}
+{"kind":"notes","id":"nt/mgqxov","slide":3,"text":"Technical approach reflects the local model registry and router implementation.\nSource: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/src/services/registry.ts\nSource: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/src-tauri/src/router.rs\nThe workbench binds the model router to 127.0.0.1 and routes OCR, vision, embeddings, reasoning and coding to different local model roles.\nVisual asset: synthetic P&ID at C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/examples/mrpl-demo/turbine-cdu4/turbine-reports/PID-CDU4-1102.png."}
+{"kind":"slide","id":"sl/x3ct8v","slide":4,"title":"03  /  FEASIBILITY AND VIABILITY","textShapes":28}
+{"kind":"textbox","id":"sh/mlwn6d4r","slide":4,"text":"03  /  FEASIBILITY AND VIABILITY","textPreview":"03  /  FEASIBILITY AND VIABILITY","textChars":32,"textLines":1,"bbox":[64,42,600,22]}
+{"kind":"textbox","id":"sh/9onmh8ni","slide":4,"text":"Feasibility on one workstation","textPreview":"Feasibility on one workstation","textChars":30,"textLines":1,"bbox":[64,72,900,92]}
+{"kind":"textbox","id":"sh/one58nmx","slide":4,"text":"The prototype closes the core demo loop while keeping remaining deployment gates visible.","textPreview":"The prototype closes the core demo loop while keeping remaining deployment gates visible.","textChars":89,"textLines":1,"bbox":[66,170,1100,30]}
+{"kind":"textbox","id":"sh/zil4by50","slide":4,"text":"PROTOTYPE PROOF POINTS","textPreview":"PROTOTYPE PROOF POINTS","textChars":22,"textLines":1,"bbox":[66,208,340,22]}
+{"kind":"shape","id":"sh/ehcn2t4v","slide":4,"bbox":[68,249,18,18]}
+{"kind":"textbox","id":"sh/1k3md8n6","slide":4,"text":"✓","textPreview":"✓","textChars":1,"textLines":1,"bbox":[68,249,18,17]}
+{"kind":"textbox","id":"sh/0ju543ml","slide":4,"text":"Local runtime","textPreview":"Local runtime","textChars":13,"textLines":1,"bbox":[102,245,260,23]}
+{"kind":"textbox","id":"sh/jepon25k","slide":4,"text":"llama.cpp, Python, Node and pdftoppm are available locally.","textPreview":"llama.cpp, Python, Node and pdftoppm are available locally.","textChars":59,"textLines":1,"bbox":[102,270,460,38]}
+{"kind":"shape","id":"sh/ydgnex4z","slide":4,"bbox":[68,335,18,18]}
+{"kind":"textbox","id":"sh/0n25g7a9","slide":4,"text":"✓","textPreview":"✓","textChars":1,"textLines":1,"bbox":[68,335,18,17]}
+{"kind":"textbox","id":"sh/lobmpcbu","slide":4,"text":"GPU profile","textPreview":"GPU profile","textChars":11,"textLines":1,"bbox":[102,331,260,23]}
+{"kind":"textbox","id":"sh/el0nexs3","slide":4,"text":"RTX 4060 Laptop GPU with 7,107 MiB usable and up to 2 resident models.","textPreview":"RTX 4060 Laptop GPU with 7,107 MiB usable and up to 2 resident models.","textChars":70,"textLines":1,"bbox":[102,356,460,38]}
+{"kind":"shape","id":"sh/zmt4n2to","slide":4,"bbox":[68,421,18,18]}
+{"kind":"textbox","id":"sh/cjilcnud","slide":4,"text":"✓","textPreview":"✓","textChars":1,"textLines":1,"bbox":[68,421,18,17]}
+{"kind":"textbox","id":"sh/dkrmlsbi","slide":4,"text":"Real exporters","textPreview":"Real exporters","textChars":14,"textLines":1,"bbox":[102,417,260,23]}
+{"kind":"textbox","id":"sh/qx03axc7","slide":4,"text":"Word, Excel and PowerPoint packages are generated and reopened for checks.","textPreview":"Word, Excel and PowerPoint packages are generated and reopened for checks.","textChars":74,"textLines":1,"bbox":[102,442,460,38]}
+{"kind":"shape","id":"sh/ry94j2ts","slide":4,"bbox":[68,507,18,18]}
+{"kind":"textbox","id":"sh/4vil8nu1","slide":4,"text":"✓","textPreview":"✓","textChars":1,"textLines":1,"bbox":[68,507,18,17]}
+{"kind":"textbox","id":"sh/pwrmhsbm","slide":4,"text":"Demo corpus","textPreview":"Demo corpus","textChars":11,"textLines":1,"bbox":[102,503,260,23]}
+{"kind":"textbox","id":"sh/5gzapkze","slide":4,"text":"Synthetic and open-dataset scans and P&IDs keep the rehearsal non-proprietary.","textPreview":"Synthetic and open-dataset scans and P&IDs keep the rehearsal non-proprietary.","textChars":78,"textLines":1,"bbox":[102,528,460,38]}
+{"kind":"textbox","id":"sh/kfqtwfit","slide":4,"text":"RISKS AND MITIGATIONS","textPreview":"RISKS AND MITIGATIONS","textChars":21,"textLines":1,"bbox":[710,208,330,22]}
+{"kind":"textbox","id":"sh/jehsnah8","slide":4,"text":"GPU contention","textPreview":"GPU contention","textChars":14,"textLines":1,"bbox":[710,245,190,23]}
+{"kind":"textbox","id":"sh/id8bu50n","slide":4,"text":"On-demand loading plus idle eviction keeps the memory budget visible.","textPreview":"On-demand loading plus idle eviction keeps the memory budget visible.","textChars":69,"textLines":1,"bbox":[910,245,295,40]}
+{"kind":"shape","id":"sh/xcfalkz2","slide":4,"bbox":[710,292,495,1]}
+{"kind":"textbox","id":"sh/wb6tsfih","slide":4,"text":"Scanned pages","textPreview":"Scanned pages","textChars":13,"textLines":1,"bbox":[710,331,190,23]}
+{"kind":"textbox","id":"sh/vaxsjahw","slide":4,"text":"OCR specialist first, then vision fallback when confidence or handwriting requires it.","textPreview":"OCR specialist first, then vision fallback when confidence or handwriting requires it.","textChars":86,"textLines":1,"bbox":[910,331,295,40]}
+{"kind":"shape","id":"sh/a9obq50r","slide":4,"bbox":[710,378,495,1]}
+{"kind":"textbox","id":"sh/h8jux4z6","slide":4,"text":"Unknown fields","textPreview":"Unknown fields","textChars":14,"textLines":1,"bbox":[710,417,190,23]}
+{"kind":"textbox","id":"sh/g7at4zi1","slide":4,"text":"Preserve missing units, limits, owners and dates for human review.","textPreview":"Preserve missing units, limits, owners and dates for human review.","textChars":66,"textLines":1,"bbox":[910,417,295,40]}
+{"kind":"shape","id":"sh/ydk7y1g3","slide":4,"bbox":[710,464,495,1]}
+{"kind":"textbox","id":"sh/zed8r6xo","slide":4,"text":"Sovereignty proof","textPreview":"Sovereignty proof","textChars":17,"textLines":1,"bbox":[710,503,190,23]}
+{"kind":"textbox","id":"sh/0fm90by9","slide":4,"text":"Pair the application guard with independent OS-level packet capture.","textPreview":"Pair the application guard with independent OS-level packet capture.","textChars":68,"textLines":1,"bbox":[910,503,295,40]}
+{"kind":"shape","id":"sh/lgvqtgfu","slide":4,"bbox":[710,550,495,1]}
+{"kind":"shape","id":"sh/qpk7uhg7","slide":4,"bbox":[66,590,1139,46]}
+{"kind":"textbox","id":"sh/rqt8nmxs","slide":4,"text":"Deployment gate: warm up the target models and rehearse the capture interval on the venue machine before making a final sovereignty claim.","textPreview":"Deployment gate: warm up the target models and rehearse the capture interval on the venue machine before making a final sovereignty claim.","textChars":138,"textLines":1,"bbox":[90,603,1090,20]}
+{"kind":"shape","id":"sh/cr2pwryd","slide":4,"bbox":[64,676,1152,1]}
+{"kind":"textbox","id":"sh/dcbqpwfy","slide":4,"text":"SIH 2026  •  SIH26117","textPreview":"SIH 2026  •  SIH26117","textChars":21,"textLines":1,"bbox":[64,687,240,18]}
+{"kind":"textbox","id":"sh/al4r6lgb","slide":4,"text":"ZeroLeak AI  •  04","textPreview":"ZeroLeak AI  •  04","textChars":18,"textLines":1,"bbox":[1010,687,206,18]}
+{"kind":"notes","id":"nt/x3ct8v","slide":4,"text":"Readiness proof points come from the live local Workflows → Readiness screen and the project workflow guide.\nSources: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/MRPL_WORKFLOWS.md and C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/.uifix/readiness-result.json.\nThe GPU number is a development-machine measurement from the local app UI, not a universal deployment requirement.\nThe project documentation explicitly says application network decisions are not a packet capture, so the deck preserves the independent OS capture step."}
+{"kind":"slide","id":"sl/1in0p4","slide":5,"title":"04  /  IMPACT AND BENEFITS","textShapes":27}
+{"kind":"textbox","id":"sh/md0fax4v","slide":5,"text":"04  /  IMPACT AND BENEFITS","textPreview":"04  /  IMPACT AND BENEFITS","textChars":26,"textLines":1,"bbox":[64,42,600,22]}
+{"kind":"textbox","id":"sh/9gry5c36","slide":5,"text":"Impact and benefits","textPreview":"Impact and benefits","textChars":19,"textLines":1,"bbox":[64,72,900,92]}
+{"kind":"textbox","id":"sh/ofihc7m1","slide":5,"text":"Confidential work stays local while the workbench handles the task.","textPreview":"Confidential work stays local while the workbench handles the task.","textChars":67,"textLines":1,"bbox":[66,170,1100,30]}
+{"kind":"textbox","id":"sh/zapgzil4","slide":5,"text":"EXPECTED VALUE","textPreview":"EXPECTED VALUE","textChars":14,"textLines":1,"bbox":[66,194,260,22]}
+{"kind":"shape","id":"sh/e9gf6d4j","slide":5,"bbox":[66,232,27,27]}
+{"kind":"textbox","id":"sh/1cry1s3a","slide":5,"text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[66,235,27,18]}
+{"kind":"textbox","id":"sh/0byx8nmp","slide":5,"text":"Engineers and inspectors","textPreview":"Engineers and inspectors","textChars":24,"textLines":1,"bbox":[110,230,280,25]}
+{"kind":"textbox","id":"sh/rmpgvil8","slide":5,"text":"Extract findings from scans and P&IDs while retaining the exact source page.","textPreview":"Extract findings from scans and P&IDs while retaining the exact source page.","textChars":76,"textLines":1,"bbox":[110,257,510,44]}
+{"kind":"shape","id":"sh/qlgf2d4n","slide":5,"bbox":[66,324,27,27]}
+{"kind":"textbox","id":"sh/8vu58rql","slide":5,"text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[66,327,27,18]}
+{"kind":"textbox","id":"sh/9w3m1w76","slide":5,"text":"Approvers","textPreview":"Approvers","textChars":9,"textLines":1,"bbox":[110,322,280,25]}
+{"kind":"textbox","id":"sh/mtcn618f","slide":5,"text":"Receive a draft note and action tracker with unresolved fields visible before a human decision.","textPreview":"Receive a draft note and action tracker with unresolved fields visible before a human decision.","textChars":95,"textLines":1,"bbox":[110,349,510,44]}
+{"kind":"shape","id":"sh/7ul4zmp0","slide":5,"bbox":[66,416,27,27]}
+{"kind":"textbox","id":"sh/kru54rqp","slide":5,"text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[66,419,27,18]}
+{"kind":"textbox","id":"sh/ls3mxw7u","slide":5,"text":"Knowledge teams","textPreview":"Knowledge teams","textChars":15,"textLines":1,"bbox":[110,414,280,25]}
+{"kind":"textbox","id":"sh/ypsn2h8j","slide":5,"text":"Search manuals and SOPs locally with citations that point back to the retrieved evidence.","textPreview":"Search manuals and SOPs locally with citations that point back to the retrieved evidence.","textChars":89,"textLines":1,"bbox":[110,441,510,44]}
+{"kind":"shape","id":"sh/zql4vmp4","slide":5,"bbox":[66,508,27,27]}
+{"kind":"textbox","id":"sh/4ne5gbqt","slide":5,"text":"4","textPreview":"4","textChars":1,"textLines":1,"bbox":[66,511,27,18]}
+{"kind":"textbox","id":"sh/5on69g7e","slide":5,"text":"IT and security","textPreview":"IT and security","textChars":15,"textLines":1,"bbox":[110,506,280,25]}
+{"kind":"textbox","id":"sh/d43mtgzi","slide":5,"text":"Inspect model routing, tool calls, artifacts and network decisions in one workbench.","textPreview":"Inspect model routing, tool calls, artifacts and network decisions in one workbench.","textChars":84,"textLines":1,"bbox":[110,533,510,44]}
+{"kind":"shape","id":"sh/s3a5kbix","slide":5,"bbox":[780,196,426,336]}
+{"kind":"textbox","id":"sh/q1sni10r","slide":5,"text":"Operator context","textPreview":"Operator context","textChars":16,"textLines":1,"bbox":[806,458,180,20]}
+{"kind":"textbox","id":"sh/5gjmpwz6","slide":5,"text":"The value is a verified work package, not a chat reply.","textPreview":"The value is a verified work package, not a chat reply.","textChars":55,"textLines":1,"bbox":[806,484,350,42]}
+{"kind":"shape","id":"sh/4fa5gbi1","slide":5,"bbox":[66,610,1140,1]}
+{"kind":"textbox","id":"sh/3e14n6hg","slide":5,"text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[84,626,45,32]}
+{"kind":"textbox","id":"sh/idsne10v","slide":5,"text":"workstation-ready demo","textPreview":"workstation-ready demo","textChars":22,"textLines":1,"bbox":[132,631,190,18]}
+{"kind":"textbox","id":"sh/hcjmlwza","slide":5,"text":"5","textPreview":"5","textChars":1,"textLines":1,"bbox":[420,626,45,32]}
+{"kind":"textbox","id":"sh/gbq5crip","slide":5,"text":"model roles","textPreview":"model roles","textChars":11,"textLines":1,"bbox":[468,631,130,18]}
+{"kind":"textbox","id":"sh/6hojmxgn","slide":5,"text":"7","textPreview":"7","textChars":1,"textLines":1,"bbox":[730,626,45,32]}
+{"kind":"textbox","id":"sh/7ixkv2x8","slide":5,"text":"artifact types","textPreview":"artifact types","textChars":14,"textLines":1,"bbox":[778,631,150,18]}
+{"kind":"textbox","id":"sh/8j61o7yt","slide":5,"text":"prototype catalog","textPreview":"prototype catalog","textChars":17,"textLines":1,"bbox":[1030,632,150,18]}
+{"kind":"shape","id":"sh/tkz2xcfy","slide":5,"bbox":[64,676,1152,1]}
+{"kind":"textbox","id":"sh/ydojidgb","slide":5,"text":"SIH 2026  •  SIH26117","textPreview":"SIH 2026  •  SIH26117","textChars":21,"textLines":1,"bbox":[64,687,240,18]}
+{"kind":"textbox","id":"sh/jexkrixw","slide":5,"text":"ZeroLeak AI  •  05","textPreview":"ZeroLeak AI  •  05","textChars":18,"textLines":1,"bbox":[1010,687,206,18]}
+{"kind":"image","id":"im/wraho721","slide":5,"name":"","geometry":"roundRect","alt":"Synthetic gauge photograph used to represent industrial operator context","bbox":[806,222,374,220]}
+{"kind":"notes","id":"nt/1in0p4","slide":5,"text":"Expected impact is derived from the SIH26117 expected solution and from the implemented workflow surfaces.\nProduct sources: C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/README.md, MRPL_WORKFLOWS.md and the live Artifacts, Audit and Knowledge panels.\nThe counts shown are prototype catalog facts: five named model roles in the registry and seven supported artifact kinds in the local types and artifact implementation.\nVisual asset: synthetic gauge photograph at C:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/examples/mrpl-demo/turbine-cdu4/turbine-reports/gauge-photo.jpg."}
+{"kind":"slide","id":"sl/4f0n35","slide":6,"title":"05  /  RESEARCH AND REFERENCES","textShapes":27}
+{"kind":"textbox","id":"sh/y1w7a90n","slide":6,"text":"05  /  RESEARCH AND REFERENCES","textPreview":"05  /  RESEARCH AND REFERENCES","textChars":30,"textLines":1,"bbox":[64,42,600,22]}
+{"kind":"textbox","id":"sh/l476l4ze","slide":6,"text":"Research and references","textPreview":"Research and references","textChars":23,"textLines":1,"bbox":[64,72,900,92]}
+{"kind":"textbox","id":"sh/03ypcjit","slide":6,"text":"The deck follows the SIH idea-submission order and separates public sources from local product evidence.","textPreview":"The deck follows the SIH idea-submission order and separates public sources from local product evidence.","textChars":104,"textLines":1,"bbox":[66,170,1100,30]}
+{"kind":"textbox","id":"sh/n6p8nehk","slide":6,"text":"FORMAT FOLLOWED","textPreview":"FORMAT FOLLOWED","textChars":15,"textLines":1,"bbox":[66,196,260,22]}
+{"kind":"shape","id":"sh/m5g7e90z","slide":6,"bbox":[68,234,23,23]}
+{"kind":"textbox","id":"sh/987qpoza","slide":6,"text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[68,237,23,16]}
+{"kind":"textbox","id":"sh/87ypgji5","slide":6,"text":"Title page","textPreview":"Title page","textChars":10,"textLines":1,"bbox":[108,232,360,22]}
+{"kind":"shape","id":"sh/vu98ryhg","slide":6,"bbox":[68,281,23,23]}
+{"kind":"textbox","id":"sh/a907it0v","slide":6,"text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[68,284,23,16]}
+{"kind":"textbox","id":"sh/4ji5ormh","slide":6,"text":"Proposed solution","textPreview":"Proposed solution","textChars":17,"textLines":1,"bbox":[108,279,360,22]}
+{"kind":"shape","id":"sh/pkr6xw32","slide":6,"bbox":[68,328,23,23]}
+{"kind":"textbox","id":"sh/2h0nmh4r","slide":6,"text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[68,331,23,16]}
+{"kind":"textbox","id":"sh/3i9ovmlw","slide":6,"text":"Technical approach","textPreview":"Technical approach","textChars":18,"textLines":1,"bbox":[108,326,360,22]}
+{"kind":"shape","id":"sh/c725srmt","slide":6,"bbox":[68,375,23,23]}
+{"kind":"textbox","id":"sh/d8b61w3e","slide":6,"text":"4","textPreview":"4","textChars":1,"textLines":1,"bbox":[68,378,23,16]}
+{"kind":"textbox","id":"sh/q50nq14n","slide":6,"text":"Feasibility and viability","textPreview":"Feasibility and viability","textChars":25,"textLines":1,"bbox":[108,373,360,22]}
+{"kind":"shape","id":"sh/r6tozml8","slide":6,"bbox":[68,422,23,23]}
+{"kind":"textbox","id":"sh/0b2pwbmp","slide":6,"text":"5","textPreview":"5","textChars":1,"textLines":1,"bbox":[68,425,23,16]}
+{"kind":"textbox","id":"sh/1cb65g3a","slide":6,"text":"Impact and benefits","textPreview":"Impact and benefits","textChars":19,"textLines":1,"bbox":[108,420,360,22]}
+{"kind":"shape","id":"sh/9s769wve","slide":6,"bbox":[68,469,23,23]}
+{"kind":"textbox","id":"sh/8ry5gbet","slide":6,"text":"6","textPreview":"6","textChars":1,"textLines":1,"bbox":[68,472,23,16]}
+{"kind":"textbox","id":"sh/nqpo76d8","slide":6,"text":"Research and references","textPreview":"Research and references","textChars":23,"textLines":1,"bbox":[108,467,360,22]}
+{"kind":"shape","id":"sh/mpgne1w3","slide":6,"bbox":[560,198,1,410]}
+{"kind":"textbox","id":"sh/xwr6dgvq","slide":6,"text":"PUBLIC SOURCES","textPreview":"PUBLIC SOURCES","textChars":14,"textLines":1,"bbox":[612,196,300,22]}
+{"kind":"textbox","id":"sh/wvi5kbu5","slide":6,"text":"SIH 2026 problem statement","textPreview":"SIH 2026 problem statement","textChars":26,"textLines":1,"bbox":[612,232,350,22]}
+{"kind":"textbox","id":"sh/vu9ob6dk","slide":6,"text":"sih.gov.in/sih2026PS\nSIH26117 metadata and expected solution","textPreview":"sih.gov.in/sih2026PS | SIH26117 metadata and expected solution","textChars":60,"textLines":2,"bbox":[612,258,510,42]}
+{"kind":"textbox","id":"sh/at0ni1wz","slide":6,"text":"SIH idea presentation format","textPreview":"SIH idea presentation format","textChars":28,"textLines":1,"bbox":[612,322,350,22]}
+{"kind":"textbox","id":"sh/d0nm1cv6","slide":6,"text":"cmrit.ac.in/.../SIH2024_IDEA_Presentation_Format.pdf\nSix-slide order and content pointers","textPreview":"cmrit.ac.in/.../SIH2024_IDEA_Presentation_Format.pdf | Six-slide order and content pointers","textChars":89,"textLines":2,"bbox":[612,348,510,42]}
+{"kind":"textbox","id":"sh/cze58rel","slide":6,"text":"LOCAL PRODUCT EVIDENCE","textPreview":"LOCAL PRODUCT EVIDENCE","textChars":22,"textLines":1,"bbox":[612,412,340,22]}
+{"kind":"textbox","id":"sh/25c3idcj","slide":6,"text":"README.md  •  MRPL_WORKFLOWS.md\nScoped Models, Readiness, Network, Artifacts and Audit panels\nSynthetic inspection scans and open-dataset P&ID samples","textPreview":"README.md  •  MRPL_WORKFLOWS.md | Scoped Models, Readiness, Network, Artifacts and Audit panels | Synthetic inspection scans and open-dat...","textChars":150,"textLines":3,"bbox":[612,448,540,72]}
+{"kind":"shape","id":"sh/36lkbit4","slide":6,"bbox":[612,562,540,60]}
+{"kind":"textbox","id":"sh/o7ulknup","slide":6,"text":"Submission note","textPreview":"Submission note","textChars":15,"textLines":1,"bbox":[634,577,150,20]}
+{"kind":"textbox","id":"sh/p832dsba","slide":6,"text":"Replace [TEAM NAME] and [TEAM ID] before upload. Export to PDF if the portal requires it.","textPreview":"Replace [TEAM NAME] and [TEAM ID] before upload. Export to PDF if the portal requires it.","textChars":89,"textLines":1,"bbox":[790,577,334,30]}
+{"kind":"shape","id":"sh/q9w3mxcv","slide":6,"bbox":[64,676,1152,1]}
+{"kind":"textbox","id":"sh/ba5kf2t0","slide":6,"text":"SIH 2026  •  SIH26117","textPreview":"SIH 2026  •  SIH26117","textChars":21,"textLines":1,"bbox":[64,687,240,18]}
+{"kind":"textbox","id":"sh/cvelo7ul","slide":6,"text":"ZeroLeak AI  •  06","textPreview":"ZeroLeak AI  •  06","textChars":18,"textLines":1,"bbox":[1010,687,206,18]}
+{"kind":"notes","id":"nt/4f0n35","slide":6,"text":"Public sources used in the deck:\n1) https://sih.gov.in/sih2026PS\n2) https://github.com/jeevansai-hub/SIH-2026-/blob/main/ps_2026/SIH26117.md\n3) https://www.cmrit.ac.in/wp-content/uploads/2024/10/SIH2024_IDEA_Presentation_Format.pdf\nLocal sources used in the deck:\nC:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/README.md\nC:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/MRPL_WORKFLOWS.md\nC:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/src/services/registry.ts\nC:/Users/harih/OneDrive/Documents/ocr/zero-leak-app/examples/mrpl-demo/README.md\nThe local demo corpus is synthetic/open-dataset material, not proprietary industrial data."}
