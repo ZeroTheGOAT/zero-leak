@@ -161,6 +161,14 @@ pub struct ModelRuntime {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+    /// The context window the loaded model actually runs with: the registry
+    /// override when launch raised it above the catalogue `context_size` from
+    /// free VRAM, else the catalogue line itself. Carried on the row so the
+    /// Models panel can quote the real window without re-deriving it, and set
+    /// only while `state` is `loaded` — eviction clears it with the state, so
+    /// a stale raised figure never outlives the model it belonged to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
 }
 
 impl ModelRuntime {
@@ -173,6 +181,7 @@ impl ModelRuntime {
             last_tokens_per_sec: None,
             last_error: None,
             last_used_at: None,
+            context_tokens: None,
         }
     }
 }

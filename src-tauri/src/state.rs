@@ -448,6 +448,20 @@ impl AppState {
             let mut m = self.models.write().unwrap_or_else(|e| e.into_inner());
             let entry = m.entry(id.to_string()).or_insert_with(|| ModelRuntime::unloaded(id));
             f(entry);
+            // The context window follows residency, from the one source that
+            // knows what launch actually raised it to (registry override, else
+            // the catalogue line — `Registry::effective_context`). Stamping
+            // here keeps `core://model` rows and `model_list` in agreement no
+            // matter which path changed the state, and clears the figure the
+            // moment the model is evicted so the panel never shows a stale
+            // window for something that is no longer resident.
+            if entry.state == ModelState::Loaded {
+                let reg = self.registry.read().unwrap_or_else(|e| e.into_inner());
+                let ctx = reg.effective_context(id);
+                entry.context_tokens = (ctx > 0).then_some(ctx);
+            } else {
+                entry.context_tokens = None;
+            }
             entry.clone()
         };
         self.emit("core://model", updated);

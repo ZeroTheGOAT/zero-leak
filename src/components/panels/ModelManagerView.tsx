@@ -86,7 +86,19 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
               <span>{model.architecture}</span>
               <span>{model.quantization}</span>
               <span>
-                {formatContext(model.contextSize)} ctx
+                <span
+                  className="cursor-help"
+                  title={
+                    isLoaded && rt.contextTokens
+                      ? rt.contextTokens === model.contextSize
+                        ? 'The window this model is running with now'
+                        : `Launched with ${rt.contextTokens.toLocaleString()} tokens — free VRAM raised the ${model.contextSize.toLocaleString()} catalogue allocation at launch`
+                      : 'Catalogue allocation — the running window is raised at launch when free VRAM allows'
+                  }
+                >
+                  {formatContext(isLoaded && rt.contextTokens ? rt.contextTokens : model.contextSize)} ctx
+                  {isLoaded ? ' window' : ''}
+                </span>
                 {model.kvCacheType && model.kvCacheType !== 'f16' && ` · KV ${model.kvCacheType}`}
               </span>
               <span>{formatBytes(model.fileSizeBytes)}</span>
@@ -196,6 +208,16 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
                   {model.trainedContext.toLocaleString()} — allocated {model.contextSize.toLocaleString()}
                 </span>
               </div>
+              {isLoaded && rt.contextTokens !== undefined && (
+                <div className="flex">
+                  <span className="w-24 flex-shrink-0">Running ctx</span>
+                  <span className="text-[var(--muted-foreground)] tabular-nums">
+                    {rt.contextTokens.toLocaleString()}
+                    {rt.contextTokens !== model.contextSize &&
+                      ` — raised from ${model.contextSize.toLocaleString()} at launch`}
+                  </span>
+                </div>
+              )}
               {model.promptTokensPerSec !== undefined && (
                 <div className="flex">
                   <span className="w-24 flex-shrink-0">Prompt</span>

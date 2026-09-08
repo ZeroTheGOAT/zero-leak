@@ -113,6 +113,13 @@ export interface ModelRuntime {
   lastError?: string;
   /** Timestamp of last use, for the retain-then-evict policy. */
   lastUsedAt?: number;
+  /**
+   * The context window the loaded model is actually running with, set by the
+   * core when the state becomes `loaded`: the launch-time override when free
+   * VRAM raised it above the catalogue `contextSize`, else the catalogue line
+   * itself. Absent unless loaded — eviction clears it with the state.
+   */
+  contextTokens?: number;
 }
 
 /* ------------------------------------------------------------------ */
