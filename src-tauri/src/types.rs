@@ -1113,6 +1113,16 @@ pub struct MessageExtra {
     /// after relaunch, not lost with the process that drew it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<PlanItem>>,
+    /// The finished run's activity timeline as the frontend drew it, attached
+    /// to the row after `agent://done` (`session_activity_store`): the
+    /// thinking and commentary texts, the action steps and the console output
+    /// that made up the run's record on screen. Display-only — the core never
+    /// reads it back for its own purposes — so it is stored opaque rather than
+    /// mirrored into a Rust type, and every other field here is written at
+    /// insert time where this one arrives a moment later from the client that
+    /// rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<serde_json::Value>,
 }
 
 /// One turn as it is stored and replayed.

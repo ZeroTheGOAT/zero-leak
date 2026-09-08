@@ -1245,6 +1245,71 @@ pub fn add_message(
     })
 }
 
+/// Attaches a finished run's activity timeline to the agent row that produced
+/// it, after the fact.
+///
+/// §6 stores the agent row the moment the run ends and emits `agent://done`
+/// only afterwards; the frontend draws the turn's timeline (thinking,
+/// commentary, action steps, console output) from the same events and hands
+/// the finished blocks back here, so a reload of the chat replays what was on
+/// screen instead of flattening the run to its answer. Display detail only —
+/// the core never reads `activity` back for its own purposes — so it is
+/// merged into `extra` like every other display field, and a turn whose done
+/// event never reached a client (a reload in the instant it ended) simply
+/// keeps no timeline.
+///
+/// Answers whether the run's row was found and updated. A missing row is not
+/// an error: the row that matters — the answer itself — was already stored
+/// by the run, and this decoration has simply nowhere to land.
+pub fn store_message_activity(
+    conn: &Connection,
+    session_id: &str,
+    run_id: &str,
+    activity: &serde_json::Value,
+) -> CoreResult<bool> {
+    // The run rides on the row's `extra` blob. A session's agent rows are
+    // short, so matching in Rust beats depending on SQLite's JSON functions.
+    let mut stmt = conn.prepare(
+        "SELECT id, extra FROM session_messages
+         WHERE session_id = ?1 AND sender = 'agent'
+         ORDER BY ordinal DESC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+    let mut target: Option<(String, Option<String>)> = None;
+    for row in rows {
+        let (id, extra) = row?;
+        let row_run: Option<String> = extra
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|v| v.get("runId").and_then(|r| r.as_str()).map(str::to_owned));
+        if row_run.as_deref() == Some(run_id) {
+            target = Some((id, extra));
+            break;
+        }
+    }
+    let Some((id, extra)) = target else {
+        return Ok(false);
+    };
+    // The new key joins whatever display detail the run already stored; a blob
+    // this build cannot parse is treated as empty rather than overwritten with
+    // just the timeline and nothing else.
+    let mut merged: serde_json::Map<String, serde_json::Value> = extra
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    merged.insert("activity".to_string(), activity.clone());
+    conn.execute(
+        "UPDATE session_messages SET extra = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&serde_json::Value::Object(merged))?, id],
+    )?;
+    Ok(true)
+}
+
 /// Removes one operator message and every turn after it, in one call.
 ///
 /// This is the store side of editing a sent message: the edited row is deleted
@@ -2732,6 +2797,54 @@ mod conversation {
             session_messages(&c, "s1", usize::MAX).unwrap().len(),
             2,
             "refused anchors leave the conversation untouched"
+        );
+    }
+
+    #[test]
+    fn a_finished_runs_timeline_attaches_to_its_own_row_and_no_other() {
+        let c = store();
+        touch_session(&c, "s1", Some("ws1"), AgentMode::Agent, "build the page", 1).unwrap();
+        say(&c, "s1", "user", "build the page", 1);
+        // The row exactly as the run path stores it — run on the extra, rest of
+        // the display detail beside it.
+        let stored = add_message(
+            &c,
+            "s1",
+            "agent",
+            "built.",
+            &MessageExtra {
+                run_id: Some("run-1".into()),
+                model_id: Some("qwen3-32b".into()),
+                elapsed_ms: Some(1_200),
+                ..Default::default()
+            },
+            2,
+        )
+        .unwrap();
+        // A later agent row from a run this build never saw run-ids (a turn
+        // stored before the field existed) must not capture someone else's
+        // timeline by being the newest row.
+        say(&c, "s1", "agent", "an older turn, no run id", 3);
+
+        let timeline = serde_json::json!([
+            { "id": "b1", "type": "text", "kind": "commentary", "text": "on it" },
+            { "id": "b2", "type": "actions", "steps": [] },
+        ]);
+        assert!(
+            store_message_activity(&c, "s1", "run-1", &timeline).unwrap(),
+            "the run's own row is found and updated"
+        );
+
+        let turns = session_messages(&c, "s1", usize::MAX).unwrap();
+        let agent = turns.iter().find(|m| m.id == stored.id).unwrap();
+        assert_eq!(agent.extra.activity.as_ref(), Some(&timeline));
+        assert_eq!(agent.extra.model_id.as_deref(), Some("qwen3-32b"), "the display detail the run already stored survives the merge");
+        assert_eq!(agent.extra.elapsed_ms, Some(1_200));
+        let older = turns.iter().find(|m| m.content == "an older turn, no run id").unwrap();
+        assert!(older.extra.activity.is_none(), "a row with no run id never gains a timeline");
+        assert!(
+            !store_message_activity(&c, "s1", "run-nope", &timeline).unwrap(),
+            "an unknown run reports that no row was updated"
         );
     }
 

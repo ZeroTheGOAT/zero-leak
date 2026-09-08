@@ -222,6 +222,12 @@ const draftAttachmentKind = (path: string) =>
  * task panel, so a reopened chat replays its checklist and the plan-mode
  * handoff card — an unexecuted plan survives the restart that ended the run
  * which drew it.
+ *
+ * So does the run's activity timeline: when the turn ended, the client that
+ * drew the run handed its blocks back to the core (`session_activity_store`),
+ * and they are rehydrated onto the message so a reload replays the thinking,
+ * steps and commentary instead of flattening the run to its answer. Only
+ * agent rows ever carry one; earlier turns simply have none.
  */
 const rehydrate = (m: StoredMessage): ChatMessage => ({
   id: m.id,
@@ -232,6 +238,8 @@ const rehydrate = (m: StoredMessage): ChatMessage => ({
   sender: m.sender,
   content: m.content,
   createdAt: m.createdAt,
+  activity:
+    m.sender === 'agent' && m.activity && m.activity.length > 0 ? m.activity : undefined,
   citations: m.citations,
   modelId: m.modelId,
   mode: m.mode,
@@ -1286,6 +1294,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return { ...prev, [sid]: [...existing, message] };
         });
 
+        // §12 — the run's timeline outlives this page. The agent row was
+        // stored by the core when the run ended; the blocks drawn here from
+        // the event stream (thinking, commentary, steps, console, answer)
+        // exist only in this client, so the finished timeline is handed back
+        // to the row and a reload replays the run instead of flattening it to
+        // its answer — the timeline is what the transcript view renders the
+        // answer from (`ActivityFlow`), so nothing here is dropped. Best
+        // effort: done is at-least-once and the app may close in this
+        // instant, and either way the answer row was already written by the
+        // core.
+        if (activity.length > 0) {
+          void core.sessions.storeActivity(sid, done.runId, activity).catch(() => {});
+        }
+
         // §6/§9 — the writes this run made, kept with the chat that made them.
         // They are on disk already: each one was approved as it happened, so
         // the panel is the record of what changed, with a revert beside every
@@ -1644,8 +1666,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // Fetched once per session, and never over a transcript already on
       // screen: the live copy carries the step list of the run that produced
-      // it, which the stored copy deliberately does not. A failed read is
-      // forgotten so opening the conversation again retries.
+      // it, and the stored copy replays its timeline only once the client
+      // handed it back at the end of the run (`session_activity_store`). A
+      // failed read is forgotten so opening the conversation again retries.
       if (readBack.current.has(id)) return;
       readBack.current.add(id);
       void core.sessions

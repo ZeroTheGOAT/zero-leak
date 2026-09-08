@@ -63,7 +63,7 @@ pub const COMMANDS: &[&str] = &[
     "audit_list", "store_gate_list",
     "vault_status", "vault_event_list", "vault_enable", "vault_disable",
     "turn_start", "agent_start", "agent_cancel", "permission_respond", "question_answer", "change_apply", "change_discard", "change_apply_all", "change_discard_all",
-    "session_list", "session_history", "session_truncate", "session_delete", "session_memory", "session_workspace", "attachment_stage",
+    "session_list", "session_history", "session_activity_store", "session_truncate", "session_delete", "session_memory", "session_workspace", "attachment_stage",
     "settings_get", "settings_set",
     "window_minimize", "window_toggle_maximize", "window_close", "app_quit",
 ];
@@ -435,6 +435,19 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         "session_history" => {
             let id = arg::<String>(args, "sessionId")?;
             ok(st.with_db(|c| crate::db::session_messages(c, &id, agent::HISTORY_TURNS))?)
+        }
+        // The run's timeline on the row that produced it. The agent row was
+        // stored when the run ended; the frontend drew the activity from the
+        // same events and hands it back here, so a reload replays the run.
+        // Display decoration only — nothing in it is ever read back by the
+        // core — so it is accepted opaque and merged into the row's `extra`.
+        "session_activity_store" => {
+            let session_id = arg::<String>(args, "sessionId")?;
+            let run_id = arg::<String>(args, "runId")?;
+            let activity = arg::<serde_json::Value>(args, "activity")?;
+            ok(st.with_db(|c| {
+                crate::db::store_message_activity(c, &session_id, &run_id, &activity)
+            })?)
         }
         // Editing a sent message: delete that operator row and every turn after
         // it, then resend the corrected wording as a fresh turn. The rewrite

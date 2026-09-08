@@ -28,37 +28,8 @@ import type {
   ChatActivityBlock,
   ChatMessage,
   Citation,
-  RunPhase,
 } from '../../types';
 import { formatBytes, formatDuration, modelById } from '../../services/registry';
-
-/* ------------------------------------------------------------------ */
-/* Run phase — the core's word on what the run is doing now            */
-/* ------------------------------------------------------------------ */
-
-const PHASE_FALLBACK: Record<RunPhase['phase'], string> = {
-  reasoning: 'Thinking',
-  executing: 'Working',
-  answering: 'Writing the answer',
-  waiting: 'Waiting',
-  done: 'Done',
-};
-
-/**
- * The live status row: one line naming the current action, spinner while the
- * run is actually busy. The label comes from the core (`agent://phase`), so
- * what it says is what is happening — no timer on the frontend decides when
- * the spinner appears or disappears.
- */
-const RunPhaseRow: React.FC<{ phase: RunPhase }> = ({ phase }) => (
-  <div className="flex items-center space-x-2 text-[11px] text-[var(--muted-foreground)]">
-    <span className="relative flex h-2 w-2 flex-shrink-0">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--info)] opacity-60" />
-      <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--info)]" />
-    </span>
-    <span>{phase.label || PHASE_FALLBACK[phase.phase]}</span>
-  </div>
-);
 
 /* ------------------------------------------------------------------ */
 /* Minimal markdown: fenced code, inline code, bold, bullets           */
@@ -770,27 +741,6 @@ export const ChatContainer: React.FC = () => {
     if (container) container.scrollTop = container.scrollHeight;
   };
 
-  // Whether the bottom of the stream is already naming the current action
-  // with its own spinner.
-  //
-  // The blue status dot exists for the run that has nothing else to say it —
-  // with Extended Thinking off the core emits no reasoning deltas at all, so
-  // no block carries the state and a reasoning run would look frozen, and an
-  // answer streams with no spinner of its own. But when the last block IS
-  // carrying it, the dot repeats it one line lower: "Thinking" under
-  // Thinking, "Write file: index.html" under the same sentence. That
-  // duplicate is what the operator saw, so in those cases the row stands
-  // down. The blank-text check matches ThinkingBlock, which renders nothing
-  // for whitespace.
-  const lastBlock = liveActivity[liveActivity.length - 1];
-  const phaseShownInStream =
-    lastBlock?.type === 'actions'
-      ? lastBlock.steps.some((step) => step.status === 'running')
-      : lastBlock?.type === 'text' &&
-        lastBlock.kind === 'thinking' &&
-        livePhase?.phase === 'reasoning' &&
-        lastBlock.text.trim().length > 0;
-
   useEffect(() => {
     followRef.current = true;
     const container = scrollRef.current;
@@ -940,7 +890,10 @@ export const ChatContainer: React.FC = () => {
 
           {/* Live run — this chat's own, never another chat's. The thinking
               spinner runs only while the core reports actual reasoning, and
-              only on the block being thought into. */}
+              only on the block being thought into. The run's overall activity
+              (which model is in play, whether anything is running) lives in
+              the composer and the status bar, so no extra status row is
+              painted here. */}
           {isRunning && (
             <div className="space-y-2.5">
               {liveActivity.length > 0 ? (
@@ -951,9 +904,6 @@ export const ChatContainer: React.FC = () => {
                 />
               ) : (
                 <p className="text-[12px] text-[var(--muted-foreground)]">Starting…</p>
-              )}
-              {livePhase && livePhase.phase !== 'done' && !phaseShownInStream && (
-                <RunPhaseRow phase={livePhase} />
               )}
             </div>
           )}

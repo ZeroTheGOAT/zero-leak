@@ -238,9 +238,10 @@ export type ChatActivityBlock =
        *  first delta of this block landed: a tool round's reasoning is not
        *  streamed and arrives whole, so first-delta-to-last-delta would report
        *  0 ms for thinking that actually took seconds. Both are optional
-       *  because activity is session-lifetime only and never stored, so a
-       *  reopened chat has no blocks at all rather than blocks missing a
-       *  duration — see `StoredMessage`, which has no `activity` field. */
+       *  because a stored timeline can come from a build that recorded blocks
+       *  without spans, or an older turn that predates them — see
+       *  `StoredMessage.activity`, which is absent rather than guessed when
+       *  no client ever handed the run's timeline back. */
       startedAt?: number;
       endedAt?: number;
     }
@@ -793,9 +794,12 @@ export interface ChatMessage {
  * the absolute paths the turn was given, because that is all the core was told —
  * the file's size and kind are read from disk when it is attached, not kept on
  * the turn. And `steps` are absent: the structured actions of a finished run
- * live in the audit log, keyed by session, not on the message row. A rehydrated
- * transcript therefore shows what was said and by which model, without
- * reconstructing a step list it cannot vouch for.
+ * live in the audit log, keyed by session, not on the message row. What the
+ * rehydrated transcript does carry is the run's `activity` timeline — the
+ * thinking, commentary, steps and console the client drew — because the client
+ * hands that timeline back to the core when the run ends (§6
+ * `session_activity_store`), so a reopened chat replays the run rather than
+ * flattening it to its answer.
  */
 export interface StoredMessage {
   id: string;
@@ -814,6 +818,11 @@ export interface StoredMessage {
   runId?: string;
   /** The run's final checklist, so a reopened chat replays its plan. */
   plan?: PlanItem[];
+  /** The finished turn's activity timeline as this client drew it, attached
+   *  to the row after the run ended. Display-only — the core stores the JSON
+   *  and never reads it back — so it is absent on turns that finished before
+   *  this field existed or whose done event never reached a client. */
+  activity?: ChatActivityBlock[];
 }
 
 export interface Session {

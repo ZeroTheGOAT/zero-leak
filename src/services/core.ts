@@ -31,6 +31,7 @@ import type {
   AgentStep,
   AppSettings,
   Artifact,
+  ChatActivityBlock,
   Citation,
   CoreFailure,
   CoreStatus,
@@ -388,6 +389,15 @@ export const sessions = {
   list: () => call<Session[]>('session_list'),
   /** Oldest-first, capped at the same depth the model is replayed. */
   history: (sessionId: string) => call<StoredMessage[]>('session_history', { sessionId }),
+  /**
+   * Attaches a finished run's activity timeline to its stored row, so a
+   * reload replays the steps, thinking and commentary that were on screen.
+   * Display-only: the core stores the JSON and never reads it back. Called by
+   * the done handler right after the run's message is committed; best effort,
+   * and a turn that ended as the app closed simply keeps no timeline.
+   */
+  storeActivity: (sessionId: string, runId: string, activity: ChatActivityBlock[]) =>
+    call<boolean>('session_activity_store', { sessionId, runId, activity }),
   remove: (sessionId: string) => call<void>('session_delete', { sessionId }),
   setMemory: (sessionId: string, useMemories: boolean, contributeMemories: boolean) =>
     call<Session>('session_memory', { sessionId, useMemories, contributeMemories }),

@@ -183,21 +183,22 @@ export const FloatingInput: React.FC<{
     });
   };
 
-  const submitValue = async (value: string, files: string[]) => {
+  const submitValue = async (value: string, files: string[]): Promise<boolean> => {
     const trimmed = value.trim();
-    if (!trimmed || submittingRef.current) return;
+    if (!trimmed || submittingRef.current) return false;
     // The turn is busy: park the instruction behind it instead of dropping
     // it. It is sent on its own when the running turn completes.
     if (isRunning) {
       queueMessage(trimmed, files, mode);
       clearDraft();
-      return;
+      return false;
     }
     submittingRef.current = true;
     setSubmitting(true);
     try {
       const accepted = await send(trimmed, files);
       if (accepted) clearDraft();
+      return accepted;
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -358,11 +359,28 @@ export const FloatingInput: React.FC<{
               const existing = textRef.current;
               const separator = existing.length > 0 && !/\s$/.test(existing) ? ' ' : '';
               const combined = `${existing}${separator}${clean}`;
+              const sentFiles = attachedRef.current;
               setDrafts((current) => ({
                 ...current,
-                [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), text: combined },
+                [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), text: combined, attached: sentFiles },
               }));
-              await submitValue(combined, attachedRef.current);
+              const accepted = await submitValue(combined, sentFiles);
+              // A typed send clears through clearDraft(), but this callback
+              // was created in an older render, so the draft it captured
+              // predates the write above — clearDraft() would refuse to clear
+              // and the just-sent words would stay in the box. Clear here
+              // against exactly what was written: only if the draft is still
+              // that same text (and same attachments). Anything the operator
+              // typed or attached while the send was in flight survives.
+              if (accepted) {
+                setDrafts((current) => {
+                  const latest = current[draftKey];
+                  if (!latest || latest.text !== combined || latest.attached.length !== sentFiles.length) return current;
+                  const next = { ...current };
+                  delete next[draftKey];
+                  return next;
+                });
+              }
               window.requestAnimationFrame(() => areaRef.current?.focus());
             } else {
               insertTranscription(transcript);
@@ -678,13 +696,7 @@ export const FloatingInput: React.FC<{
         )}
 
         {sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Will send automatically after transcription</p>}
-        {voiceState === 'recording' && !sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--destructive)]"><span className="size-1.5 rounded-full bg-current animate-pulse" />Listening locally · click stop when finished · or press Send to finish and send</p>}
-        {voiceState === 'recording' && sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--destructive)]"><span className="size-1.5 rounded-full bg-current animate-pulse" />Finishing dictation · will send automatically</p>}
-        {voiceState === 'transcribing' && !sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Transcribing locally · audio stays on this device</p>}
-        {voiceState === 'transcribing' && sendAfterVoice && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Transcribing locally · will send automatically</p>}
         {voiceError && <p role="alert" className="mt-1.5 flex items-center justify-center gap-2 text-[10px] text-[var(--destructive)]"><span className="max-w-[42rem] truncate" title={voiceError}>{voiceError}</span><button type="button" onClick={() => openSettings('transcription')} className="underline underline-offset-2">Transcription settings</button><button type="button" onClick={() => setVoiceError('')} aria-label="Dismiss transcription error"><X size={10} /></button></p>}
-        {isRunning && stopping && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Stopping…</p>}
-        {isRunning && !stopping && <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted-foreground)]"><Loader2 size={10} className="animate-spin" />Running locally · nothing leaves this device · type to queue a follow-up</p>}
       </div>
     </div>
   );
