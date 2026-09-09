@@ -67,6 +67,7 @@ mod hardware;
 mod knowledge;
 mod log;
 mod mcp;
+mod multi_agent;
 mod preview;
 mod registry;
 mod router;
@@ -175,6 +176,7 @@ fn main() {
             harness::ensure_layout()?;
             let conn = db::open(&db::state_dir())?;
             let st = Arc::new(AppState::new(handle.clone(), conn)?);
+            multi_agent::start_supervisor(st.clone());
             // Generated Markdown mirrors are inspectable even before the memory
             // panel is opened. A mirror failure must not invalidate the canonical
             // SQLite store, so it is reported and startup continues.

@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   AlertTriangle,
+  ChevronDown,
   ExternalLink,
   Globe,
   Loader2,
@@ -22,13 +23,12 @@ export const DevServerBar: React.FC = () => {
   const { activeDevServer, activeWorkspaceId, startDevServer, stopDevServer, openDevServerUrl } =
     useApp();
 
-  if (!activeWorkspaceId || !activeDevServer) return null;
+  if (!activeWorkspaceId || !activeDevServer || activeDevServer.status === 'stopped') return null;
   const s = activeDevServer;
 
   const statusIcon =
     s.status === 'running' ? (
       <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--success)] opacity-60" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--success)]" />
       </span>
     ) : s.status === 'starting' ? (
@@ -49,33 +49,31 @@ export const DevServerBar: React.FC = () => {
           : 'stopped';
 
   return (
-    <div className="flex-shrink-0 max-w-3xl w-full mx-auto px-4">
-      <div className="flex items-center justify-between gap-3 border border-[var(--border)] rounded-lg bg-[var(--sidebar)] px-3 py-2">
-        <div className="flex items-center gap-2 min-w-0 text-[11px] text-[var(--muted-foreground)]">
+    <details className="composer-activity" key={s.status}>
+        <summary className="composer-activity-summary">
           {statusIcon}
           <Globe size={12} className="flex-shrink-0" />
-          <span className="flex-shrink-0">Dev server</span>
+          <span className="flex-shrink-0">Local server</span>
           {s.status === 'running' && s.url ? (
-            <button
-              onClick={() => void openDevServerUrl(s.url!)}
-              className="truncate font-mono text-[var(--info)] hover:underline"
-              title={`Open ${s.url} in the browser — verified reachable by the core`}
-            >
+            <span className="min-w-0 flex-1 truncate" title={s.url}>
               {s.url}
-            </button>
+            </span>
           ) : s.status === 'failed' && s.error ? (
             <span
-              className="truncate text-[var(--destructive)]"
+              className="min-w-0 flex-1 truncate text-[var(--destructive)]"
               title={s.error}
             >
               {s.error}
             </span>
           ) : (
-            <span className="truncate font-mono">{s.command}</span>
+            <span className="min-w-0 flex-1 truncate">{s.command}</span>
           )}
           <span className="flex-shrink-0 tabular-nums">· {statusText}</span>
-        </div>
-        <div className="flex items-center gap-1 flex-shrink-0">
+          <ChevronDown size={12} className="activity-chevron shrink-0" />
+        </summary>
+        <div className="px-3 pb-2">
+          <p className="mb-2 max-h-24 overflow-y-auto break-words text-xs">{s.error || s.command}</p>
+        <div className="flex flex-wrap items-center gap-1">
           {s.status === 'running' && s.url && (
             <button
               onClick={() => void openDevServerUrl(s.url!)}
@@ -110,7 +108,7 @@ export const DevServerBar: React.FC = () => {
             </button>
           )}
         </div>
-      </div>
-    </div>
+        </div>
+    </details>
   );
 };

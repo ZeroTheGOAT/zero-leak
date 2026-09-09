@@ -200,6 +200,7 @@ export type StepKind =
   | 'generating_artifact'
   | 'verifying'
   | 'awaiting_approval'
+  | 'subagent'
   | 'error';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'skipped';
@@ -373,7 +374,59 @@ export type ToolName =
   | 'web_search'
   | 'web_fetch'
   | 'mcp_list_tools'
-  | 'mcp_call';
+  | 'mcp_call'
+  | 'mcp_list_resources'
+  | 'mcp_read_resource'
+  | 'mcp_list_prompts'
+  | 'mcp_get_prompt'
+  | 'spawn_agent'
+  | 'list_agents'
+  | 'send_message'
+  | 'followup_task'
+  | 'interrupt_agent'
+  | 'wait_agent';
+
+export type SubagentStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'interrupted';
+
+export type SubagentRole =
+  | 'default'
+  | 'explorer'
+  | 'coder'
+  | 'reviewer'
+  | 'document'
+  | 'verifier';
+
+export interface SubagentInfo {
+  id: string;
+  taskName: string;
+  path: string;
+  rootSessionId: string;
+  sessionId: string;
+  parentId?: string;
+  parentRunId: string;
+  workspaceId?: string;
+  role: SubagentRole;
+  status: SubagentStatus;
+  depth: number;
+  runId?: string;
+  modelId?: string;
+  result: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SubagentEvent {
+  rootSessionId: string;
+  parentRunId: string;
+  agent: SubagentInfo;
+}
 
 export type WebSearchMode = 'disabled' | 'direct' | 'provider';
 export type WebSearchProvider = 'brave' | 'tavily';
@@ -840,6 +893,10 @@ export interface Session {
   mode: AgentMode;
   useMemories: boolean;
   contributeMemories: boolean;
+  /** Sidebar placement: pinned chats sit in their own section at the top. */
+  pinned: boolean;
+  /** Archived chats stay in the store but leave the sidebar's main list. */
+  archived: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -853,6 +910,7 @@ export type PanelTabKind =
   | 'review'
   | 'terminal'
   | 'files'
+  | 'sources'
   | 'file'
   | 'document'
   | 'knowledge'
@@ -865,6 +923,8 @@ export interface PanelTab {
   id: string;
   kind: PanelTabKind;
   title: string;
+  /** A quick-preview tab closes its containing panel when dismissed. */
+  closePanelOnClose?: boolean;
   /** For 'document' tabs: which ingested document to render. */
   documentId?: string;
   /** For 'file' tabs: an approved local path rendered inside the panel. */
@@ -911,6 +971,7 @@ export interface AppSettings {
   modelIdleEvictSec: number;
   /** Ask the model to think before answering. Off by default: it burns budget. */
   extendedThinking: boolean;
+  thinkingEffort: 'low' | 'medium' | 'high' | 'max';
 
   /* Sovereignty */
   allowPrivateServer: boolean;
@@ -937,6 +998,9 @@ export interface AppSettings {
   /* Agent */
   defaultMode: AgentMode;
   approvalPolicy: ApprovalPolicy;
+  multiAgentEnabled: boolean;
+  maxSubagents: number;
+  maxSubagentDepth: number;
   /** Operator-authored hard stops. Checked before approvals; not waivable. */
   guardRules: GuardRuleEntry[];
 

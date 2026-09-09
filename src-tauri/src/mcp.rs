@@ -4,7 +4,9 @@
 //! no package is downloaded, and every agent invocation passes through the
 //! normal execute-risk approval gate before this module is reached.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -15,6 +17,22 @@ use crate::types::{AppSettings, McpServerConfig, McpToolSummary};
 
 const MCP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MESSAGE: usize = 8 * 1024 * 1024;
+
+struct Connection {
+    command: String,
+    args: Vec<String>,
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: BufReader<tokio::process::ChildStdout>,
+    _job: Arc<crate::winproc::Job>,
+    next_id: u64,
+}
+
+static CONNECTIONS: OnceLock<tokio::sync::Mutex<HashMap<String, Connection>>> = OnceLock::new();
+
+fn connections() -> &'static tokio::sync::Mutex<HashMap<String, Connection>> {
+    CONNECTIONS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
 
 fn server<'a>(settings: &'a AppSettings, id: &str) -> CoreResult<&'a McpServerConfig> {
     let server = settings
@@ -111,11 +129,7 @@ async fn request(
     }
 }
 
-async fn session(
-    config: &McpServerConfig,
-    method: &str,
-    params: Value,
-) -> CoreResult<Value> {
+async fn connect(config: &McpServerConfig) -> CoreResult<Connection> {
     // Contained in a job object like every other child: bounds memory/processes
     // and kills the tree with the app (KILL_ON_JOB_CLOSE). tokio has no
     // suspended-spawn, so containment happens immediately after spawn (tiny
@@ -153,7 +167,7 @@ async fn session(
             })?;
         }
     }
-    let _job = std::sync::Arc::new(job);
+    let job = Arc::new(job);
     let mut stdin = child.stdin.take().ok_or_else(|| {
         CoreError::ExecutionFailed("The MCP server did not open an input channel.".into())
     })?;
@@ -162,7 +176,7 @@ async fn session(
     })?;
     let mut stdout = BufReader::new(stdout);
 
-    let result = tokio::time::timeout(MCP_TIMEOUT, async {
+    tokio::time::timeout(MCP_TIMEOUT, async {
         request(
             &mut stdin,
             &mut stdout,
@@ -179,13 +193,49 @@ async fn session(
             &mut stdin,
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
         )
-        .await?;
-        request(&mut stdin, &mut stdout, 2, method, params).await
+        .await
     })
     .await
-    .map_err(|_| CoreError::Timeout(format!("MCP server '{}' did not answer within 30 seconds.", config.name)))?;
+    .map_err(|_| CoreError::Timeout(format!("MCP server '{}' did not initialize within 30 seconds.", config.name)))??;
 
-    let _ = child.kill().await;
+    Ok(Connection {
+        command: config.command.clone(),
+        args: config.args.clone(),
+        child,
+        stdin,
+        stdout,
+        _job: job,
+        next_id: 2,
+    })
+}
+
+async fn session(config: &McpServerConfig, method: &str, params: Value) -> CoreResult<Value> {
+    let mut pool = connections().lock().await;
+    let stale = pool.get(&config.id).is_some_and(|connection| {
+        connection.command != config.command || connection.args != config.args
+    });
+    if stale {
+        if let Some(mut old) = pool.remove(&config.id) {
+            let _ = old.child.kill().await;
+        }
+    }
+    if !pool.contains_key(&config.id) {
+        pool.insert(config.id.clone(), connect(config).await?);
+    }
+    let connection = pool.get_mut(&config.id).expect("MCP connection inserted");
+    let id = connection.next_id;
+    connection.next_id = connection.next_id.saturating_add(1);
+    let result = tokio::time::timeout(
+        MCP_TIMEOUT,
+        request(&mut connection.stdin, &mut connection.stdout, id, method, params),
+    )
+    .await
+    .map_err(|_| CoreError::Timeout(format!("MCP server '{}' did not answer within 30 seconds.", config.name)))?;
+    if result.is_err() {
+        if let Some(mut failed) = pool.remove(&config.id) {
+            let _ = failed.child.kill().await;
+        }
+    }
     result
 }
 
@@ -236,4 +286,41 @@ pub async fn call_tool(
     } else {
         Ok(text)
     }
+}
+
+pub async fn list_resources(settings: &AppSettings, server_id: &str) -> CoreResult<Value> {
+    let config = server(settings, server_id)?;
+    session(config, "resources/list", json!({})).await
+}
+
+pub async fn read_resource(
+    settings: &AppSettings,
+    server_id: &str,
+    uri: &str,
+) -> CoreResult<String> {
+    let config = server(settings, server_id)?;
+    let result = session(config, "resources/read", json!({ "uri": uri })).await?;
+    Ok(result
+        .get("contents")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+pub async fn list_prompts(settings: &AppSettings, server_id: &str) -> CoreResult<Value> {
+    let config = server(settings, server_id)?;
+    session(config, "prompts/list", json!({})).await
+}
+
+pub async fn get_prompt(
+    settings: &AppSettings,
+    server_id: &str,
+    name: &str,
+    arguments: Value,
+) -> CoreResult<Value> {
+    let config = server(settings, server_id)?;
+    session(config, "prompts/get", json!({ "name": name, "arguments": arguments })).await
 }

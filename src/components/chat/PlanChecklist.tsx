@@ -12,7 +12,7 @@ import type { PlanItem } from '../../types';
  * theme tokens only) so the plan reads as the first row of the timeline
  * rather than a new UI element.
  */
-export const PlanChecklist: React.FC<{ items: PlanItem[] }> = ({ items }) => {
+export const PlanChecklist: React.FC<{ items: PlanItem[]; isRunning?: boolean }> = ({ items, isRunning = false }) => {
   if (items.length === 0) return null;
 
   const done = items.filter((i) => i.status === 'completed').length;
@@ -29,7 +29,7 @@ export const PlanChecklist: React.FC<{ items: PlanItem[] }> = ({ items }) => {
         {items.map((item, i) => (
           <div key={item.id || `item-${i}`} className="w-full flex items-start space-x-2 py-0.5 text-left">
             <span className="w-4 flex-shrink-0 flex items-center justify-center mt-[3px]">
-              {item.status === 'in_progress' ? (
+              {isRunning && item.status === 'in_progress' ? (
                 <Loader2 size={12} className="animate-spin text-[var(--info)]" />
               ) : item.status === 'completed' ? (
                 <Check size={12} className="text-[var(--success)]" />

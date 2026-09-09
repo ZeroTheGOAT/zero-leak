@@ -810,7 +810,7 @@ export const ChatContainer: React.FC = () => {
   return (
     <div className="relative flex-1 flex flex-col min-h-0">
       {/* Session header */}
-      <div className="h-10 px-4 flex items-center justify-between border-b border-[var(--muted)] flex-shrink-0">
+      <div className="h-12 px-4 flex items-center justify-between border-b border-[var(--muted)] flex-shrink-0">
         <div className="min-w-0 flex items-center space-x-2">
           <h2 className="text-[13px] text-[var(--foreground)] truncate">
             {activeSession?.title ?? 'New task'}

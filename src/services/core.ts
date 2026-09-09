@@ -64,6 +64,8 @@ import type {
   SandboxRun,
   Session,
   SovereignStatus,
+  SubagentEvent,
+  SubagentInfo,
   StoreGateDecision,
   StoredMessage,
   TaskKind,
@@ -353,6 +355,16 @@ export const agent = {
   start: (input: StartRunInput) =>
     call<{ runId: string; sessionId: string }>('agent_start', { input }),
   cancel: (runId: string) => call<void>('agent_cancel', { runId }),
+  subagents: {
+    list: (rootSessionId: string, pathPrefix?: string) =>
+      call<SubagentInfo[]>('subagent_list', { rootSessionId, pathPrefix }),
+    history: (rootSessionId: string, target: string) =>
+      call<StoredMessage[]>('subagent_history', { rootSessionId, target }),
+    message: (rootSessionId: string, target: string, message: string) =>
+      call<SubagentInfo>('subagent_message', { rootSessionId, target, message }),
+    interrupt: (rootSessionId: string, target: string) =>
+      call<SubagentInfo>('subagent_interrupt', { rootSessionId, target }),
+  },
   respondToPermission: (requestId: string, decision: PermissionDecision) =>
     call<void>('permission_respond', { requestId, decision }),
   /** Deliver a typed reply to a mid-run `ask_operator` question. */
@@ -410,6 +422,22 @@ export const sessions = {
    */
   setWorkspace: (sessionId: string, workspaceId: string | null) =>
     call<void>('session_workspace', { sessionId, workspaceId }),
+  /**
+   * Renames a chat, pins it to the sidebar's top, or archives it out of the
+   * list. Every field travels, because for a chat that has not sent its
+   * first turn there is no store row yet and the core creates one from the
+   * mode and binding sent here — a rename or pin made before the first
+   * message would otherwise be dropped by the next session_list reload.
+   * Answers with the stored row, its title clamped, so the screen can sync.
+   */
+  update: (sessionId: string, state: {
+    title: string;
+    pinned: boolean;
+    archived: boolean;
+    mode: AgentMode;
+    workspaceId: string | null;
+  }) =>
+    call<Session>('session_update', { sessionId, ...state }),
   /**
    * Deletes one operator message and every turn after it in the store. The
    * frontend then re-sends the corrected wording as a fresh turn, which is how
@@ -540,6 +568,7 @@ export interface CoreEvents {
   'agent://done': RunDone;
   'agent://user-stored': RunUserStored;
   'agent://failure': CoreFailure;
+  'agent://subagent': SubagentEvent;
   'devserver://status': DevServerStatus;
   'core://hardware': HardwareStatus;
   'core://sovereign': SovereignStatus;

@@ -7,6 +7,7 @@ import { SidebarPeek } from './components/layout/SidebarPeek';
 import { BottomPanel } from './components/layout/BottomPanel';
 import { StatusBar } from './components/layout/StatusBar';
 import { ChatContainer } from './components/chat/ChatContainer';
+import { ConversationReferences } from './components/chat/ConversationReferences';
 import { FloatingInput, type ComposerDraft } from './components/chat/FloatingInput';
 import { TaskDock } from './components/chat/TaskDock';
 import { DevServerBar } from './components/chat/DevServerBar';
@@ -29,8 +30,6 @@ export const AppContent: React.FC = () => {
     openSettings,
     isPanelOpen,
     setIsPanelOpen,
-    tabs,
-    artifacts,
     newSession,
     isCreateProjectOpen,
     messages,
@@ -41,6 +40,7 @@ export const AppContent: React.FC = () => {
     sidebarLeaving,
     sidebarReopened,
     showPinnedSummary,
+    pickAttachments,
   } = useApp();
   // Peek-on-hover when the sidebar is collapsed (hover strip + slide-in
   // overlay) lives in SidebarPeek, which unmounts the moment the docked
@@ -60,33 +60,31 @@ export const AppContent: React.FC = () => {
     !isRunning &&
     queuedMessages.length === 0;
 
-  // The panel only renders once something has been opened in it, so "visible"
-  // is both flags together — the button has to reflect what is on screen.
-  const panelVisible = isPanelOpen && tabs.length > 0;
+  // An open panel can be either a selected tool or the neutral launcher.
+  // Both are visible states controlled by the one persistent edge toggle.
+  const panelVisible = isPanelOpen;
 
   const togglePanel = useCallback(() => {
-    if (panelVisible) {
-      setIsPanelOpen(false);
-      return;
-    }
-    if (tabs.length === 0) {
-      // First open: the project's own files when a folder is open, since that
-      // is what "show me everything" means with a workspace loaded. Artifacts
-      // otherwise, which is all there is to show without one.
-      if (activeWorkspaceId) openTab('files', 'Files');
-      else openTab('artifacts', 'Artifacts');
-      return;
-    }
-    setIsPanelOpen(true);
-  }, [panelVisible, tabs.length, activeWorkspaceId, openTab, setIsPanelOpen]);
+    setIsPanelOpen(!panelVisible);
+  }, [panelVisible, setIsPanelOpen]);
 
-  const panelHint = panelVisible
-    ? 'Hide the side panel'
-    : artifacts.length > 0
-      ? `Show the side panel — files, changes and ${artifacts.length} artifact${
-          artifacts.length === 1 ? '' : 's'
-        }`
-      : 'Show the side panel — files, changes and artifacts';
+  const panelHint = panelVisible ? 'Hide the side panel' : 'Show the side panel';
+
+  const addConversationSources = useCallback(async () => {
+    if (!activeSessionId) return;
+    const added = await pickAttachments();
+    if (added.length === 0) return;
+    setDrafts((current) => {
+      const existing = current[activeSessionId] ?? { text: '', attached: [] };
+      return {
+        ...current,
+        [activeSessionId]: {
+          ...existing,
+          attached: [...new Set([...existing.attached, ...added])],
+        },
+      };
+    });
+  }, [activeSessionId, pickAttachments]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -187,30 +185,11 @@ export const AppContent: React.FC = () => {
                 the border-l traces the curve. Collapsed, the sidebar colour
                 and the border drop away and the screen is flat full-width. */}
             <main
-              className={`flex-1 flex flex-col min-w-0 min-h-0 relative select-text bg-[var(--background)] rounded-tl-[14px] ${
+              className={`flex-1 flex min-w-0 min-h-0 relative select-text bg-[var(--background)] rounded-tl-[14px] ${
                 sidebarMounted ? 'border-l border-[var(--border)]' : ''
               }`}
             >
-              {/* The symbol alone: the panel it opens names its own tabs, so a
-                  label and a count out here would only repeat them. Solid
-                  card chip with a real edge — it only shows while the panel
-                  is closed (the header toggle takes over once open), which
-                  is also the only time it is needed. */}
-              {!panelVisible && (
-              <button
-                onClick={togglePanel}
-                aria-pressed={panelVisible}
-                aria-label={panelHint}
-                className={`absolute top-1.5 right-3 z-30 h-8 w-8 flex items-center justify-center rounded-md border shadow-md transition ${
-                  panelVisible
-                    ? 'bg-[var(--primary-soft)] border-[var(--primary-ring)] text-[var(--primary)]'
-                    : 'bg-[var(--card)] border-[var(--input)] text-[var(--foreground)] hover:bg-[var(--accent)]'
-                }`}
-                title={panelHint}
-              >
-                {panelVisible ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
-              </button>
-              )}
+              <div className="relative flex min-w-0 flex-1 flex-col">
               {activeSessionId === null || isNewChat ? (
                 /* No chat open (e.g. right after deleting one) or a fresh chat:
                    the centered start screen. Title plus the composer in the
@@ -227,16 +206,40 @@ export const AppContent: React.FC = () => {
               ) : (
                 <>
                   <ChatContainer />
-                  {/* Docked run state — the task list and dev server live beside
-                      the composer, not in the conversation timeline. The Tasks
-                      checklist itself obeys View → Toggle Pinned Summary. */}
-                  {showPinnedSummary && <TaskDock />}
-                  <DevServerBar />
+                  <div className="composer-activity-dock shrink-0 px-2">
+                    <div className="mx-auto w-full max-w-4xl space-y-1">
+                      {showPinnedSummary && <TaskDock />}
+                      <DevServerBar key={activeWorkspaceId} />
+                    </div>
+                  </div>
                   <FloatingInput drafts={drafts} setDrafts={setDrafts} layout="docked" />
                 </>
               )}
+              </div>
+              <ConversationReferences
+                buttonClassName={panelVisible ? 'right-3' : 'right-14'}
+                sidePanelOpen={panelVisible}
+                onAddSources={addConversationSources}
+              />
               </main>
               <RightPanel />
+              {/* One persistent toggle is anchored to the workspace edge. It
+                  remains the same element in the same position while the
+                  panel opens underneath it. */}
+              <button
+                type="button"
+                onClick={togglePanel}
+                aria-pressed={panelVisible}
+                aria-label={panelHint}
+                className={`absolute top-1.5 right-3 z-[70] flex h-8 w-8 items-center justify-center rounded-md border shadow-md transition-colors ${
+                  panelVisible
+                    ? 'bg-[var(--primary-soft)] border-[var(--primary-ring)] text-[var(--primary)] hover:bg-[var(--accent)]'
+                    : 'bg-[var(--card)] border-[var(--input)] text-[var(--foreground)] hover:bg-[var(--accent)]'
+                }`}
+                title={panelHint}
+              >
+                {panelVisible ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+              </button>
             </div>
 
             {/* View → Toggle Bottom Panel: the sandbox terminal dock, under

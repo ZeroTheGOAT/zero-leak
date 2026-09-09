@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Folder, FolderPlus, Lightbulb, Loader2, Trash2, X } from 'lucide-react';
+import { Folder, FolderPlus, Lightbulb, Loader2, MessageSquare, Trash2, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 const folderName = (path: string) => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path;
@@ -11,6 +11,11 @@ export const CreateProjectModal: React.FC = () => {
     pickProjectSource,
     createWorkspace,
     harnessInfo,
+    createProjectSessionId,
+    openCreateProjectForSession,
+    setSessionWorkspace,
+    updateSession,
+    sessions,
   } = useApp();
   const [name, setName] = useState('');
   const [sources, setSources] = useState<string[]>([]);
@@ -19,6 +24,11 @@ export const CreateProjectModal: React.FC = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The chat this dialog was opened for ("start a project from this chat"),
+  // resolved fresh from the session list so the notice tracks a live title.
+  const attachSession = createProjectSessionId
+    ? sessions.find((s) => s.id === createProjectSessionId) ?? null
+    : null;
 
   useEffect(() => {
     window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -32,6 +42,12 @@ export const CreateProjectModal: React.FC = () => {
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
   }, [busy, isCreateProjectOpen, setIsCreateProjectOpen]);
+
+  // However this dialog closes — created, cancelled, Escape, backdrop — the
+  // chat marked to move into the new project is cleared, so a later plain
+  // "new project" never inherits it. On success the mark was already used
+  // and this is a second, harmless clear.
+  useEffect(() => () => openCreateProjectForSession(null), [openCreateProjectForSession]);
 
   if (!isCreateProjectOpen) return null;
 
@@ -50,7 +66,18 @@ export const CreateProjectModal: React.FC = () => {
     if (!name.trim() || busy) return;
     setBusy(true);
     const created = await createWorkspace(name.trim(), sources, location ?? undefined);
-    if (!created) setBusy(false);
+    if (created) {
+      // "Start a project from this chat": move the chat into the project
+      // that now exists. The unarchive lands first — an archived chat
+      // rejoining a project comes back to the list, and for a chat with no
+      // store row yet that state write is what creates the row the rebind
+      // then updates.
+      if (attachSession) {
+        if (attachSession.archived) await updateSession(attachSession.id, { archived: false });
+        setSessionWorkspace(attachSession.id, created.id);
+        openCreateProjectForSession(null);
+      }
+    } else setBusy(false);
   };
 
   return (
@@ -77,6 +104,16 @@ export const CreateProjectModal: React.FC = () => {
             <X size={17} />
           </button>
         </div>
+
+        {attachSession && (
+          <div className="mx-5 mb-3 flex items-center gap-2.5 rounded-xl bg-[var(--accent)] px-3 py-2">
+            <MessageSquare size={14} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+            <span className="min-w-0 flex-1 truncate text-[11.5px] leading-5 text-[var(--muted-foreground)]">
+              “<span className="text-[var(--foreground)]">{attachSession.title}</span>” will be
+              added to this project.
+            </span>
+          </div>
+        )}
 
         <div className="px-5 pb-5 space-y-4">
           <label className="block">

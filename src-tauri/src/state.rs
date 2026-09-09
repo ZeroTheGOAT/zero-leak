@@ -329,6 +329,11 @@ pub struct AppState {
     /// the database happens to return first.
     pub pending_changes: Mutex<HashMap<String, PendingRun>>,
 
+    /// One Codex-style control plane for all child threads. Every record carries
+    /// its root chat, so listing, messaging, waiting, and recovery cannot cross
+    /// conversation or project scope.
+    pub multi_agent: crate::multi_agent::MultiAgentControl,
+
     /// Tools the user allowed for the rest of the session, with grant time.
     /// Grants expire after 8h so an "allow for session" cannot outlive the
     /// workday it was meant for; `needs_approval` prunes expired entries.
@@ -352,6 +357,8 @@ impl AppState {
     pub fn new(app: AppHandle, conn: Connection) -> CoreResult<Self> {
         let settings = crate::db::load_settings(&conn)?;
         let registry = Registry::load_or_seed(&crate::registry::config_dir(), &settings.models_directory)?;
+        let multi_agent = crate::multi_agent::MultiAgentControl::default();
+        multi_agent.restore(crate::db::subagents(&conn)?);
 
         let models = registry
             .all()
@@ -391,6 +398,7 @@ impl AppState {
             permissions: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             pending_changes: Mutex::new(HashMap::new()),
+            multi_agent,
             session_grants: RwLock::new(Vec::new()),
             watching: AtomicBool::new(false),
             watched_folders: Mutex::new(Vec::new()),

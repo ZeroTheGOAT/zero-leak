@@ -22,6 +22,7 @@ import {
   SquareTerminal,
   Terminal,
   BadgeCheck,
+  GitFork,
 } from 'lucide-react';
 import type { AgentStep, StepKind } from '../../types';
 import { formatDuration, modelById } from '../../services/registry';
@@ -43,6 +44,7 @@ const STEP_ICON: Record<StepKind, React.ElementType> = {
   generating_artifact: FileOutput,
   verifying: BadgeCheck,
   awaiting_approval: ShieldQuestion,
+  subagent: GitFork,
   error: AlertCircle,
 };
 

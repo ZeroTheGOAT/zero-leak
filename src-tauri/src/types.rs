@@ -235,6 +235,10 @@ pub enum StepKind {
     GeneratingArtifact,
     Verifying,
     AwaitingApproval,
+    /// A child agent being spawned, running, waiting, or completing. The
+    /// activity is surfaced on the parent chat without copying the child's
+    /// noisy tool transcript into the parent's context.
+    Subagent,
     Error,
 }
 
@@ -311,11 +315,21 @@ pub enum ToolName {
     WebFetch,
     McpListTools,
     McpCall,
+    McpListResources,
+    McpReadResource,
+    McpListPrompts,
+    McpGetPrompt,
     UpdatePlan,
     AskOperator,
     ServeFolder,
     StartDevServer,
     CheckPage,
+    SpawnAgent,
+    ListAgents,
+    SendMessage,
+    FollowupTask,
+    InterruptAgent,
+    WaitAgent,
 }
 
 impl ToolName {
@@ -889,6 +903,23 @@ pub struct FileChange {
 /* Settings                                                            */
 /* ------------------------------------------------------------------ */
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingEffort {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Max,
+}
+
+impl ThinkingEffort {
+    pub fn token_budget(self, max_tokens: u32) -> u32 {
+        let requested = match self { Self::Low => 256, Self::Medium => 512, Self::High => 1024, Self::Max => 2048 };
+        requested.min(max_tokens.saturating_sub(512))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -902,6 +933,8 @@ pub struct AppSettings {
     pub max_resident_models: u32,
     pub model_idle_evict_sec: u32,
     pub extended_thinking: bool,
+    #[serde(default)]
+    pub thinking_effort: ThinkingEffort,
 
     /* Sovereignty */
     pub allow_private_server: bool,
@@ -926,6 +959,14 @@ pub struct AppSettings {
     /* Agent */
     pub default_mode: AgentMode,
     pub approval_policy: ApprovalPolicy,
+    /// Codex-style child threads. Limits are enforced by the native control
+    /// plane, not by prompt text, so a model cannot exceed them.
+    #[serde(default = "default_true")]
+    pub multi_agent_enabled: bool,
+    #[serde(default = "default_max_subagents")]
+    pub max_subagents: u32,
+    #[serde(default = "default_max_subagent_depth")]
+    pub max_subagent_depth: u32,
     /// Operator-authored safety rules. Empty by default — the built-in
     /// workspace containment and sandbox allow-list are always on; these are
     /// the operator's own hard stops on top of both.
@@ -956,6 +997,88 @@ pub struct AppSettings {
 
     /* UI */
     pub show_right_panel: bool,
+}
+
+fn default_max_subagents() -> u32 { 4 }
+fn default_max_subagent_depth() -> u32 { 2 }
+
+/* ------------------------------------------------------------------ */
+/* Codex-derived multi-agent control plane                             */
+/* ------------------------------------------------------------------ */
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Pending,
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl SubagentStatus {
+    pub fn is_final(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentRole {
+    /// General delegated work with the parent's ordinary tool surface.
+    Default,
+    /// Read-only repository and evidence exploration.
+    Explorer,
+    /// Source implementation. Writes still use the shared approval broker.
+    Coder,
+    /// Read-only correctness, safety, and regression review.
+    Reviewer,
+    /// Read-only document/OCR and evidence analysis.
+    Document,
+    /// Read-only verification of another agent's output.
+    Verifier,
+}
+
+impl SubagentRole {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::Explorer | Self::Reviewer | Self::Document | Self::Verifier)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub id: String,
+    pub task_name: String,
+    pub path: String,
+    pub root_session_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub parent_run_id: String,
+    pub workspace_id: Option<String>,
+    pub role: SubagentRole,
+    pub status: SubagentStatus,
+    pub depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentEvent {
+    pub root_session_id: String,
+    pub parent_run_id: String,
+    pub agent: SubagentInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1078,6 +1201,14 @@ pub struct StoredSession {
     pub mode: AgentMode,
     pub use_memories: bool,
     pub contribute_memories: bool,
+    /// Sidebar placement: pinned chats sit in their own section at the top.
+    /// `serde(default)` so a payload written before the column existed still
+    /// reads as the unpinned chat it was.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Archived chats stay in the store but leave the sidebar's main list.
+    #[serde(default)]
+    pub archived: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1172,6 +1303,19 @@ pub struct StartRunInput {
     pub use_memories: bool,
     #[serde(default = "default_true")]
     pub contribute_memories: bool,
+    /// Internal child-thread metadata. These fields are never accepted as an
+    /// authority boundary: the native registry has already reserved the child
+    /// and `agent_id` is checked there before the run starts.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub root_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_role: Option<SubagentRole>,
+    #[serde(default)]
+    pub preferred_model_id: Option<String>,
+    #[serde(default)]
+    pub preferred_thinking_effort: Option<ThinkingEffort>,
 }
 
 /// One model-visible input item on an explicitly submitted turn.

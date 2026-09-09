@@ -32,6 +32,19 @@ The active native core in this checkout is `src-tauri`. A standalone `npm run de
   - Global and project `AGENTS.md` instructions, loaded before each local-model run.
   - Session-scoped artifact folders with project/chat provenance and verification.
   - Inspectable JSONL transcript mirrors and Markdown memory mirrors alongside the SQLite source of truth.
+- **OpenAI Codex-derived agent control plane**:
+  - Session-scoped child-agent trees with canonical task paths and durable hidden transcripts.
+  - `spawn_agent`, `list_agents`, `send_message`, `followup_task`, `interrupt_agent`, and bounded `wait_agent` coordination tools.
+  - Full, recent-turn, or empty context forks; per-agent local model and reasoning overrides.
+  - Explorer, coder, reviewer, document, and verifier roles with backend-enforced read-only restrictions where appropriate.
+  - Parent/child cancellation, completion notifications, concurrency/depth limits, and inspectable activity in the chat timeline.
+  - Persistent local MCP sessions with tools, resources, and reusable prompts.
+
+The control-plane design is adapted from the Apache-2.0 licensed
+[OpenAI Codex CLI](https://github.com/openai/codex). ZeroLeak uses its own local
+model router, storage, tools, UI, and security policies; it is not an OpenAI
+product and does not use OpenAI branding as its product identity. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ---
 

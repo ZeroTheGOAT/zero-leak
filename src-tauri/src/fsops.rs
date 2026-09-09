@@ -517,7 +517,15 @@ fn project_slug(name: &str) -> String {
     if trimmed.is_empty() {
         "project".into()
     } else {
-        trimmed.chars().take(48).collect::<String>().trim_end_matches('-').into()
+        let slug = trimmed.chars().take(48).collect::<String>().trim_end_matches('-').to_string();
+        // Windows device names cannot be directory components, even with extensions.
+        if matches!(slug.as_str(), "con" | "prn" | "aux" | "nul")
+            || (slug.len() == 4 && (slug.starts_with("com") || slug.starts_with("lpt"))
+                && matches!(slug.as_bytes()[3], b'1'..=b'9')) {
+            format!("project-{slug}")
+        } else {
+            slug
+        }
     }
 }
 
@@ -542,8 +550,14 @@ fn create_workspace_blocking(
     let projects_root = crate::registry::sovereign_root().join("projects");
     std::fs::create_dir_all(&projects_root)?;
     let projects_root = std::fs::canonicalize(&projects_root)?;
-    let unique = new_id("p");
-    let id = format!("{}--{}", project_slug(name), unique);
+    let id = project_slug(name);
+    if projects_root.join(&id).exists()
+        || st.with_db(db::workspaces)?.iter().any(|w| w.id.eq_ignore_ascii_case(&id))
+    {
+        return Err(CoreError::ExecutionFailed(format!(
+            "A project folder named \"{id}\" already exists. Choose a different project name."
+        )));
+    }
 
     // Where this project lives. `None` is the app-owned container; `Some` is
     // a folder the operator picked, which becomes the workspace root itself.
@@ -556,6 +570,8 @@ fn create_workspace_blocking(
                 ));
             }
             let files_root = container.join("files");
+            // Atomic allocation prevents concurrent requests from sharing a project.
+            std::fs::create_dir(&container)?;
             std::fs::create_dir_all(&files_root)?;
             (files_root, Some(container))
         }
@@ -594,7 +610,9 @@ fn create_workspace_blocking(
                     tidy(&canonical)
                 )));
             }
-            (canonical, None)
+            let container = projects_root.join(&id);
+            std::fs::create_dir(&container)?;
+            (canonical, Some(container))
         }
     };
 
@@ -1625,6 +1643,9 @@ mod preview_tests {
         assert_eq!(project_slug(" Copenhagen Trip "), "copenhagen-trip");
         assert_eq!(project_slug("安全"), "project");
         assert!(!project_slug("../../Windows").contains('.'));
+        assert_eq!(project_slug("CON"), "project-con");
+        assert_eq!(project_slug("LPT1"), "project-lpt1");
+        assert_eq!(project_slug("My Demo"), "my-demo");
     }
 
     #[test]

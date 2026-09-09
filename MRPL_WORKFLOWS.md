@@ -4,6 +4,8 @@ Open **Workflows** in the title bar. The panel has four sections: Workflows, Run
 
 ## Workflows
 
+Automatic chat routing first calls local Gemma E4B with thinking enabled, recent conversation and capability descriptions for all bundled models. Gemma chooses an installed, enabled tool-capable coordinator whose context fits the request. OCR and embedding specialists remain tool workers. Invalid selections fail visibly instead of reverting to keyword routing. The choice stays in place for the final answer unless more context requires another Gemma selection; configured workflow recovery remains available. This adds one local inference call and requires Gemma E4B to be installed. Selection quality still needs real-model rehearsal.
+
 - **Inspection approval package:** attach an inspection report and supporting sources; index the applicable SOP in Knowledge. The agent plans, reads/OCRs, retrieves local knowledge, produces a draft Word approval note and an Excel action tracker, and inspects its artifacts.
 - **Verified internal dashboard:** attach a tracker or use **Use latest tracker** after the inspection workflow. The coding route takes precedence over spreadsheet attachment type. The agent writes code, runs sandbox checks, serves locally and checks the page.
 

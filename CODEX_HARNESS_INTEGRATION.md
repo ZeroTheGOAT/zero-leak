@@ -1,5 +1,9 @@
 # Codex-style turn harness integration
 
+> The implemented Codex-derived multi-agent and MCP expansion is mapped in
+> [`docs/CODEX-DERIVATION.md`](docs/CODEX-DERIVATION.md), including upstream
+> source locations, sovereign modifications, and license boundaries.
+
 ## Outcome
 
 The workbench keeps its existing React/Zero interface and local llama.cpp model stack, but adopts the Codex app-server lifecycle at the product boundary:
@@ -223,4 +227,3 @@ This prevents an OCR specialistâ€”which is intentionally not a chat/tool modelâ€
 - Operator-question tests cover the wire shape and the timeout/cancellation reply markers.
 - Batch-change tests cover path selection (unapplied-only for apply, everything for discard) and the failed-list wire shape.
 - Guardrail tests cover path prefix boundaries (separator, drive root, case), command word/phrase matching, refusal wording, and the three enforcement points.
-

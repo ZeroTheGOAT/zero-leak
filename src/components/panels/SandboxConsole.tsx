@@ -93,7 +93,15 @@ const RunLine: React.FC<{ run: SandboxRun }> = ({ run }) => {
  * only empties this view.
  */
 export const SandboxConsole: React.FC = () => {
-  const { sandboxPolicy, sandboxRuns, runInSandbox, clearSandboxRuns, coreStatus } = useApp();
+  const {
+    sandboxPolicy,
+    sandboxRuns,
+    runInSandbox,
+    clearSandboxRuns,
+    coreStatus,
+    activeDevServer,
+    stopDevServer,
+  } = useApp();
 
   const [cmd, setCmd] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
@@ -113,6 +121,9 @@ export const SandboxConsole: React.FC = () => {
   }, [sandboxRuns]);
 
   const detached = coreStatus.state === 'unavailable';
+  const runningDevServer = activeDevServer && ['starting', 'running'].includes(activeDevServer.status)
+    ? activeDevServer
+    : null;
 
   const submit = () => {
     const c = cmd.trim();
@@ -137,6 +148,39 @@ export const SandboxConsole: React.FC = () => {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--background)]">
       <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 py-1.5">
+        {runningDevServer && (
+          <div className="px-2 py-0.5">
+            <div className="flex items-center">
+              <span
+                className="max-w-[45%] shrink-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px] text-[var(--muted-foreground)]"
+                title={runningDevServer.cwd}
+              >
+                {runningDevServer.cwd ? `PS ${runningDevServer.cwd}>` : 'PS>'}
+              </span>
+              <code className="ml-2 min-w-0 break-all font-mono text-[12px] text-[var(--foreground)]">
+                {runningDevServer.command}
+              </code>
+              <span className="ml-2 flex shrink-0 items-center text-[10px] text-[var(--info)]">
+                <Loader2 size={10} className="mr-1 animate-spin" />
+                {runningDevServer.status === 'starting' ? 'starting…' : 'running…'}
+                <button
+                  type="button"
+                  onClick={() => void stopDevServer(runningDevServer.workspaceId)}
+                  className="ml-1.5 rounded p-0.5 text-[var(--muted-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--destructive)]"
+                  title="Stop the local server"
+                  aria-label="Stop the local server"
+                >
+                  <Square size={10} fill="currentColor" />
+                </button>
+              </span>
+            </div>
+            {runningDevServer.output.length > 0 && (
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11.5px] leading-[1.55] text-[var(--foreground)]">
+                {runningDevServer.output.join('\n')}
+              </pre>
+            )}
+          </div>
+        )}
         {sandboxRuns.map((r) => (
           <RunLine key={r.id} run={r} />
         ))}

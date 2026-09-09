@@ -170,6 +170,9 @@ pub struct ChatRequest {
     /// OpenAI-shaped tool schemas. Empty means a plain completion.
     pub tools: Vec<Value>,
     pub enable_thinking: bool,
+    /// A child role may choose a different local reasoning budget without
+    /// changing the operator's default for every other live chat.
+    pub thinking_effort: Option<ThinkingEffort>,
 }
 
 impl ChatRequest {
@@ -181,6 +184,7 @@ impl ChatRequest {
             temperature: 0.2,
             tools: Vec::new(),
             enable_thinking: false,
+            thinking_effort: None,
         }
     }
 }
@@ -1309,6 +1313,19 @@ pub async fn chat(
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.clone());
         body["tool_choice"] = json!("auto");
+    }
+
+    // llama.cpp supports a bounded reasoning phase independently of answer text.
+    // Keep at least 512 completion tokens available after thinking. The selector
+    // still thinks even when the worker's Extended Thinking switch is off.
+    let local_llama = st.registry.read().unwrap_or_else(|e| e.into_inner())
+        .get(&req.model_id).is_some_and(|m| m.backend == ModelBackend::LlamaCpp);
+    if local_llama {
+        let effort = req.thinking_effort.unwrap_or_else(|| st.settings().thinking_effort);
+        body["reasoning_budget"] = json!(if req.enable_thinking { effort.token_budget(req.max_tokens) } else { 0 });
+        if req.enable_thinking {
+            body["chat_template_kwargs"]["reasoning_effort"] = json!(effort);
+        }
     }
 
     let stream = on_delta.is_some() && req.tools.is_empty();

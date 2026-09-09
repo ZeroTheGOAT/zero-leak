@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FileCheck,
   File,
@@ -9,10 +9,10 @@ import {
   Maximize2,
   Minimize2,
   Package,
-  PanelRightClose,
   Plus,
   ScrollText,
   Server,
+  Share2,
   Terminal,
   X,
 } from 'lucide-react';
@@ -29,6 +29,7 @@ import { ModelManagerView } from './ModelManagerView';
 import { AuditView } from './AuditView';
 import { FilePreview } from './FilePreview';
 import { WorkflowView } from './WorkflowView';
+import { ConversationSourcesView } from './ConversationSourcesView';
 
 const TAB_META: Record<
   PanelTabKind,
@@ -53,6 +54,12 @@ const TAB_META: Record<
     tone: 'text-[var(--warning)]',
     hint: 'Files inside the approved workspace',
   },
+  sources: {
+    label: 'Sources',
+    icon: Share2,
+    tone: 'text-[var(--muted-foreground)]',
+    hint: 'Every file and citation attached to this conversation',
+  },
   file: {
     label: 'File',
     icon: File,
@@ -60,7 +67,7 @@ const TAB_META: Record<
     hint: 'Local file preview — stays inside the workbench',
   },
   document: {
-    label: 'Document',
+    label: 'Documents',
     icon: FileText,
     tone: 'text-[var(--accent-2)]',
     hint: 'Extracted text and tables with their source coordinates',
@@ -107,17 +114,40 @@ const ORDER: PanelTabKind[] = [
   'audit',
 ];
 
+const PanelLauncher: React.FC<{
+  onOpen: (kind: PanelTabKind, label: string) => void;
+}> = ({ onOpen }) => (
+  <div className="flex flex-1 items-center justify-center overflow-y-auto px-6 py-8">
+    <div className="w-full max-w-md space-y-1.5" role="menu" aria-label="Open a side panel">
+      {ORDER.map((kind) => {
+        const meta = TAB_META[kind];
+        const Icon = meta.icon;
+        return (
+          <button
+            key={kind}
+            type="button"
+            role="menuitem"
+            onClick={() => onOpen(kind, meta.label)}
+            className="flex w-full items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--background)] px-4 py-3 text-left text-sm font-medium text-[var(--foreground)] transition hover:bg-[var(--accent)]"
+            title={meta.hint}
+          >
+            <Icon size={17} className={`${meta.tone} flex-shrink-0`} />
+            <span>{meta.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  </div>
+);
+
 export const RightPanel: React.FC = () => {
   const {
     isPanelOpen,
-    setIsPanelOpen,
     tabs,
     activeTabId,
     setActiveTabId,
     openTab,
     closeTab,
-    activeWorkspaceId,
-    artifacts,
   } = useApp();
 
   const [addOpen, setAddOpen] = useState(false);
@@ -189,52 +219,34 @@ export const RightPanel: React.FC = () => {
     tabRefs.current.get(activeTabId)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [activeTabId, tabs.length]);
 
-  // The panel only renders once something has been opened in it, so "visible"
-  // is both flags together — the header toggle reads it for its pressed state.
-  const panelVisible = isPanelOpen && tabs.length > 0;
-
-  const togglePanel = useCallback(() => {
-    if (panelVisible) {
-      setIsPanelOpen(false);
-      return;
-    }
-    if (tabs.length === 0) {
-      // First open: the project's own files when a folder is open, since that
-      // is what "show me everything" means with a workspace loaded. Artifacts
-      // otherwise, which is all there is to show without one.
-      if (activeWorkspaceId) openTab('files', 'Files');
-      else openTab('artifacts', 'Artifacts');
-      return;
-    }
-    setIsPanelOpen(true);
-  }, [panelVisible, tabs.length, activeWorkspaceId, openTab, setIsPanelOpen]);
-
-  const panelHint = panelVisible
-    ? 'Hide the side panel'
-    : artifacts.length > 0
-      ? `Show the side panel — files, changes and ${artifacts.length} artifact${
-          artifacts.length === 1 ? '' : 's'
-        }`
-      : 'Show the side panel — files, changes and artifacts';
-
-  if (!isPanelOpen || tabs.length === 0) return null;
-
   const current = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
   return (
     <aside
-      className={`border-l border-[var(--border)] bg-[var(--card)] flex flex-col min-h-0 select-none ${
+      aria-hidden={!isPanelOpen}
+      inert={!isPanelOpen}
+      className={`overflow-hidden border-l bg-[var(--card)] flex flex-col min-h-0 select-none ${
+        isPanelOpen ? 'border-[var(--border)]' : 'pointer-events-none border-transparent'
+      } ${
         // Expanded: lift out of the flex row and cover it edge to edge. The
         // composer and its action row float above the chat column, so a
         // collapsed chat can still paint them over the panel — only full
         // cover in front of everything inside the row hides the chat.
         expanded ? 'absolute inset-y-0 right-0 z-[60]' : 'relative h-full flex-shrink-0'
-      } ${resizing ? '' : 'transition-[width] duration-200'}`}
-      style={{ width: expanded ? '100%' : panelWidth }}
+      } ${
+        resizing
+          ? 'transition-[transform,opacity,border-color]'
+          : 'transition-[width,transform,opacity,border-color]'
+      } duration-[390ms] ease-[cubic-bezier(0.22,1,0.36,1)]`}
+      style={{
+        width: isPanelOpen ? (expanded ? '100%' : panelWidth) : 0,
+        transform: isPanelOpen ? 'translateX(0)' : 'translateX(100%)',
+        opacity: isPanelOpen ? 1 : 0,
+      }}
     >
       {/* Drag handle only while docked — an expanded panel fills the row, so
           there is nothing beside it to resize against. */}
-      {!expanded && (
+      {isPanelOpen && !expanded && (
         <div
           role="separator"
           aria-label="Resize right panel"
@@ -253,7 +265,7 @@ export const RightPanel: React.FC = () => {
           />
         </div>
       )}
-      <div className="h-11 px-2 flex items-center bg-[var(--background)] border-b border-[var(--border)] relative">
+      <div className="h-11 pl-2 pr-12 flex items-center bg-[var(--background)] border-b border-[var(--border)] relative">
         <div className="flex items-center gap-1 overflow-x-auto py-1 min-w-0 max-w-full shrink [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" role="tablist" aria-label="Side panel tabs">
           {tabs.map((tab) => {
             const meta = TAB_META[tab.kind];
@@ -321,46 +333,48 @@ export const RightPanel: React.FC = () => {
           })}
         </div>
 
-        <div ref={addRef} className="relative flex-shrink-0 mr-1">
-          <button
-            onClick={() => setAddOpen(!addOpen)}
-            className={`p-1.5 rounded-lg transition ${
-              addOpen
-                ? 'bg-[var(--popover)] text-[var(--foreground)]'
-                : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--card)]'
-            }`}
-            title="Open a panel"
-          >
-            <Plus size={14} />
-          </button>
+        {tabs.length > 0 && (
+          <div ref={addRef} className="relative flex-shrink-0 mr-1">
+            <button
+              onClick={() => setAddOpen(!addOpen)}
+              className={`p-1.5 rounded-lg transition ${
+                addOpen
+                  ? 'bg-[var(--popover)] text-[var(--foreground)]'
+                  : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--card)]'
+              }`}
+              title="Open a panel"
+            >
+              <Plus size={14} />
+            </button>
 
-          {addOpen && (
-            <div className="absolute top-full right-0 mt-1.5 w-72 bg-[var(--popover)] border border-[var(--border)] rounded-xl shadow-2xl py-1.5 z-[100] animate-popover">
-              {ORDER.map((kind) => {
-                const meta = TAB_META[kind];
-                const Icon = meta.icon;
-                return (
-                  <button
-                    key={kind}
-                    onClick={() => {
-                      openTab(kind, meta.label);
-                      setAddOpen(false);
-                    }}
-                    className="w-full flex items-start space-x-2.5 px-3 py-2 text-left transition hover:bg-[var(--popover)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                  >
-                    <Icon size={13} className={`${meta.tone} flex-shrink-0 mt-0.5`} />
-                    <span className="min-w-0">
-                      <span className="block text-[11.5px] font-medium">{meta.label}</span>
-                      <span className="block text-[10px] text-[var(--muted-foreground)] leading-snug">
-                        {meta.hint}
+            {addOpen && (
+              <div className="absolute top-full right-0 mt-1.5 w-72 bg-[var(--popover)] border border-[var(--border)] rounded-xl shadow-2xl py-1.5 z-[100] animate-popover">
+                {ORDER.map((kind) => {
+                  const meta = TAB_META[kind];
+                  const Icon = meta.icon;
+                  return (
+                    <button
+                      key={kind}
+                      onClick={() => {
+                        openTab(kind, meta.label);
+                        setAddOpen(false);
+                      }}
+                      className="w-full flex items-start space-x-2.5 px-3 py-2 text-left transition hover:bg-[var(--popover)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                    >
+                      <Icon size={13} className={`${meta.tone} flex-shrink-0 mt-0.5`} />
+                      <span className="min-w-0">
+                        <span className="block text-[11.5px] font-medium">{meta.label}</span>
+                        <span className="block text-[10px] text-[var(--muted-foreground)] leading-snug">
+                          {meta.hint}
+                        </span>
                       </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center space-x-1 text-[var(--muted-foreground)] flex-shrink-0 ml-auto">
           {/* Expand — the drag handle stops at 60% of the window so the chat
@@ -374,32 +388,28 @@ export const RightPanel: React.FC = () => {
           >
             {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-          {/* Filled-box panel toggle at the far right, like the reference —
-              it closes the panel from here; the floating chip reopens it. */}
-          <button
-            onClick={togglePanel}
-            aria-pressed={panelVisible}
-            aria-label={panelHint}
-            className="p-2 rounded-[10px] bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--accent)] transition flex-shrink-0"
-            title={panelHint}
-          >
-            <PanelRightClose size={14} />
-          </button>
         </div>
       </div>
 
       <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-        {current?.kind === 'workflows' && <WorkflowView />}
-        {current?.kind === 'review' && <DiffReviewer />}
-        {current?.kind === 'terminal' && <SandboxConsole />}
-        {current?.kind === 'files' && <FileExplorerView />}
-        {current?.kind === 'file' && <FilePreview path={current.filePath} />}
-        {current?.kind === 'document' && <DocumentViewer documentId={current.documentId} />}
-        {current?.kind === 'knowledge' && <KnowledgeView />}
-        {current?.kind === 'memories' && <MemoryView />}
-        {current?.kind === 'artifacts' && <ArtifactsView />}
-        {current?.kind === 'models' && <ModelManagerView />}
-        {current?.kind === 'audit' && <AuditView />}
+        {!current ? (
+          <PanelLauncher onOpen={(kind, label) => openTab(kind, label)} />
+        ) : (
+          <>
+            {current.kind === 'workflows' && <WorkflowView />}
+            {current.kind === 'review' && <DiffReviewer />}
+            {current.kind === 'terminal' && <SandboxConsole />}
+            {current.kind === 'files' && <FileExplorerView />}
+            {current.kind === 'sources' && <ConversationSourcesView />}
+            {current.kind === 'file' && <FilePreview path={current.filePath} />}
+            {current.kind === 'document' && <DocumentViewer documentId={current.documentId} />}
+            {current.kind === 'knowledge' && <KnowledgeView />}
+            {current.kind === 'memories' && <MemoryView />}
+            {current.kind === 'artifacts' && <ArtifactsView />}
+            {current.kind === 'models' && <ModelManagerView />}
+            {current.kind === 'audit' && <AuditView />}
+          </>
+        )}
       </div>
     </aside>
   );

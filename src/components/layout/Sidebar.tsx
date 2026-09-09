@@ -3,10 +3,12 @@ import {
   Archive,
   ArrowUpRight,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Edit3,
   Folder,
   FolderOpen,
+  FolderPlus,
   Loader2,
   MessageCircle,
   MoreHorizontal,
@@ -38,6 +40,48 @@ import { useColumnResize } from './useColumnResize';
 // title-bar toggle.
 const SIDEBAR_COLLAPSE_AT = 140;
 
+/**
+ * The inline rename for one chat row. Lives outside the Sidebar component so
+ * the input's identity — and with it the focus and the text selection —
+ * survives the sidebar's own re-renders while typing. Enter commits, Escape
+ * discards, and so does clicking anywhere else (blur); an emptied field
+ * discards rather than naming a chat nothing.
+ */
+const ChatRenameRow: React.FC<{
+  title: string;
+  onCommit: (title: string) => void;
+  onCancel: () => void;
+}> = ({ title, onCommit, onCancel }) => {
+  const [value, setValue] = useState(title);
+  const discarded = useRef(false);
+  const settle = (commit: boolean) => {
+    const next = value.trim();
+    if (commit && next && next !== title) onCommit(next);
+    else onCancel();
+  };
+  return (
+    <div className="flex h-9 w-full items-center rounded-[10px] bg-[var(--sidebar-accent)] px-2.5">
+      <input
+        autoFocus
+        value={value}
+        maxLength={80}
+        onFocus={(event) => event.target.select()}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => settle(!discarded.current)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') settle(true);
+          else if (event.key === 'Escape') {
+            discarded.current = true;
+            onCancel();
+          }
+        }}
+        className="h-full min-w-0 flex-1 bg-transparent text-[13.5px] text-[var(--sidebar-accent-foreground)] outline-none select-text"
+        aria-label="Chat name"
+      />
+    </div>
+  );
+};
+
 export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?: boolean }> = ({
   closing = false,
   // Floating = the peek overlay shown over content while the sidebar is
@@ -63,6 +107,9 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
     setIsSearchOpen,
     openSettings,
     setIsSidebarOpen,
+    setSessionWorkspace,
+    updateSession,
+    openCreateProjectForSession,
   } = useApp();
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -93,6 +140,15 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
   const hoverTimer = useRef<number | null>(null);
   const hoverHideTimer = useRef<number | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  // The per-chat actions menu (⋯ before the delete button on an ungrouped
+  // chat), anchored like the project menu. `chatMenuProjects` swaps the panel
+  // to the project picker rather than flying a submenu out — the sidebar is
+  // at the window's left edge, so a flyout has nowhere to go.
+  const [chatMenu, setChatMenu] = useState<{ session: Session; x: number; y: number } | null>(null);
+  const [chatMenuProjects, setChatMenuProjects] = useState(false);
+  // The chat whose title is being edited inline; its row renders an input.
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [showArchivedChats, setShowArchivedChats] = useState(false);
   // How many chats each list shows before "Show more", keyed by project id
   // (`__personal__` / `__detached__` for the ungrouped lists). Each click
   // reveals one more page — never the whole history at once.
@@ -212,46 +268,84 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
    * well as the list, so it is confirmed first — a transcript is the record of
    * what was asked and answered, and §12 keeps it precisely so it cannot be
    * lost by accident.
+   *
+   * `withMenu` adds the per-chat actions (the ⋯ that sits just before the
+   * delete button): add to a project, start a project from this chat, rename,
+   * pin, archive. It belongs on the ungrouped rows — the chats the sidebar
+   * lists under Pinned / Chats / Archived — while a project's own chats are
+   * managed through their project.
    */
-  const sessionRow = (sess: Session, before?: () => void) => (
-    <div
-      key={sess.id}
-      className={`group flex h-9 w-full items-stretch rounded-[10px] text-[13.5px] transition ${
-        activeSessionId === sess.id
-          ? 'bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]'
-          : 'text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]'
-      }`}
-    >
-      {/* The action button stretches across the row's full height — clicking
-          anywhere in the highlighted band opens the chat, not just the text. */}
-      <button
-        onClick={() => {
-          before?.();
-          openSession(sess.id);
-        }}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 text-left"
-        title={`${sess.title}\n${new Date(sess.updatedAt).toLocaleString()}`}
+  const sessionRow = (sess: Session, before?: () => void, withMenu = false) => {
+    if (renamingSessionId === sess.id) {
+      return (
+        <ChatRenameRow
+          key={sess.id}
+          title={sess.title}
+          onCommit={(title) => {
+            setRenamingSessionId(null);
+            void updateSession(sess.id, { title });
+          }}
+          onCancel={() => setRenamingSessionId(null)}
+        />
+      );
+    }
+    return (
+      <div
+        key={sess.id}
+        className={`group flex h-9 w-full items-stretch rounded-[10px] text-[13.5px] transition ${
+          activeSessionId === sess.id
+            ? 'bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]'
+            : 'text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]'
+        }`}
       >
-        {/* A turn in flight in this chat. Several can run at once, so the
-            spinner is per chat — it says which conversations are generating,
-            not just that something somewhere is. */}
-        {runningSessionIds.includes(sess.id) && (
-          <Loader2 size={13} className="animate-spin flex-shrink-0 text-[var(--success)]" />
+        {/* The action button stretches across the row's full height — clicking
+            anywhere in the highlighted band opens the chat, not just the text. */}
+        <button
+          onClick={() => {
+            before?.();
+            openSession(sess.id);
+          }}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 text-left"
+          title={`${sess.title}\n${new Date(sess.updatedAt).toLocaleString()}`}
+        >
+          {/* A turn in flight in this chat. Several can run at once, so the
+              spinner is per chat — it says which conversations are generating,
+              not just that something somewhere is. */}
+          {runningSessionIds.includes(sess.id) && (
+            <Loader2 size={13} className="animate-spin flex-shrink-0 text-[var(--success)]" />
+          )}
+          <span className="min-w-0 flex-1 truncate">{sess.title}</span>
+          {sess.pinned && (
+            <Pin size={11} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+          )}
+        </button>
+        {withMenu && (
+          <button
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setChatMenuProjects(false);
+              setChatMenu({ session: sess, x: rect.right + 6, y: rect.top });
+            }}
+            aria-label={`Chat options for ${sess.title}`}
+            className="mr-0.5 flex-shrink-0 cursor-pointer self-center rounded p-1 text-[var(--muted-foreground)] opacity-0 transition hover:text-[var(--foreground)] group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+            title="Chat options"
+          >
+            <MoreHorizontal size={13} />
+          </button>
         )}
-        <span className="block truncate">{sess.title}</span>
-      </button>
-      <button
-        onClick={() => {
-          setDeletingChat(sess);
-        }}
-        aria-label={`Delete chat ${sess.title}`}
-        className="mr-2 flex-shrink-0 cursor-pointer self-center rounded p-1 text-[var(--muted-foreground)] opacity-0 transition hover:text-[var(--destructive)] group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-        title="Delete this chat"
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  );
+        <button
+          onClick={() => {
+            setDeletingChat(sess);
+          }}
+          aria-label={`Delete chat ${sess.title}`}
+          className="mr-2 flex-shrink-0 cursor-pointer self-center rounded p-1 text-[var(--muted-foreground)] opacity-0 transition hover:text-[var(--destructive)] group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+          title="Delete this chat"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+    );
+  };
 
   const saveProjectState = (workspace: Workspace, patch: Partial<Pick<Workspace, 'pinned' | 'archived'>>) => {
     void updateWorkspace(workspace.id, {
@@ -416,10 +510,40 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
   };
 
   // Normal chats that live in no project: started with no folder open, or
-  // left behind when their folder was removed. They sit under their own
-  // label at the bottom, below the projects.
+  // left behind when their folder was removed. They split three ways for the
+  // sidebar — pinned ones rise to their own section above the projects,
+  // archived ones fold away at the bottom, the rest stay in "Chats".
   const ungroupedChats = [...personalChats, ...detachedChats];
-  const chatsPaged = pagedChats('__chats__', ungroupedChats);
+  const pinnedChats = ungroupedChats.filter((s) => s.pinned && !s.archived);
+  const archivedChats = ungroupedChats.filter((s) => s.archived);
+  const plainChats = ungroupedChats.filter((s) => !s.pinned && !s.archived);
+  const chatsPaged = pagedChats('__chats__', plainChats);
+
+  /**
+   * One ungrouped chat row — pinned, plain or archived — with the per-chat
+   * actions menu. Personal chats clear the project selection on open; a
+   * detached one (its project removed) leaves the selection alone, exactly as
+   * the plain list always has.
+   */
+  const ungroupedRow = (sess: Session) =>
+    personalChats.some((personal) => personal.id === sess.id)
+      ? sessionRow(sess, () => setActiveWorkspaceId(null), true)
+      : sessionRow(sess, undefined, true);
+
+  /**
+   * Moves an ungrouped chat into a project, from the chat's actions menu.
+   * The unarchive is landed *before* the rebind (see `updateSession`): for a
+   * chat with no store row yet it is what creates the row the rebind then
+   * updates, and joining a project is active use — an archived chat comes
+   * back with it rather than staying folded away under its new project.
+   */
+  const moveChatToProject = async (sess: Session, ws: Workspace) => {
+    if (sess.archived) await updateSession(sess.id, { archived: false });
+    setSessionWorkspace(sess.id, ws.id);
+    // Reveal where it went: the project expands, so the chat is not simply
+    // gone from the section it was clicked in.
+    setExpanded((prev) => ({ ...prev, [ws.id]: true }));
+  };
 
   return (
     <>
@@ -495,6 +619,19 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
       </div>
 
       <div className="mt-2 flex-1 space-y-5 overflow-y-auto px-2 pb-3">
+        {/* Pinned chats — the operator's keep-in-reach set, between the New
+            chat button and the projects. */}
+        {pinnedChats.length > 0 && (
+          <div>
+            <div className="px-3 pb-1 text-[13px] text-[var(--muted-foreground)]">
+              Pinned
+            </div>
+            <div className="space-y-0.5">
+              {pinnedChats.map(ungroupedRow)}
+            </div>
+          </div>
+        )}
+
         {/* Projects on top — folders with their chats, under the same style
             of heading the personal "Chats" list carries below. */}
         {visibleProjects.length > 0 && (
@@ -524,21 +661,33 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
         {/*
           Normal chats that belong to no project: started before a folder was
           opened, or left behind when one was removed. Without this list they
-          would be stored, replayable, and invisible.
+          would be stored, replayable, and invisible. Pinned and archived
+          chats have their own sections above and below.
         */}
-        {ungroupedChats.length > 0 && (
+        {plainChats.length > 0 && (
           <div>
             <div className="px-3 pb-1 text-[13px] text-[var(--muted-foreground)]">
               Chats
             </div>
             <div className="space-y-0.5">
-              {chatsPaged.shown.map((sess) =>
-                personalChats.some((personal) => personal.id === sess.id)
-                  ? sessionRow(sess, () => setActiveWorkspaceId(null))
-                  : sessionRow(sess),
-              )}
+              {chatsPaged.shown.map(ungroupedRow)}
               {showMoreButton('__chats__', chatsPaged.remaining)}
             </div>
+          </div>
+        )}
+
+        {/* Archived chats, folded away like archived projects: kept — the
+            transcript is the record — but out of the working list. */}
+        {archivedChats.length > 0 && (
+          <div>
+            <button
+              onClick={() => setShowArchivedChats((current) => !current)}
+              className="flex w-full items-center gap-1.5 rounded-[10px] px-3 py-1.5 text-[13px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+            >
+              {showArchivedChats ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              Archived chats ({archivedChats.length})
+            </button>
+            {showArchivedChats && <div className="mt-0.5 space-y-0.5">{archivedChats.map(ungroupedRow)}</div>}
           </div>
         )}
       </div>
@@ -568,7 +717,7 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
         </div>
       </div>
     </aside>
-    {hoverPreview && !projectMenu && (() => {
+    {hoverPreview && !projectMenu && !chatMenu && (() => {
       const fresh = workspaces.find((w) => w.id === hoverPreview.workspace.id) ?? hoverPreview.workspace;
       const ws = fresh;
       const taskCount = sessions.filter((session) => session.workspaceId === ws.id).length;
@@ -656,6 +805,81 @@ export const Sidebar: React.FC<{ closing?: boolean; floating?: boolean; opening?
         </div>
       </>
     )}
+    {chatMenu && (() => {
+      // Resolve against the live list: the row may have been renamed, pinned
+      // or archived since the menu opened, and acting on a stale copy would
+      // fight what the screen already shows.
+      const sess = sessions.find((s) => s.id === chatMenu.session.id) ?? chatMenu.session;
+      const close = () => {
+        setChatMenu(null);
+        setChatMenuProjects(false);
+      };
+      return (
+        <>
+          <button className="fixed inset-0 z-[250] cursor-default" onClick={close} aria-label="Close chat menu" />
+          <div
+            className="fixed z-[260] w-52 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--popover)] p-1.5 shadow-2xl"
+            style={{ left: Math.min(chatMenu.x, window.innerWidth - 220), top: Math.min(chatMenu.y, window.innerHeight - 330) }}
+          >
+            {chatMenuProjects ? (
+              <>
+                <button onClick={() => setChatMenuProjects(false)} className="project-menu-item !text-[var(--muted-foreground)]">
+                  <ChevronLeft size={14} />Add to project
+                </button>
+                <div className="my-1 border-t border-[var(--border)]" />
+                <div className="max-h-56 overflow-y-auto">
+                  {visibleProjects.map((ws) => (
+                    <button
+                      key={ws.id}
+                      onClick={() => {
+                        void moveChatToProject(sess, ws);
+                        close();
+                      }}
+                      className="project-menu-item"
+                      title={`Add this chat to ${ws.name}`}
+                    >
+                      <Folder size={14} className="flex-shrink-0 text-[var(--muted-foreground)]" />
+                      <span className="min-w-0 flex-1 truncate">{ws.name}</span>
+                    </button>
+                  ))}
+                  {visibleProjects.length === 0 && (
+                    <div className="px-2.5 py-2 text-[11px] leading-relaxed text-[var(--muted-foreground)]">
+                      No projects yet — create one below.
+                    </div>
+                  )}
+                </div>
+                <div className="my-1 border-t border-[var(--border)]" />
+                <button onClick={() => { openCreateProjectForSession(sess.id); close(); }} className="project-menu-item">
+                  <Plus size={14} />New project…
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => setChatMenuProjects(true)} className="project-menu-item">
+                  <FolderPlus size={14} />Add to project
+                  <ChevronRight size={13} className="ml-auto text-[var(--muted-foreground)]" />
+                </button>
+                <button onClick={() => { openCreateProjectForSession(sess.id); close(); }} className="project-menu-item">
+                  <FolderPlus size={14} />Create project…
+                </button>
+                <div className="my-1 border-t border-[var(--border)]" />
+                <button onClick={() => { setRenamingSessionId(sess.id); close(); }} className="project-menu-item">
+                  <Edit3 size={14} />Rename
+                </button>
+                <button onClick={() => { void updateSession(sess.id, { pinned: !sess.pinned }); close(); }} className="project-menu-item">
+                  {sess.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                  {sess.pinned ? 'Unpin' : 'Pin to top'}
+                </button>
+                <button onClick={() => { void updateSession(sess.id, { archived: !sess.archived }); close(); }} className="project-menu-item">
+                  <Archive size={14} />
+                  {sess.archived ? 'Unarchive' : 'Archive'}
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      );
+    })()}
     {editingProject && (
       <EditProjectDialog
         workspace={editingProject}

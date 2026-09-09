@@ -25,13 +25,13 @@ import type {
  * answers. No development-checkout path belongs here; a shipped bundle that
  * knows one machine's home directory is wrong on every other machine.
  */
-export const MODELS_ROOT = 'C:/sovereign/models';
+export const MODELS_ROOT = 'C:/zeroD/models';
 
 /** llama.cpp build directory, deliberately outside any syncing folder. */
-export const RUNTIME_ROOT = 'C:/sovereign/runtime/llama.cpp';
+export const RUNTIME_ROOT = 'C:/zeroD/runtime/llama.cpp';
 
 /** Curated preset. The auto-generated models-dir preset over-allocates KV. */
-export const PRESET_PATH = 'C:/sovereign/config/models.ini';
+export const PRESET_PATH = 'C:/zeroD/config/models.ini';
 
 /**
  * Usable VRAM, not installed VRAM. The card reports 8187 MiB total but the
@@ -334,7 +334,7 @@ export const toolByName = (name: string): ToolDescriptor | undefined =>
 /* ------------------------------------------------------------------ */
 
 export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = {
-  workingDir: 'C:/sovereign/sandbox',
+  workingDir: 'C:/zeroD/sandbox',
   // Egress follows the operator's Settings choice — default on. Mirrors
   // registry.rs; shown only until the core answers `sandbox_policy`.
   networkEnabled: true,
@@ -365,6 +365,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxResidentModels: 2,
   modelIdleEvictSec: 180,
   extendedThinking: false,
+  thinkingEffort: 'medium',
 
   allowPrivateServer: false,
   privateServerUrl: '',
@@ -379,6 +380,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
   defaultMode: 'plan',
   approvalPolicy: 'ask_always',
+  multiAgentEnabled: true,
+  maxSubagents: 4,
+  maxSubagentDepth: 2,
   guardRules: [],
 
   sandboxRoot: DEFAULT_SANDBOX_POLICY.workingDir,
@@ -386,17 +390,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sandboxTimeoutSec: 1800,
   sandboxMaxMemoryMb: 4096,
 
-  knowledgeRoot: 'C:/sovereign/knowledge',
+  knowledgeRoot: 'C:/zeroD/knowledge',
   watchKnowledgeFolder: false,
   retrievalTopK: 8,
   hybridRetrieval: true,
 
-  memoryRoot: 'C:/sovereign/memories',
+  memoryRoot: 'C:/zeroD/memories',
   useGlobalMemories: true,
   useProjectMemories: true,
   captureMemories: true,
 
-  artifactRoot: 'C:/sovereign/artifacts',
+  artifactRoot: 'C:/zeroD/artifacts',
   verifyArtifacts: true,
 
   showRightPanel: false,

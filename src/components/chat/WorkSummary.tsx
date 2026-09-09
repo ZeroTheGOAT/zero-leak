@@ -23,6 +23,7 @@ import {
   SquareTerminal,
   Terminal,
   BadgeCheck,
+  GitFork,
 } from 'lucide-react';
 import type { AgentStep, ChatActivityBlock, StepKind } from '../../types';
 import { formatDuration, modelById } from '../../services/registry';
@@ -44,6 +45,7 @@ const STEP_ICON: Record<StepKind, React.ElementType> = {
   generating_artifact: FileOutput,
   verifying: BadgeCheck,
   awaiting_approval: ShieldQuestion,
+  subagent: GitFork,
   error: AlertCircle,
 };
 
@@ -68,6 +70,7 @@ const GROUP_PHRASE: Record<StepKind, string> = {
   generating_artifact: 'Generated files',
   verifying: 'Verified',
   awaiting_approval: 'Waited for approval',
+  subagent: 'Coordinated agents',
   error: 'Errors',
 };
 

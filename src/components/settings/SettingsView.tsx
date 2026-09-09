@@ -97,6 +97,7 @@ const PAGES: NavPage[] = [
   ] },
   { id: 'agent', label: 'Agents', icon: Bot, sections: [
     { id: 'defaults', label: 'Defaults' },
+    { id: 'multi-agent', label: 'Subagents' },
     { id: 'compaction', label: 'Compaction' },
     { id: 'explore', label: 'Explore agent' },
   ] },
@@ -1092,6 +1093,11 @@ export const SettingsView: React.FC = () => {
             ]} /></Row>
             <Row label="Permission policy"><Select value={settings.approvalPolicy} onChange={(e) => setApp('approvalPolicy', e.target.value as ApprovalPolicy)}><option value="ask_always">Ask for every write and execution</option><option value="ask_risky_only">Ask only for risky actions</option><option value="auto_run_sandbox">Full autonomy in the sandbox</option></Select></Row>
             <Row label="Extended thinking" description="Ask compatible local models to reason longer before answering."><Toggle checked={settings.extendedThinking} onChange={(value) => setApp('extendedThinking', value)} /></Row>
+          </Section>
+          <Section id="multi-agent" title="Subagents" description="Codex-derived child threads share this chat's project and security boundary while keeping their working context isolated.">
+            <Row label="Enable subagents" description="Allow the coordinator and its children to delegate bounded independent work."><Toggle checked={settings.multiAgentEnabled} onChange={(value) => setApp('multiAgentEnabled', value)} /></Row>
+            <Row label="Concurrent children" description="Maximum active child threads per root chat. Local model generations may still queue for VRAM."><Input className="w-20" type="number" min="1" max="8" value={settings.maxSubagents} onChange={(e) => setApp('maxSubagents', Math.max(1, Math.min(8, Number(e.target.value))))} /></Row>
+            <Row label="Maximum depth" description="How many parent/child levels may be created. Two prevents runaway recursive delegation."><Input className="w-20" type="number" min="1" max="4" value={settings.maxSubagentDepth} onChange={(e) => setApp('maxSubagentDepth', Math.max(1, Math.min(4, Number(e.target.value))))} /></Row>
           </Section>
           <Section id="compaction" title="Compaction">
             <Row label="Automatic compaction" description="Summarize older context before the model window fills."><Toggle checked={true} onChange={() => {}} /></Row>

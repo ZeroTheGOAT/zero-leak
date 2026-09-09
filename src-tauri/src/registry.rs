@@ -325,6 +325,12 @@ pub fn tool_catalogue() -> Vec<ToolDescriptor> {
         tool(ListFiles, "List files", Read, false, "Enumerate a directory inside an approved workspace."),
         tool(UpdatePlan, "Update plan", Read, false, "Publish or revise the run's live step plan. No disk or network effect."),
         tool(AskOperator, "Ask the operator", Read, false, "Pause and ask the operator a free-text question when the task cannot proceed without their answer."),
+        tool(SpawnAgent, "Spawn agent", Read, false, "Start an isolated child thread under the current chat's bounded agent tree."),
+        tool(ListAgents, "List agents", Read, false, "Inspect this chat's child-agent tree and statuses."),
+        tool(SendMessage, "Message agent", Read, false, "Steer a running child at its next safe round boundary."),
+        tool(FollowupTask, "Continue agent", Read, false, "Start a follow-up turn on an existing child thread."),
+        tool(InterruptAgent, "Interrupt agent", Read, false, "Cooperatively stop one child run without deleting its history."),
+        tool(WaitAgent, "Wait for agents", Read, false, "Wait on child status notifications without a polling loop."),
         tool(ReadFile, "Read file", Read, false, "Read a file inside an approved workspace."),
         tool(SearchFiles, "Search files", Read, false, "Content and filename search across a workspace."),
         tool(QueryKnowledge, "Query knowledge base", Read, false, "Hybrid retrieval over the local index, returning citations."),
@@ -336,8 +342,12 @@ pub fn tool_catalogue() -> Vec<ToolDescriptor> {
         tool(InspectArtifact, "Inspect artifact", Read, false, "Reopen a generated file to confirm it parses."),
         tool(WebSearch, "Search the web", Read, false, "Use only the explicitly selected public search method."),
         tool(WebFetch, "Fetch web page", Read, false, "Read one public page found by search or named by the operator, behind the same Settings switch."),
-        tool(McpListTools, "Inspect MCP server", Execute, true, "Launch a configured local MCP executable and list its tools."),
-        tool(McpCall, "Call MCP tool", Execute, true, "Launch a configured local MCP executable and call one advertised tool."),
+        tool(McpListTools, "Inspect MCP server", Execute, true, "Connect to a configured local MCP executable and list its tools."),
+        tool(McpCall, "Call MCP tool", Execute, true, "Use a persistent contained MCP session to call one advertised tool."),
+        tool(McpListResources, "List MCP resources", Execute, true, "List local resources advertised by a configured MCP server."),
+        tool(McpReadResource, "Read MCP resource", Execute, true, "Read one resource from a configured local MCP server."),
+        tool(McpListPrompts, "List MCP prompts", Execute, true, "List reusable prompts advertised by a configured local MCP server."),
+        tool(McpGetPrompt, "Get MCP prompt", Execute, true, "Render one reusable prompt from a configured local MCP server."),
         tool(CreateDirectory, "Create directory", Write, true, "Create a folder inside an approved workspace."),
         tool(WriteFile, "Write file", Write, true, "Create or overwrite a file. Overwrites show a diff first."),
         tool(EditFile, "Edit file", Write, true, "Apply a reviewed diff to an existing file."),
@@ -370,7 +380,15 @@ pub fn sovereign_root() -> PathBuf {
     std::env::var_os("SOVEREIGN_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:/sovereign"))
+        .unwrap_or_else(|| {
+            let root = PathBuf::from("C:/zeroD");
+            // Existing installations remain usable until their home is moved.
+            if !root.exists() && Path::new("C:/sovereign").exists() {
+                PathBuf::from("C:/sovereign")
+            } else {
+                root
+            }
+        })
 }
 
 pub fn config_dir() -> PathBuf {
@@ -525,6 +543,7 @@ pub fn default_settings() -> AppSettings {
         // keeps every loaded model resident for the session.
         model_idle_evict_sec: 180,
         extended_thinking: false,
+        thinking_effort: ThinkingEffort::Medium,
 
         allow_private_server: false,
         private_server_url: String::new(),
@@ -541,6 +560,12 @@ pub fn default_settings() -> AppSettings {
 
         default_mode: AgentMode::Plan,
         approval_policy: ApprovalPolicy::AskAlways,
+        multi_agent_enabled: true,
+        // A local workstation has a real VRAM/CPU ceiling. Four open child
+        // threads is enough to split exploration, implementation, and review
+        // while the runtime scheduler remains free to serialize generations.
+        max_subagents: 4,
+        max_subagent_depth: 2,
         // No operator rules by default. The workstation's built-in guards
         // (workspace containment, the sandbox allow list) are unconditional;
         // what goes here is whatever the operator adds in Settings.

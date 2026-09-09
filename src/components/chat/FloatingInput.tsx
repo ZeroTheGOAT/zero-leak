@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ApprovalPopover } from './ApprovalPopover';
+import { EffortPicker } from './EffortPicker';
 import { ProjectPicker } from './ProjectPicker';
 import { formatBytes, modelById } from '../../services/registry';
 import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
@@ -536,17 +537,7 @@ export const FloatingInput: React.FC<{
                 pill like the rest, so it covers the edge behind itself.
                 Sizes itself to short names, truncates long ones, full name
                 on hover. Opens Models. */}
-            <div className="ml-auto flex items-center">
-              <button
-                type="button"
-                onClick={() => openSettings('models')}
-                className="composer-tab min-w-0 max-w-44 truncate"
-                title={`${activeModelName} — open model settings`}
-              >
-                <Bot size={13} strokeWidth={2.2} />
-                <span className="truncate">{activeModelName}</span>
-              </button>
-            </div>
+            <EffortPicker modelName={activeModelName} />
           </div>
 
           <textarea

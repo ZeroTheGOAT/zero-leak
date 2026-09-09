@@ -445,7 +445,7 @@ export const TitleBar: React.FC = () => {
       ref={barRef}
       {...(desktop ? { 'data-tauri-drag-region': true } : {})}
       onMouseDown={dragWindow}
-      className="nerve-card h-9 min-h-9 flex items-center gap-1 px-2 select-none border-b nerve-border"
+      className="nerve-card h-10 min-h-10 flex items-center gap-1 px-2 select-none border-b nerve-border"
     >
       {/* Left: sidebar toggle, history, menus — ChatGPT order */}
       <div

@@ -62,8 +62,8 @@ pub const COMMANDS: &[&str] = &[
     "sandbox_policy", "sandbox_run", "sandbox_kill", "sandbox_history",
     "audit_list", "store_gate_list",
     "vault_status", "vault_event_list", "vault_enable", "vault_disable",
-    "turn_start", "agent_start", "agent_cancel", "permission_respond", "question_answer", "change_apply", "change_discard", "change_apply_all", "change_discard_all",
-    "session_list", "session_history", "session_activity_store", "session_truncate", "session_delete", "session_memory", "session_workspace", "attachment_stage",
+    "turn_start", "agent_start", "agent_cancel", "subagent_list", "subagent_history", "subagent_message", "subagent_interrupt", "permission_respond", "question_answer", "change_apply", "change_discard", "change_apply_all", "change_discard_all",
+    "session_list", "session_history", "session_activity_store", "session_truncate", "session_delete", "session_memory", "session_workspace", "session_update", "attachment_stage",
     "settings_get", "settings_set",
     "window_minimize", "window_toggle_maximize", "window_close", "app_quit",
 ];
@@ -428,6 +428,48 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         // typed `turn_start` boundary above.
         "agent_start" => ok(agent::start(st.clone(), arg::<StartRunInput>(args, "input")?).await?),
         "agent_cancel" => ok(agent::cancel(st, &arg::<String>(args, "runId")?)?),
+        "subagent_list" => ok(st.multi_agent.list(
+            &arg::<String>(args, "rootSessionId")?,
+            opt::<String>(args, "pathPrefix")?.as_deref(),
+        )),
+        "subagent_history" => {
+            let root = arg::<String>(args, "rootSessionId")?;
+            let target = arg::<String>(args, "target")?;
+            let child = st.multi_agent.get(&target, &root)?;
+            ok(st.with_db(|conn| crate::db::session_messages(conn, &child.session_id, agent::HISTORY_TURNS))?)
+        }
+        "subagent_message" => {
+            let root = arg::<String>(args, "rootSessionId")?;
+            let child = st.multi_agent.send_message(
+                &arg::<String>(args, "target")?,
+                &root,
+                arg::<String>(args, "message")?,
+            )?;
+            crate::multi_agent::persist(st, &child);
+            crate::multi_agent::emit(st, &child);
+            ok(child)
+        }
+        "subagent_interrupt" => {
+            let root = arg::<String>(args, "rootSessionId")?;
+            let child = st.multi_agent.get(&arg::<String>(args, "target")?, &root)?;
+            if let Some(run_id) = child.run_id.as_deref() {
+                st.cancel_run(run_id);
+                for descendant in st.multi_agent.descendant_runs(run_id) {
+                    st.cancel_run(&descendant);
+                }
+                if let Some(interrupted) = st.multi_agent.complete_run(
+                    run_id,
+                    String::new(),
+                    Some("Interrupted by the operator.".into()),
+                    child.model_id.clone(),
+                ) {
+                    crate::multi_agent::persist(st, &interrupted);
+                    crate::multi_agent::emit(st, &interrupted);
+                    return ok(interrupted);
+                }
+            }
+            ok(child)
+        }
 
         // §6. The conversation is stored by the core, so the transcript on
         // screen and the history the model is replayed are the same rows.
@@ -474,6 +516,7 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         "session_delete" => {
             let id = arg::<String>(args, "sessionId")?;
             st.with_db(|c| crate::db::delete_session(c, &id))?;
+            st.multi_agent.remove_root(&id);
             if let Err(error) = crate::harness::remove_session_mirror(&id) {
                 st.emit_failure(&error);
             }
@@ -497,6 +540,31 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
             let workspace_id = opt::<String>(args, "workspaceId")?;
             st.with_db(|c| crate::db::set_session_workspace(c, &session_id, workspace_id.as_deref()))?;
             ok(())
+        }
+        // Rename / pin / archive a chat — the sidebar's per-chat actions. The
+        // mode and binding ride along for the one case that needs them: a
+        // chat that has not sent its first turn has no row yet, and the core
+        // creates it so a rename or pin made before the first message
+        // survives a restart. Answers with the stored row, title clamped.
+        "session_update" => {
+            let session_id = arg::<String>(args, "sessionId")?;
+            let title = opt::<String>(args, "title")?;
+            let pinned = opt::<bool>(args, "pinned")?;
+            let archived = opt::<bool>(args, "archived")?;
+            let mode = arg::<AgentMode>(args, "mode")?;
+            let workspace_id = opt::<String>(args, "workspaceId")?;
+            ok(st.with_db(|c| {
+                crate::db::set_session_state(
+                    c,
+                    &session_id,
+                    title.as_deref(),
+                    pinned,
+                    archived,
+                    mode,
+                    workspace_id.as_deref(),
+                )?;
+                crate::db::session(c, &session_id)
+            })?)
         }
         "permission_respond" => ok(agent::respond_to_permission(
             st,

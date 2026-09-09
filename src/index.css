@@ -227,3 +227,72 @@ code, pre {
 .animate-glow {
   animation: pulseGlow 2.5s infinite ease-in-out;
 }
+/* Effort controls inherit every palette, including high-contrast themes. */
+.effort-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+.effort-slider::-webkit-slider-runnable-track {
+  height: 10px;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: none;
+  background: linear-gradient(to right, var(--primary) var(--effort-fill), var(--muted) var(--effort-fill));
+}
+.effort-slider::-moz-range-track {
+  height: 10px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--primary) var(--effort-fill), var(--muted) var(--effort-fill));
+}
+.effort-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  margin-top: -9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--popover-foreground);
+  border: 2px solid var(--popover);
+  box-shadow: 0 1px 4px #0003;
+}
+.effort-slider::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--popover-foreground);
+  border: 2px solid var(--popover);
+}
+.effort-slider:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.effort-slider:disabled { opacity: .5; cursor: default; }
+
+/* Active work shares the composer's width; details expand only when needed. */
+.composer-activity-dock:has(.composer-activity) { padding-bottom: 4px; }
+.composer-activity {
+  min-width: 0;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  background: var(--sidebar);
+  font-size: 11px;
+}
+.composer-activity-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.composer-activity-summary::-webkit-details-marker { display: none; }
+.composer-activity-summary:hover { background: var(--accent); color: var(--foreground); }
+.composer-activity-summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.composer-activity[open] .activity-chevron { transform: rotate(180deg); }

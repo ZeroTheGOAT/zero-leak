@@ -439,6 +439,44 @@ const MIGRATIONS: &[&str] = &[
         detail TEXT NOT NULL
     );
     "#,
+    // ---- 13: per-chat sidebar state -------------------------------------
+    //
+    // Pinning a chat to the top of the sidebar and archiving it out of the
+    // list are operator decisions about the list, not about the conversation,
+    // and they have to survive a restart the way a project's own pinned and
+    // archived flags do. Defaults keep every existing row exactly where it
+    // was: a plain, unpinned, unarchived chat.
+    r#"
+    ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+    "#,
+    // ---- 14: Codex-derived child-agent threads ---------------------------
+    // Kept separate from user-visible sessions: a child has its own transcript
+    // and run, but its lifecycle belongs to the root chat that delegated it.
+    r#"
+    CREATE TABLE subagents (
+        id              TEXT PRIMARY KEY,
+        task_name       TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        root_session_id TEXT NOT NULL,
+        session_id      TEXT NOT NULL,
+        parent_id       TEXT,
+        parent_run_id   TEXT NOT NULL,
+        workspace_id    TEXT,
+        role            TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        depth           INTEGER NOT NULL,
+        run_id          TEXT,
+        model_id        TEXT,
+        result          TEXT NOT NULL DEFAULT '',
+        error           TEXT,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL,
+        UNIQUE(root_session_id, path, created_at)
+    );
+    CREATE INDEX subagents_root ON subagents(root_session_id, created_at);
+    CREATE INDEX subagents_run ON subagents(run_id);
+    "#,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -481,6 +519,12 @@ pub fn open(dir: &Path) -> CoreResult<Connection> {
         Ok(n) => println!("[db] {n} sandbox run(s) were left marked running by a previous session; recorded as interrupted."),
         Err(e) => logln!("[db] Could not clear interrupted sandbox runs: {e}"),
     }
+    let _ = conn.execute(
+        "UPDATE subagents
+         SET status = 'interrupted', error = COALESCE(error, 'The application stopped while this agent was running.'), updated_at = ?1
+         WHERE status IN ('pending', 'running', 'waiting')",
+        [crate::state::now_ms()],
+    );
 
     Ok(conn)
 }
@@ -1110,7 +1154,7 @@ pub fn touch_session(
 pub fn sessions(conn: &Connection) -> CoreResult<Vec<StoredSession>> {
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, title, mode, use_memories, contribute_memories,
-                created_at, updated_at
+                pinned, archived, created_at, updated_at
          FROM sessions ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1123,11 +1167,13 @@ pub fn sessions(conn: &Connection) -> CoreResult<Vec<StoredSession>> {
             r.get::<_, i64>(5)?,
             r.get::<_, i64>(6)?,
             r.get::<_, i64>(7)?,
+            r.get::<_, i64>(8)?,
+            r.get::<_, i64>(9)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, workspace_id, title, mode, use_memories, contribute_memories, created_at, updated_at) = row?;
+        let (id, workspace_id, title, mode, use_memories, contribute_memories, pinned, archived, created_at, updated_at) = row?;
         out.push(StoredSession {
             id,
             workspace_id,
@@ -1135,6 +1181,8 @@ pub fn sessions(conn: &Connection) -> CoreResult<Vec<StoredSession>> {
             mode: enum_from(mode, "sessions.mode")?,
             use_memories: use_memories != 0,
             contribute_memories: contribute_memories != 0,
+            pinned: pinned != 0,
+            archived: archived != 0,
             created_at,
             updated_at,
         });
@@ -1146,7 +1194,7 @@ pub fn session(conn: &Connection, id: &str) -> CoreResult<StoredSession> {
     let row = conn
         .query_row(
             "SELECT id, workspace_id, title, mode, use_memories, contribute_memories,
-                    created_at, updated_at
+                    pinned, archived, created_at, updated_at
              FROM sessions WHERE id = ?1",
             params![id],
             |r| {
@@ -1159,6 +1207,8 @@ pub fn session(conn: &Connection, id: &str) -> CoreResult<StoredSession> {
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
                 ))
             },
         )
@@ -1171,8 +1221,10 @@ pub fn session(conn: &Connection, id: &str) -> CoreResult<StoredSession> {
         mode: enum_from(row.3, "sessions.mode")?,
         use_memories: row.4 != 0,
         contribute_memories: row.5 != 0,
-        created_at: row.6,
-        updated_at: row.7,
+        pinned: row.6 != 0,
+        archived: row.7 != 0,
+        created_at: row.8,
+        updated_at: row.9,
     })
 }
 
@@ -1211,6 +1263,62 @@ pub fn set_session_workspace(
     conn.execute(
         "UPDATE sessions SET workspace_id = ?2 WHERE id = ?1",
         params![id, workspace_id],
+    )?;
+    Ok(())
+}
+
+/// Renames a chat, pins it to the top of the sidebar, or archives it out of it.
+///
+/// A partial update: only the fields carried as `Some` change. Unlike
+/// `set_session_workspace` — whose binding the first turn inserts anyway — a
+/// rename or pin made on a chat that has not sent its first turn would be
+/// lost to the next `session_list` hydration, because there is no row to
+/// update; so the row is created here, from the mode and binding the client
+/// already holds. The first turn's `touch_session` then lands on
+/// `ON CONFLICT DO UPDATE`, which never rewrites the title, and the name the
+/// operator chose survives it. Neither branch touches `updated_at`: a rename
+/// or a pin is not new work, and the sidebar orders by the last turn.
+pub fn set_session_state(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+    mode: AgentMode,
+    workspace_id: Option<&str>,
+) -> CoreResult<()> {
+    let changed = conn.execute(
+        "UPDATE sessions SET
+             title    = COALESCE(?2, title),
+             pinned   = COALESCE(?3, pinned),
+             archived = COALESCE(?4, archived)
+         WHERE id = ?1",
+        params![id, title, pinned, archived],
+    )?;
+    if changed > 0 {
+        return Ok(());
+    }
+    // No row yet: a client-side placeholder chat. The default titles match
+    // what the frontend names a fresh chat, so a pinned-but-never-used row
+    // reads honestly in the list.
+    let fallback = if workspace_id.is_some() {
+        "New project chat"
+    } else {
+        "New chat"
+    };
+    let short: String = title.unwrap_or(fallback).chars().take(60).collect();
+    conn.execute(
+        "INSERT INTO sessions (id, workspace_id, title, mode, pinned, archived, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            id,
+            workspace_id,
+            short.trim(),
+            enum_str(mode)?,
+            pinned.unwrap_or(false) as i64,
+            archived.unwrap_or(false) as i64,
+            crate::state::now_ms()
+        ],
     )?;
     Ok(())
 }
@@ -1401,6 +1509,32 @@ pub fn session_messages(
     Ok(out)
 }
 
+/// Every file explicitly shared in one conversation, in first-seen order.
+///
+/// Attachments live in the user-message `extra` blob so old databases need no
+/// migration. The exact session predicate is the isolation boundary: a
+/// standalone chat can keep using its own files, but no sibling chat or project
+/// can have a path injected into its tool allow-list.
+pub fn session_attachments(conn: &Connection, session_id: &str) -> CoreResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT extra FROM session_messages
+         WHERE session_id = ?1 AND sender = 'user'
+         ORDER BY ordinal ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| row.get::<_, Option<String>>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(raw) = row? else { continue };
+        let extra: MessageExtra = serde_json::from_str(&raw).unwrap_or_default();
+        for path in extra.attachments {
+            if !path.trim().is_empty() && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSessionMessage {
     pub session_id: String,
@@ -1447,9 +1581,110 @@ pub fn delete_session(conn: &Connection, id: &str) -> CoreResult<()> {
     tx.execute("DELETE FROM run_receipts WHERE session_id=?1", params![id])?;
     tx.execute("DELETE FROM memories WHERE source_session_id = ?1", params![id])?;
     tx.execute("DELETE FROM artifacts WHERE session_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM sessions WHERE id IN (SELECT session_id FROM subagents WHERE root_session_id = ?1)",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM subagents WHERE root_session_id = ?1", params![id])?;
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
     tx.commit()?;
     Ok(())
+}
+
+/* ------------------------------------------------------------------ */
+/* Codex-derived subagent lifecycle                                    */
+/* ------------------------------------------------------------------ */
+
+pub fn upsert_subagent(conn: &Connection, agent: &SubagentInfo) -> CoreResult<()> {
+    conn.execute(
+        "INSERT INTO subagents (
+            id, task_name, path, root_session_id, session_id, parent_id,
+            parent_run_id, workspace_id, role, status, depth, run_id,
+            model_id, result, error, created_at, updated_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+         ) ON CONFLICT(id) DO UPDATE SET
+            status=excluded.status, run_id=excluded.run_id,
+            model_id=excluded.model_id, result=excluded.result,
+            error=excluded.error, updated_at=excluded.updated_at",
+        params![
+            agent.id,
+            agent.task_name,
+            agent.path,
+            agent.root_session_id,
+            agent.session_id,
+            agent.parent_id,
+            agent.parent_run_id,
+            agent.workspace_id,
+            enum_str(agent.role)?,
+            enum_str(agent.status)?,
+            agent.depth,
+            agent.run_id,
+            agent.model_id,
+            agent.result,
+            agent.error,
+            agent.created_at,
+            agent.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn subagents(conn: &Connection) -> CoreResult<Vec<SubagentInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_name, path, root_session_id, session_id, parent_id,
+                parent_run_id, workspace_id, role, status, depth, run_id,
+                model_id, result, error, created_at, updated_at
+         FROM subagents ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, u32>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, String>(13)?,
+            row.get::<_, Option<String>>(14)?,
+            row.get::<_, i64>(15)?,
+            row.get::<_, i64>(16)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (
+            id, task_name, path, root_session_id, session_id, parent_id,
+            parent_run_id, workspace_id, role, status, depth, run_id,
+            model_id, result, error, created_at, updated_at,
+        ) = row?;
+        Ok(SubagentInfo {
+            id,
+            task_name,
+            path,
+            root_session_id,
+            session_id,
+            parent_id,
+            parent_run_id,
+            workspace_id,
+            role: enum_from(role, "subagents.role")?,
+            status: enum_from(status, "subagents.status")?,
+            depth,
+            run_id,
+            model_id,
+            result,
+            error,
+            created_at,
+            updated_at,
+        })
+    })
+    .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2900,6 +3135,41 @@ mod conversation {
     }
 
     #[test]
+    fn attachment_recall_is_complete_deduplicated_and_chat_isolated() {
+        let c = store();
+        touch_session(&c, "chat-a", None, AgentMode::Agent, "first", 1).unwrap();
+        touch_session(&c, "chat-b", None, AgentMode::Agent, "private", 2).unwrap();
+        for (session, paths, at) in [
+            ("chat-a", vec!["C:/a/one.png", "C:/a/two.pdf"], 3),
+            ("chat-a", vec!["C:/a/one.png"], 4),
+            ("chat-b", vec!["C:/b/secret.png"], 5),
+        ] {
+            add_message(
+                &c,
+                session,
+                "user",
+                "attached",
+                &MessageExtra {
+                    attachments: paths.into_iter().map(str::to_string).collect(),
+                    ..Default::default()
+                },
+                at,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            session_attachments(&c, "chat-a").unwrap(),
+            ["C:/a/one.png", "C:/a/two.pdf"]
+        );
+        assert_eq!(
+            session_attachments(&c, "chat-b").unwrap(),
+            ["C:/b/secret.png"]
+        );
+        assert!(session_attachments(&c, "missing-chat").unwrap().is_empty());
+    }
+
+    #[test]
     fn the_title_is_the_first_thing_asked_and_then_left_alone() {
         let c = store();
         touch_session(&c, "s1", None, AgentMode::Plan, "check the P&ID tag list", 100).unwrap();
@@ -3312,6 +3582,44 @@ mod harness_state {
         set_session_workspace(&conn, "s1", Some("ws2")).unwrap();
         assert_eq!(session(&conn, "s1").unwrap().workspace_id.as_deref(), Some("ws2"));
         set_session_workspace(&conn, "not-yet-stored", None).unwrap();
+    }
+
+    #[test]
+    fn chat_pin_archive_and_rename_survive_a_restart() {
+        let conn = store();
+        touch_session(&conn, "s1", None, AgentMode::Plan, "hello", 1).unwrap();
+
+        // A partial patch changes only what it carries.
+        set_session_state(&conn, "s1", Some("Steam reformer"), Some(true), None, AgentMode::Plan, None)
+            .unwrap();
+        let row = session(&conn, "s1").unwrap();
+        assert_eq!(row.title, "Steam reformer");
+        assert!(row.pinned);
+        assert!(!row.archived);
+
+        // The next turn must not undo the rename: touch_session's
+        // ON CONFLICT branch never rewrites the title.
+        touch_session(&conn, "s1", None, AgentMode::Agent, "a later question", 2).unwrap();
+        assert_eq!(session(&conn, "s1").unwrap().title, "Steam reformer");
+
+        set_session_state(&conn, "s1", None, None, Some(true), AgentMode::Agent, None).unwrap();
+        assert!(session(&conn, "s1").unwrap().archived);
+
+        // A placeholder chat has no row yet; its rename and pin create one
+        // carrying the mode and binding the client holds, so they survive a
+        // restart instead of being dropped by the next session_list.
+        set_session_state(&conn, "s2", Some("Untyped idea"), Some(true), None, AgentMode::Agent, Some("ws9"))
+            .unwrap();
+        let row = session(&conn, "s2").unwrap();
+        assert_eq!(row.title, "Untyped idea");
+        assert!(row.pinned);
+        assert_eq!(row.mode, AgentMode::Agent);
+        assert_eq!(row.workspace_id.as_deref(), Some("ws9"));
+
+        // And the listing the sidebar rehydrates from reports the same state.
+        let listed = sessions(&conn).unwrap();
+        assert!(listed.iter().any(|s| s.id == "s1" && s.archived));
+        assert!(listed.iter().any(|s| s.id == "s2" && s.pinned && !s.archived));
     }
 
     #[test]

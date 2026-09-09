@@ -45,6 +45,7 @@ import type {
   Session,
   SettingsPage,
   SovereignStatus,
+  SubagentInfo,
   StoredMessage,
   ToolCallRecord,
   TaskKind,
@@ -388,6 +389,13 @@ interface AppContextValue {
   addWorkspace: () => void;
   isCreateProjectOpen: boolean;
   setIsCreateProjectOpen: (open: boolean) => void;
+  /** The chat marked to move into the project the Create-project dialog is
+   *  about to make, when that dialog was opened from a chat's own actions.
+   *  Null when it is the plain "new project" flow. */
+  createProjectSessionId: string | null;
+  /** Opens Create-project with a chat marked to move into the new project
+   *  once it exists. `null` clears the mark without opening anything. */
+  openCreateProjectForSession: (sessionId: string | null) => void;
   pickProjectSource: () => Promise<string | null>;
   /** `locationPath` roots the new project's workspace at an operator-chosen
    *  directory instead of the app-owned container: every file the agent writes,
@@ -396,7 +404,7 @@ interface AppContextValue {
     name: string,
     sourcePaths: string[],
     locationPath?: string,
-  ) => Promise<boolean>;
+  ) => Promise<Workspace | false>;
   updateWorkspace: (id: string, update: WorkspaceUpdate) => Promise<boolean>;
   openWorkspaceInExplorer: (id: string) => Promise<void>;
   approveWorkspace: (id: string) => Promise<void>;
@@ -430,6 +438,12 @@ interface AppContextValue {
    * persists the same binding, so this stays a local rebind.
    */
   setSessionWorkspace: (sessionId: string, workspaceId: string | null) => void;
+  /** Renames a chat, pins it to the sidebar's top, or archives it out of the
+   *  list — in the store as well as on screen. */
+  updateSession: (
+    sessionId: string,
+    patch: { title?: string; pinned?: boolean; archived?: boolean },
+  ) => Promise<void>;
 
   /* Conversation (§6) */
   messages: ChatMessage[];
@@ -453,8 +467,7 @@ interface AppContextValue {
   /** The open chat's streamed steps and actions, empty when it is idle. */
   liveSteps: AgentStep[];
   liveActivity: ChatActivityBlock[];
-  /** The open chat's current plan while a run is live, and the last agent
-   *  message's plan when it is not — one checklist, docked at the bottom. */
+  /** The open chat's current plan while a run is live; empty when idle. */
   livePlan: PlanItem[];
   /** The open chat's current run phase: what the core says it is doing now.
    *  `null` when idle or before the first phase event. */
@@ -481,6 +494,9 @@ interface AppContextValue {
   /** Takes a parked instruction back out before it is sent. */
   removeQueued: (index: number, intoSession?: string) => void;
   cancelRun: () => Promise<void>;
+  /** Durable child threads beneath the open root chat. */
+  subagents: SubagentInfo[];
+  interruptSubagent: (target: string) => Promise<void>;
 
   /* Permissions (§9) */
   approvalPolicy: ApprovalPolicy;
@@ -502,7 +518,13 @@ interface AppContextValue {
   tabs: PanelTab[];
   activeTabId: string | null;
   setActiveTabId: (id: string) => void;
-  openTab: (kind: PanelTabKind, title?: string, documentId?: string, filePath?: string) => void;
+  openTab: (
+    kind: PanelTabKind,
+    title?: string,
+    documentId?: string,
+    filePath?: string,
+    closePanelOnClose?: boolean,
+  ) => void;
   closeTab: (id: string) => void;
 
   /* Review (§6) */
@@ -729,6 +751,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [sourceCitation, setSourceCitation] = useState<Citation | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
+  // The chat the Create-project dialog was opened for, when it came from a
+  // chat's own actions rather than the plain "new project" button. The dialog
+  // clears it on close either way, so nothing stale carries into the next
+  // project anyone creates.
+  const [createProjectSessionId, setCreateProjectSessionId] = useState<string | null>(null);
 
   /* Dev servers — keyed by workspace id, kept in sync by `devserver://status`
    * events and the startup status read. These outlive any single run. */
@@ -795,6 +822,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const runsRef = useRef<Record<string, LiveRun>>({});
   const [runsBySession, setRunsBySession] = useState<Record<string, LiveRun>>({});
+  const [subagentsBySession, setSubagentsBySession] = useState<Record<string, SubagentInfo[]>>({});
   /** A repeated completion event must never append the same answer twice. */
   const completedRuns = useRef<Set<string>>(new Set());
   /** Handles the rare case where a very early failure completes before the
@@ -1194,6 +1222,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setFailures((prev) => [f, ...prev].slice(0, 20));
       }),
     );
+    void add(
+      core.on('agent://subagent', (event) => {
+        setSubagentsBySession((previous) => {
+          const rows = previous[event.rootSessionId] ?? [];
+          const index = rows.findIndex((agent) => agent.id === event.agent.id);
+          const next = index === -1 ? [...rows, event.agent] : rows.map((agent, i) => i === index ? event.agent : agent);
+          return { ...previous, [event.rootSessionId]: next.sort((a, b) => a.path.localeCompare(b.path)) };
+        });
+      }),
+    );
 
     void add(
       core.on('agent://user-stored', (u) => {
@@ -1404,17 +1442,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const activeLiveRun = activeSessionId ? runsBySession[activeSessionId] : undefined;
   const liveSteps = activeLiveRun?.steps ?? [];
   const liveActivity = activeLiveRun?.activity ?? [];
-  /** While a run is live its plan is the run's; idle, the last agent
-   *  message's plan keeps the docked checklist on screen. */
+  /** Completed runs keep their plan in the transcript, away from the composer. */
   const livePlan = useMemo(
     () =>
-      activeLiveRun?.plan?.length
-        ? activeLiveRun.plan
-        : ([...(messages ?? [])].reverse().find((m) => m.sender === 'agent' && m.plan?.length)
-            ?.plan ?? []),
-    [activeLiveRun?.plan, messages],
+      activeLiveRun?.plan ?? [],
+    [activeLiveRun],
   );
   const livePhase = activeLiveRun?.phase ?? null;
+  const subagents = useMemo(
+    () => activeSessionId ? subagentsBySession[activeSessionId] ?? [] : [],
+    [activeSessionId, subagentsBySession],
+  );
   const runningSessionIds = useMemo(() => Object.keys(runsBySession), [runsBySession]);
   /** The open chat is generating. Another chat being busy does not lock this
    *  one's composer — that is the whole point of concurrent chats. */
@@ -1496,10 +1534,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsCreateProjectOpen(true);
   }, []);
 
+  /**
+   * Opens the Create-project dialog with a chat marked to move into the new
+   * project the moment it exists — "start a project from this chat". Passing
+   * `null` clears the mark without opening anything, which is what the dialog
+   * itself does on close so a later plain "new project" never inherits a
+   * stale chat.
+   */
+  const openCreateProjectForSession = useCallback((sessionId: string | null) => {
+    setCreateProjectSessionId(sessionId);
+    if (sessionId) setIsCreateProjectOpen(true);
+  }, []);
+
   const pickProjectSource = useCallback(async () => {
     return await guard('execution_failed', () => core.workspaces.pickSource());
   }, [guard]);
 
+  // Answers with the created workspace (falsy only on failure), because the
+  // "start a project from this chat" flow needs the id to move the chat into.
   const createWorkspace = useCallback(
     async (name: string, sourcePaths: string[], locationPath?: string) => {
       const ws = await guard('execution_failed', () =>
@@ -1509,7 +1561,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setWorkspaces((prev) => [...prev.filter((w) => w.id !== ws.id), ws]);
       setActiveWorkspaceId(ws.id);
       setIsCreateProjectOpen(false);
-      return true;
+      return ws;
     },
     [guard],
   );
@@ -1645,6 +1697,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mode,
       useMemories: true,
       contributeMemories: true,
+      pinned: false,
+      archived: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1826,6 +1880,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, []);
 
+  /**
+   * Renames a chat, pins it to the sidebar's top, or archives it out of the
+   * list. The screen updates at once; the store follows. The full current
+   * state travels, not just the patch: a chat that has not sent its first
+   * turn has no store row yet, and the core creates one from what is sent
+   * here, so a rename or pin made before the first message survives a
+   * restart. When moving an archived chat into a project, callers must land
+   * this (the unarchive) *before* `setSessionWorkspace` — for a placeholder
+   * chat this call is what creates the row the rebind then updates.
+   */
+  const updateSession = useCallback(
+    async (sessionId: string, patch: { title?: string; pinned?: boolean; archived?: boolean }) => {
+      const current = sessions.find((s) => s.id === sessionId);
+      if (!current) return;
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, ...patch } : s)),
+      );
+      if (coreStatus.state === 'unavailable') return;
+      const saved = await core.sessions
+        .update(sessionId, {
+          title: patch.title ?? current.title,
+          pinned: patch.pinned ?? current.pinned,
+          archived: patch.archived ?? current.archived,
+          mode: current.mode,
+          workspaceId: current.workspaceId,
+        })
+        .catch(() => null);
+      if (saved) {
+        setSessions((prev) => prev.map((s) => (s.id === saved.id ? saved : s)));
+      }
+    },
+    [coreStatus.state, sessions],
+  );
+
   /* ---------------------------------------------------------------- */
   /* §6  Sending a turn                                               */
   /* ---------------------------------------------------------------- */
@@ -1874,6 +1962,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           mode,
           useMemories,
           contributeMemories,
+          pinned: false,
+          archived: false,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };
@@ -2049,6 +2139,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPendingQuestions((prev) => prev.filter((q) => q.runId !== runId));
   }, [activeSessionId, guard]);
 
+  const interruptSubagent = useCallback(async (target: string) => {
+    if (!activeSessionId) return;
+    const updated = await guard('execution_failed', () =>
+      core.agent.subagents.interrupt(activeSessionId, target),
+    );
+    if (!updated) return;
+    setSubagentsBySession((previous) => ({
+      ...previous,
+      [activeSessionId]: (previous[activeSessionId] ?? []).map((agent) =>
+        agent.id === updated.id ? updated : agent,
+      ),
+    }));
+  }, [activeSessionId, guard]);
+
+  useEffect(() => {
+    if (!activeSessionId || coreStatus.state === 'unavailable') return;
+    void core.agent.subagents
+      .list(activeSessionId)
+      .then((rows) => setSubagentsBySession((previous) => ({ ...previous, [activeSessionId]: rows })))
+      .catch(() => {});
+  }, [activeSessionId, coreStatus.state]);
+
   /**
    * §6 Editing a sent user message.
    *
@@ -2162,7 +2274,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   const openTab = useCallback(
-    (kind: PanelTabKind, title?: string, documentId?: string, filePath?: string) => {
+    (
+      kind: PanelTabKind,
+      title?: string,
+      documentId?: string,
+      filePath?: string,
+      closePanelOnClose = false,
+    ) => {
       // These are application-level managers, not chat context. Keeping them in
       // Settings also means the composer and its Plan/Agent controls cannot show
       // through underneath them.
@@ -2193,6 +2311,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setView('workbench');
       setIsPanelOpen(true);
       if (existing) {
+        if (existing.closePanelOnClose !== closePanelOnClose) {
+          setTabs((prev) =>
+            prev.map((tab) =>
+              tab.id === existing.id ? { ...tab, closePanelOnClose } : tab,
+            ),
+          );
+        }
         setActiveTabId(existing.id);
         return;
       }
@@ -2200,6 +2325,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         id: uid('tab'),
         kind,
         title: title ?? kind.charAt(0).toUpperCase() + kind.slice(1),
+        closePanelOnClose,
         documentId,
         filePath,
       };
@@ -2241,11 +2367,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // No setState inside the updater: compute the next selection from the
       // current `tabs`/`activeTabId` closure values.
       const next = tabs.filter((t) => t.id !== id);
+      const closing = tabs.find((t) => t.id === id);
       setTabs(next);
       if (activeTabId === id) {
         setActiveTabId(next[next.length - 1]?.id ?? null);
       }
-      if (next.length === 0) setIsPanelOpen(false);
+      if (closing?.closePanelOnClose || next.length === 0) setIsPanelOpen(false);
     },
     [tabs, activeTabId],
   );
@@ -2439,7 +2566,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (closingActive) {
         setActiveTabId(next[next.length - 1]?.id ?? null);
       }
-      if (next.length === 0) setIsPanelOpen(false);
     },
     [guard, tabs, activeTabId],
   );
@@ -2677,6 +2803,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addWorkspace,
       isCreateProjectOpen,
       setIsCreateProjectOpen,
+      createProjectSessionId,
+      openCreateProjectForSession,
       pickProjectSource,
       createWorkspace,
       updateWorkspace,
@@ -2698,6 +2826,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deleteSession,
       setSessionMemory,
       setSessionWorkspace,
+      updateSession,
 
       messages,
       isTranscriptLoaded,
@@ -2716,6 +2845,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       queueMessage,
       removeQueued,
       cancelRun,
+      subagents,
+      interruptSubagent,
 
       approvalPolicy,
       setApprovalPolicy,
@@ -2823,6 +2954,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       activeWorkspace,
       addWorkspace,
       isCreateProjectOpen,
+      createProjectSessionId,
+      openCreateProjectForSession,
       pickProjectSource,
       createWorkspace,
       updateWorkspace,
@@ -2842,6 +2975,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deleteSession,
       setSessionMemory,
       setSessionWorkspace,
+      updateSession,
       messages,
       isTranscriptLoaded,
       mode,
@@ -2859,6 +2993,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       queueMessage,
       removeQueued,
       cancelRun,
+      subagents,
+      interruptSubagent,
       approvalPolicy,
       pendingPermissions,
       respondToPermission,
