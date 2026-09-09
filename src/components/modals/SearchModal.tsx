@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Brain,
@@ -14,7 +14,6 @@ import {
   Terminal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { MODEL_REGISTRY } from '../../services/registry';
 import type { PanelTabKind } from '../../types';
 
 type Result = {
@@ -41,6 +40,7 @@ export const SearchModal: React.FC = () => {
     setIsSearchOpen,
     setView,
     workspaces,
+    catalogueModels,
     setActiveWorkspaceId,
     sessions,
     openSession,
@@ -74,7 +74,7 @@ export const SearchModal: React.FC = () => {
     }
   }, [isSearchOpen]);
 
-  const close = () => setIsSearchOpen(false);
+  const close = useCallback(() => setIsSearchOpen(false), [setIsSearchOpen]);
 
   const results = useMemo<Result[]>(() => {
     const q = query.trim().toLowerCase();
@@ -92,6 +92,7 @@ export const SearchModal: React.FC = () => {
         group: 'Workspaces',
         run: () => {
           setActiveWorkspaceId(w.id);
+          newSession('project', w.id);
           setView('workbench');
           close();
         },
@@ -142,7 +143,7 @@ export const SearchModal: React.FC = () => {
       }),
     );
 
-    MODEL_REGISTRY.filter((m) => hit(m.displayName, m.architecture, ...m.capabilities)).forEach(
+    catalogueModels.filter((m) => hit(m.displayName, m.architecture, ...m.capabilities)).forEach(
       (m) =>
         out.push({
           id: `model-${m.id}`,
@@ -206,6 +207,8 @@ export const SearchModal: React.FC = () => {
     return out;
   }, [
     query,
+    close,
+    catalogueModels,
     workspaces,
     sessions,
     documents,

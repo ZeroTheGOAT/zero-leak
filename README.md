@@ -50,31 +50,47 @@ product and does not use OpenAI branding as its product identity. See
 
 ## Quick Start
 
-### 1. Run in Development Mode
-```bash
-cd zero-leak-app
-npm install
-npm run dev
-```
-Open [http://localhost:5173](http://localhost:5173) in your browser.
+### Run on your Windows laptop
 
-### 2. Build for Production
-```bash
-npm run build
-```
+Use Node.js 24 LTS and your Windows Rust/MSVC + WebView2 development setup. The native core uses Windows process-management APIs; the frontend alone can be developed on other operating systems.
 
-### 3. Run as Desktop Application (Zero)
-```bash
+```powershell
+cd zero-leak
+npm ci
+npm run check
 npm run zero dev
 ```
+
+`npm ci` installs the versions in the lockfile and needs package access the first time. Existing model weights and the configured harness home are reused; pulling the source does not download or replace your models. Model loading, OCR and extraction require the native application and your local model/runtime files.
+
+For a **UI-only preview**, run `npm run dev` and open [http://localhost:5173](http://localhost:5173). This preview displays a disconnected state because Vite does not provide the native core. Use `npm run zero dev` for real work.
+
+### Build a desktop installer
+
+```powershell
+npm run zero build
+```
+
+This builds the interface and native application together. Installers are written beneath `src-tauri/target/release/bundle/`. `npm run build` builds only the frontend assets.
+
+### Verify changes
+
+```powershell
+npm run check
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+```
+
+`npm run check` runs frontend regression tests, lint, and the production frontend build. `npm run test:watch` keeps the frontend tests running during development. Native tests run separately on a configured Windows development machine. Real-model accuracy and GPU performance still require rehearsal with the local model pack.
+
+The [polish validation notes](docs/POLISH-VALIDATION.md) describe this pass and the remaining laptop checks.
 
 ---
 
 ## Customization & Extensibility
 All components are modular and located in `src/components/`:
 - `src/components/layout/`: TitleBar and Sidebar
-- `src/components/chat/`: ChatContainer, EmptyState, FloatingInput, ApprovalPopover, ModelSelectorModal
-- `src/components/panels/`: RightPanel, DiffReviewer, TerminalView, SchematicView, FileExplorerView
+- `src/components/chat/`: ChatContainer, FloatingInput, ApprovalPopover, TaskDock, QuestionPrompt
+- `src/components/panels/`: RightPanel, DiffReviewer, SandboxConsole, DocumentViewer, FileExplorerView, WorkflowView
 - `src/components/settings/`: SettingsView with Permissions & Local LLM Endpoints
 - `src/services/core.ts`: Typed bridge to the native local core.
 - `src-tauri/src/agent.rs`: Local model orchestration, context assembly and tool loop.

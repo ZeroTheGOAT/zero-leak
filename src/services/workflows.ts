@@ -1,5 +1,26 @@
 import { call } from './transport';
-import type { AgentStep, Artifact, Citation, HardwareStatus, ModelRuntime, SandboxRun } from '../types';
+import type { AgentStep, Artifact, Citation, HardwareStatus, ModelRuntime, SandboxRun, FileChange } from '../types';
+
+/** Windows paths are case-insensitive; POSIX paths retain their case. */
+export function appendSourcePaths(current: string[], added: string[]): string[] {
+  const key = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path)
+    ? path.replace(/\\/g, '/').toLowerCase()
+    : path;
+  const seen = new Set(current.map(key));
+  return [...current, ...added.filter((path) => {
+    if (!path.trim() || seen.has(key(path))) return false;
+    seen.add(key(path));
+    return true;
+  })];
+}
+
+export function moveSource(files: string[], index: number, offset: -1 | 1): string[] {
+  const target = index + offset;
+  if (index < 0 || index >= files.length || target < 0 || target >= files.length) return files;
+  const next = [...files];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
 
 export type WorkflowKind = 'inspection' | 'dashboard' | 'discrepancy' | 'revision';
 export const WORKFLOWS: Array<{ id: WorkflowKind; title: string; description: string; inputs: string; minimum: number; instructions: string }> = [
@@ -27,6 +48,7 @@ export interface RunReceipt {
   elapsedMs?: number; operator: string; inputs: string[]; steps: AgentStep[];
   artifacts: Artifact[]; citations: Citation[]; checks: ReceiptCheck[];
   sandboxRuns: SandboxRun[];
+  changes?: FileChange[];
   failure?: string; modelId?: string; networkEvents: NetworkEvent[]; networkScope: string;
 }
 export interface ReadinessReport {

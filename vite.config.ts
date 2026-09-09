@@ -18,7 +18,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
-        advancedChunks: {
+        codeSplitting: {
           groups: [
             { name: 'vendor-react', test: /node_modules\/(react|react-dom|scheduler)/ },
             { name: 'vendor-ui', test: /node_modules\/(lucide-react|clsx|tailwind-merge)/ },

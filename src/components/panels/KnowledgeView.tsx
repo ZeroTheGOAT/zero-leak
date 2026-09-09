@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -8,6 +8,7 @@ import {
   FilePlus2,
   Loader2,
   RefreshCw,
+  Search,
   Trash2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
@@ -45,6 +46,7 @@ export const KnowledgeView: React.FC = () => {
     toggleWatching,
     openDocumentAt,
     settings,
+    coreStatus,
   } = useApp();
 
   const embedModel = modelById(knowledgeStats.embeddingModelId);
@@ -57,6 +59,22 @@ export const KnowledgeView: React.FC = () => {
    * is back no answer can cite it. Worth a second click on an icon this small.
    */
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const operation = useRef(false);
+  const offline = coreStatus.state === 'unavailable' || coreStatus.state === 'checking';
+  const query = filter.trim().toLowerCase();
+  const visibleSources = knowledgeSources.filter((source) =>
+    !query || `${source.fileName} ${source.path} ${source.status}`.toLowerCase().includes(query),
+  );
+  const perform = async (label: string, action: () => Promise<void>) => {
+    if (operation.current || offline) return;
+    operation.current = true;
+    setBusy(label);
+    try { await action(); }
+    finally { operation.current = false; setBusy(null); }
+  };
+
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -89,14 +107,17 @@ export const KnowledgeView: React.FC = () => {
 
         <div className="flex items-center space-x-1.5 mt-2.5">
           <button
-            onClick={() => void indexFiles()}
+            disabled={!!busy || offline}
+            onClick={() => void perform('Adding documents…', indexFiles)}
             className="flex-1 flex items-center justify-center space-x-1.5 px-2 py-1.5 rounded-md bg-[var(--card)] border border-[var(--border)] text-[11px] text-[var(--foreground)] hover:bg-[var(--popover)] hover:text-[var(--foreground)] transition"
           >
             <FilePlus2 size={11} />
             <span>Add documents</span>
           </button>
           <button
-            onClick={() => void toggleWatching()}
+            disabled={!!busy || offline}
+            aria-pressed={knowledgeStats.watching}
+            onClick={() => void perform('Updating file watch…', toggleWatching)}
             className={`flex items-center space-x-1.5 px-2 py-1.5 rounded-md border text-[11px] transition ${
               knowledgeStats.watching
                 ? 'border-[var(--success-ring)] bg-[var(--success-soft)] text-[var(--success)]'
@@ -116,6 +137,9 @@ export const KnowledgeView: React.FC = () => {
         </div>
       </div>
 
+      {offline && <p role="status" className="px-3 py-2 text-xs text-[var(--warning)]">Connect the local core to update the index.</p>}
+      {busy && <p role="status" className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--muted-foreground)]"><Loader2 size={12} className="animate-spin" />{busy}</p>}
+      {knowledgeSources.length > 0 && <label className="mx-3 my-2 flex items-center gap-2 rounded-md border border-[var(--border)] px-2 py-1.5"><Search size={13} className="text-[var(--muted-foreground)]" /><input aria-label="Filter knowledge sources" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter by file, path or status" className="w-full min-w-0 bg-transparent text-xs outline-none" /></label>}
       {/* Sources */}
       <div className="flex-1 overflow-y-auto">
         {knowledgeSources.length === 0 ? (
@@ -128,7 +152,8 @@ export const KnowledgeView: React.FC = () => {
           </div>
         ) : (
           <div className="divide-y divide-[var(--accent)]">
-            {knowledgeSources.map((s) => {
+            {visibleSources.length === 0 && <p role="status" className="p-4 text-center text-xs text-[var(--muted-foreground)]">No sources match “{filter}”.</p>}
+            {visibleSources.map((s) => {
               const Icon = STATUS_ICON[s.status];
               return (
                 <div key={s.id} className="px-3 py-2 group hover:bg-[var(--sidebar)] transition">
@@ -166,7 +191,8 @@ export const KnowledgeView: React.FC = () => {
                       }`}
                     >
                       <button
-                        onClick={() => void reindexSource(s.id)}
+                        disabled={!!busy || offline || s.status === 'indexing' || s.status === 'queued'}
+                        onClick={() => void perform(`Re-indexing ${s.fileName}…`, () => reindexSource(s.id))}
                         aria-label={`Re-index ${s.path}`}
                         className="p-1 rounded text-[var(--muted-foreground)] hover:bg-[var(--border)] hover:text-[var(--foreground)]"
                         title="Re-index this file"
@@ -174,10 +200,12 @@ export const KnowledgeView: React.FC = () => {
                         <RefreshCw size={11} />
                       </button>
                       <button
+                        disabled={!!busy || offline || s.status === 'indexing' || s.status === 'queued'}
+                        aria-label={`Remove ${s.fileName} from the index`}
                         onClick={() => {
                           if (confirmRemove === s.id) {
                             setConfirmRemove(null);
-                            void removeSource(s.id);
+                            void perform(`Removing ${s.fileName} from the index…`, () => removeSource(s.id));
                           } else {
                             setConfirmRemove(s.id);
                           }

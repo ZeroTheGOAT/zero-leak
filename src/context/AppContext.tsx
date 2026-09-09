@@ -54,6 +54,9 @@ import type {
   WorkspaceUpdate,
 } from '../types';
 import * as core from '../services/core';
+import { documentVersion, mergeDocumentSummaries } from '../services/documentCache';
+import { workflowCore } from '../services/workflows';
+import { acknowledgePrompt } from '../services/pendingResponse';
 import {
   readAppearance,
   resetFontSize,
@@ -504,13 +507,13 @@ interface AppContextValue {
   /** The first of possibly several queued prompts — concurrent chats can each
    *  be waiting on an answer. Answering serves the queue in order. */
   pendingPermission: PermissionRequest | null;
-  respondToPermission: (d: PermissionDecision) => Promise<void>;
+  respondToPermission: (d: PermissionDecision) => Promise<boolean>;
 
   /* Mid-run operator questions (§9, `ask_operator`) */
   /** The first of possibly several queued questions, same queue discipline as
    *  permissions. The model waits, blocked, until one is answered. */
   pendingQuestion: OperatorQuestion | null;
-  answerQuestion: (answer: string) => Promise<void>;
+  answerQuestion: (answer: string) => Promise<boolean>;
 
   /* Right panel */
   isPanelOpen: boolean;
@@ -544,6 +547,7 @@ interface AppContextValue {
   /** Opens the picker only. The returned draft inputs have not been read. */
   pickAttachments: () => Promise<string[]>;
   ingestFiles: () => Promise<void>;
+  ingestProgress: { fileName: string; current: number; total: number } | null;
   openDocument: (id: string) => Promise<void>;
   openDocumentAt: (path: string, citation?: Citation) => Promise<void>;
   removeDocument: (id: string) => Promise<void>;
@@ -847,6 +851,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * renders the chips.
    */
   const queuedRef = useRef<Record<string, QueuedMessage[]>>({});
+  const queuesToResume = useRef(new Set<string>());
   const [queuedBySession, setQueuedBySession] = useState<Record<string, QueuedMessage[]>>({});
   /** Lets the done handler send the queued follow-up without a dependency
    *  cycle: `send` is defined later and reads state this effect owns. */
@@ -865,6 +870,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const [pendingPermissions, setPendingPermissions] = useState<PermissionRequest[]>([]);
   const [pendingQuestions, setPendingQuestions] = useState<OperatorQuestion[]>([]);
+  const respondingPrompts = useRef(new Set<string>());
 
   /**
    * Applies `f` to one chat's in-flight turn. No-op when the chat has no live
@@ -904,9 +910,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   /* Documents / knowledge / artifacts / sandbox / audit */
   const [documents, setDocuments] = useState<IngestedDocument[]>([]);
+  const [ingestProgress, setIngestProgress] = useState<{ fileName: string; current: number; total: number } | null>(null);
+  const ingestLock = useRef(false);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   /** Documents whose blocks and tables have been read back; see `openDocument`. */
-  const hydrated = useRef<Set<string>>(new Set());
+  const hydrated = useRef<Map<string, string>>(new Map());
   const [knowledgeStats, setKnowledgeStats] = useState<KnowledgeIndexStats>(EMPTY_KNOWLEDGE);
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>([]);
   const [harnessInfo, setHarnessInfo] = useState<HarnessInfo | null>(null);
@@ -950,10 +958,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   /* Startup: probe the core, then hydrate everything it owns          */
   /* ---------------------------------------------------------------- */
 
+  const startNextQueued = useCallback((sid: string) => {
+    const queued = queuedRef.current[sid];
+    if (queued && queued.length > 0 && sendRef.current) {
+      const [next, ...rest] = queued;
+      queuedRef.current =
+        rest.length > 0 ? { ...queuedRef.current, [sid]: rest } : (() => {
+          const { [sid]: _gone, ...others } = queuedRef.current;
+          return others;
+        })();
+      setQueuedBySession(queuedRef.current);
+      void sendRef.current(next.text, next.attachments, sid, next.mode).then((accepted) => {
+        if (!accepted) {
+          queuedRef.current = { ...queuedRef.current, [sid]: [next, ...(queuedRef.current[sid] ?? [])] };
+          setQueuedBySession(queuedRef.current);
+        }
+      });
+    }
+  }, []);
+
+  const recoverRuns = useCallback(async () => {
+    // Read persisted evidence after an SSE gap. Never infer completion from a
+    // timeout: a model load can legitimately take a long time on this machine.
+    await Promise.all(Object.entries(runsRef.current).map(async ([sid, live]) => {
+      if (!live.runId) return;
+      try {
+        const receipts = await workflowCore.receipts(sid);
+        const receipt = receipts.find((row) => row.runId === live.runId);
+        if (!receipt || receipt.status === 'running') return;
+        const history = await core.sessions.history(sid);
+        // A normal done event or another run may have won while we were reading.
+        if (runsRef.current[sid]?.runId !== live.runId || completedRuns.current.has(live.runId)) return;
+        completedRuns.current.add(live.runId);
+        delete runsRef.current[sid];
+        setRunsBySession({ ...runsRef.current });
+        setPendingPermissions((rows) => rows.filter((row) => row.runId !== live.runId));
+        setPendingQuestions((rows) => rows.filter((row) => row.runId !== live.runId));
+        setMessagesBySession((current) => ({ ...current, [sid]: history.map(rehydrate) }));
+        setChangesBySession((current) => ({ ...current, [sid]: { runId: live.runId, changes: receipt.changes ?? [] } }));
+        startReplySeen.current.delete(live.runId);
+        delete pendingRowRef.current[sid];
+        queuesToResume.current.add(sid);
+      } catch (e) {
+        pushFailure('execution_failed', 'Could not recover this task after reconnecting. Try reconnecting again.', e instanceof Error ? e.message : String(e));
+      }
+    }));
+  }, [pushFailure]);
+
   const refreshCore = useCallback(async () => {
     const status = await core.probe();
     setCoreStatus(status);
     if (status.state === 'unavailable') return;
+    await recoverRuns();
 
     // Each slice fails independently and reports which one failed, so the
     // operator can distinguish "router down" from "never polled".
@@ -999,7 +1055,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           null,
       );
     }
-    if (docs) setDocuments(docs);
+    if (docs) setDocuments((previous) => mergeDocumentSummaries(previous, docs));
     if (kStats) setKnowledgeStats(kStats);
     if (kList) setKnowledgeSources(kList);
     if (arts) setArtifacts(arts);
@@ -1027,7 +1083,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setApprovalPolicy(cfg.approvalPolicy);
       setIsPanelOpen(cfg.showRightPanel);
     }
-  }, [pushFailure]);
+  }, [pushFailure, setMode, recoverRuns]);
 
   /*
    * Kept out of the hydration batch above on purpose. The replication check
@@ -1075,8 +1131,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   useEffect(() => {
     const onResync = () => void refreshCore();
+    const onDisconnect = () => setCoreStatus((status) => ({
+      ...status, state: 'unavailable',
+      detail: 'Connection to the local core was interrupted. Waiting to reconnect; your drafts are kept.',
+    }));
     window.addEventListener('sovereign:resync', onResync);
-    return () => window.removeEventListener('sovereign:resync', onResync);
+    window.addEventListener('sovereign:connection-lost', onDisconnect);
+    return () => {
+      window.removeEventListener('sovereign:resync', onResync);
+      window.removeEventListener('sovereign:connection-lost', onDisconnect);
+    };
   }, [refreshCore]);
 
   /* ---------------------------------------------------------------- */
@@ -1169,12 +1233,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }),
     );
     void add(core.on('agent://permission', (req) =>
-      setPendingPermissions((prev) => [...prev, req]),
+      setPendingPermissions((prev) => prev.some((item) => item.id === req.id) ? prev : [...prev, req]),
     ));
     // Questions queue alongside permissions: the model is parked on a channel
     // until the operator types a reply or the run is cancelled.
     void add(core.on('agent://question', (q) =>
-      setPendingQuestions((prev) => [...prev, q]),
+      setPendingQuestions((prev) => prev.some((item) => item.id === q.id) ? prev : [...prev, q]),
     ));
 
     void add(
@@ -1308,6 +1372,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setRunsBySession({ ...runsRef.current });
         }
         setPendingPermissions((prev) => prev.filter((p) => p.runId !== done.runId));
+        setPendingQuestions((prev) => prev.filter((q) => q.runId !== done.runId));
 
         const messageId = `msg-${done.runId}`;
         const message: ChatMessage = {
@@ -1361,22 +1426,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // record. Pending file changes do not hold the queue: the model is
         // told which writes are still only proposed, and a follow-up like
         // "also add a contact page" is still meaningful against them.
-        const queued = queuedRef.current[sid];
-        if (queued && queued.length > 0 && sendRef.current) {
-          const [next, ...rest] = queued;
-          queuedRef.current =
-            rest.length > 0 ? { ...queuedRef.current, [sid]: rest } : (() => {
-              const { [sid]: _gone, ...others } = queuedRef.current;
-              return others;
-            })();
-          setQueuedBySession(queuedRef.current);
-          void sendRef.current(next.text, next.attachments, sid, next.mode).then((accepted) => {
-            if (!accepted) {
-              queuedRef.current = { ...queuedRef.current, [sid]: [next, ...(queuedRef.current[sid] ?? [])] };
-              setQueuedBySession(queuedRef.current);
-            }
-          });
-        }
+        queuesToResume.current.add(sid);
 
         // Pull anything the run may have produced. A requested deliverable is
         // shown beside the main answer as well as in the artifacts manager.
@@ -1396,7 +1446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           })
           .catch(() => {});
         void core.audit.list().then(setAuditLog).catch(() => {});
-        void core.documents.list().then(setDocuments).catch(() => {});
+        void core.documents.list().then((rows) => setDocuments((previous) => mergeDocumentSummaries(previous, rows))).catch(() => {});
         void refreshMemoriesRef.current?.();
       })
       .then((u) => {
@@ -1931,6 +1981,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ) => {
       const text = prompt.trim();
       if (!text) return false;
+      if (coreStatus.state === 'unavailable') {
+        pushFailure('execution_failed', 'Core not attached. Your draft has been kept.', coreStatus.detail);
+        return false;
+      }
       const taskTitle = /^\[Workflow: (?:inspection|dashboard|discrepancy|revision)\]\r?\n([^\n]+)/.exec(text)?.[1] ?? text;
       const runMode = modeOverride ?? mode;
 
@@ -2017,26 +2071,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setRunsBySession(runsRef.current);
 
-      // No core attached: say so plainly instead of inventing a response.
-      if (coreStatus.state === 'unavailable') {
-        delete runsRef.current[key];
-        setRunsBySession({ ...runsRef.current });
-        setMessagesBySession((prev) => ({
-          ...prev,
-          [key]: [
-            ...(prev[key] ?? []),
-            {
-              id: uid('msg'),
-              sender: 'system',
-              content: coreStatus.detail,
-              createdAt: Date.now(),
-              failure: 'Core not attached — nothing was run and no model was loaded.',
-            },
-          ],
-        }));
-        return true;
-      }
-
       // This chat's optimistic bubble is the one the core will confirm when
       // the row is stored. Record it so `agent://user-stored` can stamp the
       // store's row id onto it — the id editing truncates by.
@@ -2088,15 +2122,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ],
         }));
       }
-      return true;
+      return started !== null;
     },
-    [activeSessionId, activeWorkspaceId, coreStatus, guard, mode, mutateLiveRun, sessions],
+    [activeSessionId, activeWorkspaceId, coreStatus, guard, mode, mutateLiveRun, sessions, pushFailure],
   );
 
   // Assigned rather than re-created per render: the done handler reads it at
   // event time, and the current callback is the one that sees current state.
   sendRef.current = send;
   refreshMemoriesRef.current = refreshMemories;
+
+  useEffect(() => {
+    // Wait for the connected state and the new send callback to reach a render.
+    // Resuming inside refreshCore reads the previous (disconnected) callback.
+    if (coreStatus.state === 'unavailable' || coreStatus.state === 'checking') return;
+    for (const sid of queuesToResume.current) {
+      if (runsRef.current[sid]) continue;
+      queuesToResume.current.delete(sid);
+      startNextQueued(sid);
+    }
+  }, [coreStatus.state, runsBySession, startNextQueued]);
+
 
   /**
    * Queues a follow-up for a chat whose turn is still running. Delivered
@@ -2131,7 +2177,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const live = activeSessionId ? runsRef.current[activeSessionId] : undefined;
     if (!live?.runId) return;
     const runId = live.runId;
-    await guard('execution_failed', () => core.agent.cancel(runId));
+    const cancelled = await guard('execution_failed', async () => { await core.agent.cancel(runId); return true; });
+    if (cancelled === null) return;
     // Keep the turn occupied until its authoritative completion arrives. If the
     // composer were re-enabled here, a late completion from the cancelled turn
     // could clear or overwrite a newly started turn.
@@ -2222,8 +2269,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return next;
       });
 
-      void send(trimmed, paths, sid);
-      return true;
+      return send(trimmed, paths, sid);
     },
     [activeSessionId, guard, messagesBySession, send],
   );
@@ -2237,9 +2283,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Serves the head of the queue. The rest — if another chat is also
       // waiting on an answer — surface in turn.
       const head = pendingPermissions[0];
-      if (!head) return;
-      setPendingPermissions((prev) => prev.slice(1));
-      await guard('execution_failed', () => core.agent.respondToPermission(head.id, decision));
+      if (!head) return false;
+      return acknowledgePrompt(respondingPrompts.current, head.id,
+        () => guard('execution_failed', async () => { await core.agent.respondToPermission(head.id, decision); return true; }),
+        (id) => setPendingPermissions((prev) => prev.filter((item) => item.id !== id)),
+      );
     },
     [guard, pendingPermissions],
   );
@@ -2251,9 +2299,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // see the prompt is still waiting and try again.
       const head = pendingQuestions[0];
       const trimmed = answer.trim();
-      if (!head || !trimmed) return;
-      setPendingQuestions((prev) => prev.slice(1));
-      await guard('execution_failed', () => core.agent.answerQuestion(head.id, trimmed));
+      if (!head || !trimmed) return false;
+      return acknowledgePrompt(respondingPrompts.current, head.id,
+        () => guard('execution_failed', async () => { await core.agent.answerQuestion(head.id, trimmed); return true; }),
+        (id) => setPendingQuestions((prev) => prev.filter((item) => item.id !== id)),
+      );
     },
     [guard, pendingQuestions],
   );
@@ -2477,16 +2527,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [guard]);
 
   const ingestFiles = useCallback(async () => {
-    const paths = await guard('invalid_document', () => core.documents.pick());
-    if (!paths?.length) return;
-    for (const p of paths) {
-      const doc = await guard('invalid_document', () => core.documents.ingest(p));
-      if (!doc) continue;
-      // An ingest answers with the whole extraction, so this one needs no re-read.
-      hydrated.current.add(doc.id);
-      setDocuments((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)]);
-      setActiveDocumentId(doc.id);
-      openTab('document', doc.fileName, doc.id);
+    if (ingestLock.current) return;
+    ingestLock.current = true;
+    try {
+      const paths = await guard('invalid_document', () => core.documents.pick());
+      if (!paths?.length) return;
+      for (const [index, path] of paths.entries()) {
+        setIngestProgress({ fileName: core.basename(path), current: index + 1, total: paths.length });
+        const doc = await guard('invalid_document', () => core.documents.ingest(path));
+        if (!doc) continue;
+        hydrated.current.set(doc.id, documentVersion(doc));
+        setDocuments((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)]);
+        setActiveDocumentId(doc.id);
+        openTab('document', doc.fileName, doc.id);
+      }
+    } finally {
+      ingestLock.current = false;
+      setIngestProgress(null);
     }
   }, [guard, openTab]);
 
@@ -2503,12 +2560,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const known = documents.find((d) => d.id === id);
       setActiveDocumentId(id);
       openTab('document', known?.fileName ?? 'Document', id);
-      if (hydrated.current.has(id)) return;
+      if (known && hydrated.current.get(id) === documentVersion(known)) return;
 
       const full = await guard('invalid_document', () => core.documents.get(id));
       if (!full) return;
-      hydrated.current.add(id);
-      setDocuments((prev) => prev.map((d) => (d.id === id ? full : d)));
+      hydrated.current.set(id, documentVersion(full));
+      setDocuments((prev) => prev.some((d) => d.id === id)
+        ? prev.map((d) => (d.id === id ? full : d))
+        : [full, ...prev]);
       // The picker may have opened this tab before the file name was known.
       renameTab('document', full.fileName, id);
     },
@@ -2534,7 +2593,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       const doc = await guard('invalid_document', () => core.documents.ingest(path));
       if (!doc) return;
-      hydrated.current.add(doc.id);
+      hydrated.current.set(doc.id, documentVersion(doc));
       setDocuments((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)]);
       setActiveDocumentId(doc.id);
       openTab('document', doc.fileName, doc.id);
@@ -2876,6 +2935,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       activeDocumentId,
       pickAttachments,
       ingestFiles,
+      ingestProgress,
       openDocument,
       openDocumentAt,
       sourceCitation,
@@ -3015,6 +3075,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       activeDocumentId,
       pickAttachments,
       ingestFiles,
+      ingestProgress,
       openDocument,
       openDocumentAt,
       sourceCitation,

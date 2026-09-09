@@ -97,7 +97,8 @@ export const AppContent: React.FC = () => {
         target instanceof HTMLSelectElement ||
         (target?.isContentEditable ?? false);
       // Composition (IME) must not trigger shortcuts either.
-      if (e.isComposing || (e.keyCode === 229 && typing)) return;
+      if (e.defaultPrevented || e.isComposing || (e.keyCode === 229 && typing)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       // Allow the search modal's own Escape/Tab handling to win.

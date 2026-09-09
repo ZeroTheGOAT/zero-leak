@@ -73,6 +73,7 @@ export const FloatingInput: React.FC<{
 }> = ({ drafts, setDrafts, layout = 'docked' }) => {
   const {
     send,
+    newSession,
     isRunning,
     queuedMessages,
     queueMessage,
@@ -174,12 +175,11 @@ export const FloatingInput: React.FC<{
     if (!isRunning) setStopping(false);
   }, [isRunning]);
 
-  const clearDraft = () => {
+  const clearDraft = (keys = [draftKey]) => {
     setDrafts((current) => {
       const next = { ...current };
       // A send can finish after the operator has started typing another draft.
-      if (current[draftKey] !== draft) return current;
-      delete next[draftKey];
+      for (const key of keys) if (current[key] === draft) delete next[key];
       return next;
     });
   };
@@ -197,8 +197,15 @@ export const FloatingInput: React.FC<{
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const accepted = await send(trimmed, files);
-      if (accepted) clearDraft();
+      // Give the initial draft its durable chat key before starting a turn.
+      // If launch fails, switching from the welcome screen cannot hide it.
+      const sid = activeSessionId ?? newSession();
+      if (!sid) return false;
+      if (!activeSessionId) {
+        setDrafts((current) => ({ ...current, [sid]: current[draftKey] ?? draft }));
+      }
+      const accepted = await send(trimmed, files, sid);
+      if (accepted) clearDraft([draftKey, sid]);
       return accepted;
     } finally {
       submittingRef.current = false;

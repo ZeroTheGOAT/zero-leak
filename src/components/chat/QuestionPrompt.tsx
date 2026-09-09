@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { HelpCircle, CornerDownLeft } from 'lucide-react';
+import { HelpCircle, CornerDownLeft, Loader2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import type { OperatorQuestion } from '../../types';
 
@@ -24,6 +24,9 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
   const { answerQuestion } = useApp();
   const [answer, setAnswer] = useState('');
   const dialogRef = useRef<HTMLDivElement>(null);
+  const submitting = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -32,23 +35,31 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
     };
   }, []);
 
-  const submit = () => {
+  const submit = async () => {
     const trimmed = answer.trim();
-    if (!trimmed) return;
-    void answerQuestion(trimmed);
+    if (!trimmed || submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      if (!await answerQuestion(trimmed)) setError('Your answer was not delivered. Check the connection and try again.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally { submitting.current = false; setBusy(false); }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends; Shift+Enter makes a new line, as in the composer.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      submit();
+      void submit();
     }
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center px-4 backdrop-blur-sm"
       style={{ background: 'color-mix(in oklab, var(--background) 72%, transparent)' }}
     >
       <div
@@ -58,9 +69,10 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
         aria-labelledby="agent-question-title"
         aria-describedby="agent-question-text"
         onKeyDown={(e) => {
+          e.stopPropagation();
           if (e.key === 'Tab') {
             const controls = dialogRef.current?.querySelectorAll<HTMLElement>(
-              'button, textarea, [href], input, select, [tabindex]:not([tabindex="-1"])',
+              'button:not([disabled]), textarea, [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
             );
             const first = controls?.[0];
             const last = controls?.[controls.length - 1];
@@ -103,6 +115,7 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
 
           <div>
             <textarea
+              readOnly={busy}
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
               onKeyDown={onKeyDown}
@@ -119,15 +132,16 @@ const QuestionForm: React.FC<{ question: OperatorQuestion }> = ({ question: q })
           </div>
         </div>
 
+        {error && <p role="alert" className="px-4 pb-3 text-xs text-[var(--destructive)]">{error}</p>}
         {/* Reply */}
         <div className="flex items-center justify-end space-x-2 border-t nerve-border bg-[var(--card)] px-4 py-3">
           <button
-            onClick={submit}
-            disabled={!answer.trim()}
+            onClick={() => void submit()}
+            disabled={busy || !answer.trim()}
             aria-label="Send your answer to the agent"
             className="rounded-md px-3 py-1.5 text-xs font-medium zeroleak-primary transition hover:brightness-105 disabled:opacity-40 disabled:pointer-events-none"
           >
-            Send answer
+            {busy ? <span className="inline-flex items-center gap-2"><Loader2 size={13} className="animate-spin" />Sending…</span> : 'Send answer'}
           </button>
         </div>
       </div>

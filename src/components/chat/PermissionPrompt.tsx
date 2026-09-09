@@ -1,8 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, FileEdit, ShieldQuestion, Terminal, Trash2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { toolByName } from '../../services/registry';
-import type { ToolRisk } from '../../types';
+import type { PermissionRequest, ToolRisk } from '../../types';
 
 const RISK_ICON: Record<ToolRisk, React.ElementType> = {
   read: ShieldQuestion,
@@ -34,7 +34,23 @@ const RISK_LABEL: Record<ToolRisk, string> = {
  * default to allow.
  */
 export const PermissionPrompt: React.FC = () => {
-  const { pendingPermission, respondToPermission, workspaces } = useApp();
+  const { pendingPermission } = useApp();
+  return pendingPermission ? <PermissionForm key={pendingPermission.id} pendingPermission={pendingPermission} /> : null;
+};
+
+const PermissionForm: React.FC<{ pendingPermission: PermissionRequest }> = ({ pendingPermission }) => {
+  const { respondToPermission, workspaces } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const submitting = useRef(false);
+  const respond = useCallback(async (decision: Parameters<typeof respondToPermission>[0]) => {
+    if (submitting.current) return;
+    submitting.current = true; setBusy(true); setError('');
+    try {
+      if (!await respondToPermission(decision)) setError('Your decision was not delivered. Check the connection and try again.');
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { submitting.current = false; setBusy(false); }
+  }, [respondToPermission]);
   const dialogRef = useRef<HTMLDivElement>(null);
   const rejectRef = useRef<HTMLButtonElement>(null);
 
@@ -45,11 +61,11 @@ export const PermissionPrompt: React.FC = () => {
     const frame = requestAnimationFrame(() => rejectRef.current?.focus());
     const onKey = (e: KeyboardEvent) => {
       // Escape rejects. There is no keyboard shortcut for allow.
-      if (e.key === 'Escape') void respondToPermission('reject');
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); void respond('reject'); }
       // Focus trap: keep Tab cycling inside the dialog.
       if (e.key === 'Tab' && dialogRef.current) {
         const controls = dialogRef.current.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
         );
         const first = controls[0];
         const last = controls[controls.length - 1];
@@ -69,7 +85,7 @@ export const PermissionPrompt: React.FC = () => {
       cancelAnimationFrame(frame);
       if (previous?.isConnected) previous.focus();
     };
-  }, [pendingPermission, respondToPermission]);
+  }, [pendingPermission, respond]);
 
   if (!pendingPermission) return null;
 
@@ -81,7 +97,7 @@ export const PermissionPrompt: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center px-4 backdrop-blur-sm"
       style={{ background: 'color-mix(in oklab, var(--background) 72%, transparent)' }}
     >
       <div
@@ -136,11 +152,14 @@ export const PermissionPrompt: React.FC = () => {
           )}
         </div>
 
+        {error && <p role="alert" className="px-4 pb-3 text-xs text-[var(--destructive)]">{error}</p>}
+        {busy && <p role="status" className="px-4 pb-3 text-xs text-[var(--muted-foreground)]">Sending decision…</p>}
         {/* Decisions */}
         <div className="flex items-center justify-end space-x-2 border-t nerve-border bg-[var(--card)] px-4 py-3">
           <button
+            disabled={busy}
             ref={rejectRef}
-            onClick={() => void respondToPermission('reject')}
+            onClick={() => void respond('reject')}
             aria-label="Reject this action"
             className="rounded-md border nerve-border px-3 py-1.5 text-xs text-[var(--card-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]"
           >
@@ -148,7 +167,8 @@ export const PermissionPrompt: React.FC = () => {
           </button>
           {!destructive && (
             <button
-              onClick={() => void respondToPermission('allow_session')}
+              disabled={busy}
+              onClick={() => void respond('allow_session')}
               aria-label="Allow this tool for the rest of this session in this workspace"
               className="rounded-md border nerve-border px-3 py-1.5 text-xs text-[var(--card-foreground)] transition hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]"
               title="Allow this tool for the rest of this session, in this workspace only"
@@ -157,7 +177,8 @@ export const PermissionPrompt: React.FC = () => {
             </button>
           )}
           <button
-            onClick={() => void respondToPermission('allow_once')}
+            disabled={busy}
+            onClick={() => void respond('allow_once')}
             aria-label={destructive ? 'Allow this destructive action once' : 'Allow this action once'}
             className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
               destructive

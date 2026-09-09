@@ -5,6 +5,7 @@ import {
   FileText,
   Frame,
   Layers,
+  Loader2,
   Maximize2,
   Minus,
   Plus,
@@ -88,6 +89,7 @@ const PageCanvas: React.FC<{
             return (
               <button
                 key={b.id}
+                aria-label={`${BLOCK_LABEL[b.kind]}: ${b.text.slice(0, 80)}`}
                 onClick={() => onSelect(selected ? null : b.id)}
                 className={`absolute border transition-all ${BLOCK_TONE[b.kind]} ${
                   selected ? 'ring-2 ring-white/70 z-10' : 'hover:bg-white/10'
@@ -138,6 +140,7 @@ const RemoveButton: React.FC<{ id: string; fileName: string; size?: number }> = 
         setArmed(false);
         void removeDocument(id);
       }}
+      aria-label={armed ? `Confirm removing extraction for ${fileName}` : `Forget extraction for ${fileName}`}
       onBlur={() => setArmed(false)}
       title={
         armed
@@ -164,7 +167,7 @@ const RemoveButton: React.FC<{ id: string; fileName: string; size?: number }> = 
  * removed without going through the file picker again.
  */
 const DocumentList: React.FC = () => {
-  const { documents, activeDocumentId, openDocument, ingestFiles } = useApp();
+  const { documents, activeDocumentId, openDocument, ingestFiles, ingestProgress } = useApp();
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -173,13 +176,15 @@ const DocumentList: React.FC = () => {
           {documents.length} extracted {documents.length === 1 ? 'document' : 'documents'}
         </span>
         <button
+          disabled={!!ingestProgress}
           onClick={() => void ingestFiles()}
           className="px-2 py-1 rounded-md bg-[var(--card)] border border-[var(--border)] text-[10.5px] text-[var(--foreground)] hover:bg-[var(--popover)] hover:text-[var(--foreground)] transition"
         >
-          Open a document
+          {ingestProgress ? `Reading ${ingestProgress.current} of ${ingestProgress.total}…` : 'Open a document'}
         </button>
       </div>
 
+      {ingestProgress && <p role="status" className="px-3 py-2 text-xs text-[var(--muted-foreground)]">Reading {ingestProgress.fileName} · {ingestProgress.current} of {ingestProgress.total}</p>}
       <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
         {documents.map((d) => {
           const m = modelById(d.modelId);
@@ -261,7 +266,7 @@ const BlockRow: React.FC<{
  * invented to fill the column.
  */
 export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }) => {
-  const { documents, ingestFiles, sourceCitation } = useApp();
+  const { documents, ingestFiles, ingestProgress, sourceCitation } = useApp();
 
   // A tab opened without a document is the index, and stays the index. Following
   // whatever was opened last would leave the panel's own `Document` entry showing
@@ -376,10 +381,11 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
         <FileText size={22} className="text-[var(--border)] mb-2.5" />
         <p className="text-[12px] text-[var(--muted-foreground)]">No document open.</p>
         <button
+          disabled={!!ingestProgress}
           onClick={() => void ingestFiles()}
           className="mt-3 px-3 py-1.5 rounded-md bg-[var(--card)] border border-[var(--border)] text-[11px] text-[var(--foreground)] hover:bg-[var(--popover)] hover:text-[var(--foreground)] transition"
         >
-          Open a document
+          {ingestProgress ? `Reading ${ingestProgress.current} of ${ingestProgress.total}…` : 'Open a document'}
         </button>
       </div>
     );
@@ -495,6 +501,7 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
         </div>
       </div>
 
+      {ingestProgress && <p role="status" className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--muted-foreground)]"><Loader2 size={13} className="animate-spin" />Reading {ingestProgress.fileName} · {ingestProgress.current} of {ingestProgress.total}</p>}
       <div ref={splitRef} className="flex-1 flex min-h-0">
         <PageCanvas
           doc={doc}
@@ -547,7 +554,8 @@ export const DocumentViewer: React.FC<{ documentId?: string }> = ({ documentId }
             ))}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+          {ingestProgress && <p role="status" className="px-3 py-2 text-xs text-[var(--muted-foreground)]">Reading {ingestProgress.fileName} · {ingestProgress.current} of {ingestProgress.total}</p>}
+      <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
             {side === 'blocks' &&
               (pageBlocks.length === 0 ? (
                 <p className="text-[11px] text-[var(--muted-foreground)] p-2 leading-relaxed">

@@ -133,6 +133,9 @@ async function viaHttp<T>(command: string, args?: Record<string, unknown>): Prom
       // token; the browser attaches it and nothing here can leak it.
       credentials: 'same-origin',
       cache: 'no-store',
+      // Only the availability probe has a deadline. Timing out a write could
+      // encourage a duplicate retry after the core already performed it.
+      signal: command === 'core_status' ? AbortSignal.timeout(10_000) : undefined,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command, args: args ?? {} }),
     });
@@ -143,7 +146,7 @@ async function viaHttp<T>(command: string, args?: Record<string, unknown>): Prom
 
   const unauthorised = res.status === 401 || res.status === 403;
 
-  let body: { ok?: unknown; data?: unknown; error?: unknown };
+  let body: unknown;
   try {
     body = await res.json();
   } catch {
@@ -152,9 +155,17 @@ async function viaHttp<T>(command: string, args?: Record<string, unknown>): Prom
     throw new CoreUnavailable(command, unauthorised ? NOT_AUTHORISED : NO_CORE);
   }
 
-  if (body.ok === true) return body.data as T;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !('ok' in body)) {
+    throw new CoreUnavailable(command, unauthorised ? NOT_AUTHORISED : NO_CORE);
+  }
+  const envelope = body as { ok?: unknown; data?: unknown; error?: unknown };
+  if (res.ok && envelope.ok === true) {
+    // A manual reconnect must also reopen a stream which had stopped retrying.
+    if (command === 'core_status' && handlers.size > 0) openStream();
+    return envelope.data as T;
+  }
 
-  const detail = typeof body.error === 'string' ? body.error : `The core answered HTTP ${res.status}.`;
+  const detail = unauthorised ? NOT_AUTHORISED : typeof envelope.error === 'string' ? envelope.error : `The core answered HTTP ${res.status}.`;
   // A rejected guard is an availability problem; a failed command is not.
   throw unauthorised ? new CoreUnavailable(command, detail) : new Error(detail);
 }
@@ -190,6 +201,11 @@ export async function on<P>(event: string, handler: (payload: P) => void): Promi
   return () => {
     set.delete(handler as Handler);
     if (set.size === 0) handlers.delete(event);
+    if (handlers.size === 0) {
+      source?.close();
+      source = null;
+      gapped = false;
+    }
   };
 }
 
@@ -213,6 +229,7 @@ function openStream(): void {
   source = es;
 
   es.onopen = () => {
+    if (source !== es) return;
     if (!gapped) return;
     gapped = false;
     // The core's broadcast channel has no replay, so anything emitted while the
@@ -221,12 +238,15 @@ function openStream(): void {
   };
 
   es.onmessage = (e) => {
-    let msg: { event?: unknown; payload?: unknown };
+    if (source !== es) return;
+    let parsed: unknown;
     try {
-      msg = JSON.parse(e.data);
+      parsed = JSON.parse(e.data);
     } catch {
       return;
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const msg = parsed as { event?: unknown; payload?: unknown };
     if (typeof msg.event !== 'string') return;
 
     // The server sends this when it had to drop events for a slow receiver —
@@ -242,6 +262,11 @@ function openStream(): void {
   };
 
   es.onerror = () => {
+    if (source !== es) return;
+    if (!gapped) {
+      window.dispatchEvent(new CustomEvent('sovereign:connection-lost'));
+    }
+    gapped = true;
     // `EventSource` reconnects by itself; `CLOSED` means it gave up, which in
     // practice means the session was rejected.
     if (es.readyState === EventSource.CLOSED) {
@@ -252,7 +277,6 @@ function openStream(): void {
       );
       return;
     }
-    gapped = true;
   };
 }
 

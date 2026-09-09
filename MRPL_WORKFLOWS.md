@@ -13,7 +13,7 @@ Dashboard runs receive native workbook extraction in their initial context and a
 - **Cross-document discrepancy review:** attach at least two comparable sources. The workflow requests both source quotations, comparison conditions, missing information, and a review workbook.
 - **Document revision impact:** attach the old revision first and the new revision second. It requests changes and conclusions needing review, preserving both sources in an Excel workbook.
 
-Inputs stay as drafts until Start. Draft files and notes remain scoped to the project and survive opening Settings. These workflows use the existing real agent tools and permission policy. They are instructions for autonomous execution, not deterministic engineering-analysis algorithms; completion depends on model performance and available evidence.
+Inputs stay as drafts until Start. Use the up/down controls to put revision sources in the correct order; the first two rows are labeled Earlier revision and New revision. The panel explains missing inputs and refuses to start in an unapproved or archived project. Draft files and notes remain scoped to the project and survive opening Settings. These workflows use the existing real agent tools and permission policy. They are instructions for autonomous execution, not deterministic engineering-analysis algorithms; completion depends on model performance and available evidence.
 
 ## Evidence and receipts
 
@@ -43,7 +43,7 @@ See `examples/mrpl-demo/README.md`. The two PDFs have image-only pages and delib
 
 ## Verification
 
-Run `npm run build`, `npm run lint`, and `cargo test --offline --manifest-path src-tauri/Cargo.toml`. This checkout's native directory is `src-tauri`.
+Run `npm run check` and `cargo test --locked --manifest-path src-tauri/Cargo.toml` on Windows. Add `--offline` to Cargo only after the required dependencies are cached. This checkout's native directory is `src-tauri`.
 
 Regression tests cover compressed scan decoding, distinct page images, revision differences, private endpoint matching, receipt recovery and chat isolation, network run isolation, failed execution evidence, missing artifact checks and workflow routing. Real-model rehearsal is also needed on the target GPU; tests alone cannot certify generated engineering content.
 
