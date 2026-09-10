@@ -38,6 +38,8 @@ The active native core in this checkout is `src-tauri`. A standalone `npm run de
   - Full, recent-turn, or empty context forks; per-agent local model and reasoning overrides.
   - Explorer, coder, reviewer, document, and verifier roles with backend-enforced read-only restrictions where appropriate.
   - Parent/child cancellation, completion notifications, concurrency/depth limits, and inspectable activity in the chat timeline.
+  - **Sources → Sub-agents → View all** lists the current chat's delegated tasks. Open any task in the side panel to follow its prompt, live activity, saved messages and status; return to the list or stop that child while keeping the parent chat open.
+  - **Small GPU profile:** GPUs with 8 GB or less are limited to one active child across the app and one delegation level. Children inherit the coordinator model by default, and inference requests run one at a time. Older saved limits are capped automatically.
   - Persistent local MCP sessions with tools, resources, and reusable prompts.
 
 The control-plane design is adapted from the Apache-2.0 licensed
@@ -83,6 +85,7 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 `npm run check` runs frontend regression tests, lint, and the production frontend build. `npm run test:watch` keeps the frontend tests running during development. Native tests run separately on a configured Windows development machine. Real-model accuracy and GPU performance still require rehearsal with the local model pack.
 
 The [polish validation notes](docs/POLISH-VALIDATION.md) describe this pass and the remaining laptop checks.
+The [sub-agent and hackathon validation notes](docs/SUBAGENT-VALIDATION.md) record the September 10 checks and remaining demo limitations.
 
 For custom GGUF models, Auto/custom context beside Thinking Effort, and local or
 npm MCP servers, see the [model and MCP setup guide](docs/SETTINGS-MODELS-MCP.md).

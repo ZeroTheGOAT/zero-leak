@@ -1011,8 +1011,8 @@ pub struct AppSettings {
     pub show_right_panel: bool,
 }
 
-fn default_max_subagents() -> u32 { 4 }
-fn default_max_subagent_depth() -> u32 { 2 }
+fn default_max_subagents() -> u32 { 1 }
+fn default_max_subagent_depth() -> u32 { 1 }
 
 /* ------------------------------------------------------------------ */
 /* Codex-derived multi-agent control plane                             */
@@ -1024,6 +1024,7 @@ pub enum SubagentStatus {
     Pending,
     Running,
     Waiting,
+    Stopping,
     Completed,
     Failed,
     Interrupted,

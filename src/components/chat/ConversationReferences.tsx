@@ -12,6 +12,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import type { Artifact } from '../../types';
 import { collectConversationSources } from './conversationSources';
+import { SubagentSection } from './SubagentSection';
 
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -51,6 +52,7 @@ export const ConversationReferences: React.FC<{
     sandboxRuns,
     killRun,
     stopDevServer,
+    subagents,
   } = useApp();
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -104,11 +106,12 @@ export const ConversationReferences: React.FC<{
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [open, sidePanelOpen]);
 
-  if (sources.length === 0 && outputs.length === 0) return null;
+  if (sources.length === 0 && outputs.length === 0 && subagents.length === 0) return null;
 
   const summary = [
     outputs.length > 0 ? `${outputs.length} output${outputs.length === 1 ? '' : 's'}` : '',
     sources.length > 0 ? `${sources.length} source${sources.length === 1 ? '' : 's'}` : '',
+    subagents.length > 0 ? `${subagents.length} sub-agent${subagents.length === 1 ? '' : 's'}` : '',
   ].filter(Boolean).join(' and ');
   const runningSandboxRuns = sandboxRuns.filter((run) => run.status === 'running');
   const runningDevServer = activeDevServer && ['starting', 'running'].includes(activeDevServer.status)
@@ -381,6 +384,7 @@ export const ConversationReferences: React.FC<{
                 </button>
               )}
             </section>
+            <SubagentSection onNavigate={() => setOpenSessionId(null)} />
           </div>
         </aside>
       )}

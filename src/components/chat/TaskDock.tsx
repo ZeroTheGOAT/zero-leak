@@ -1,13 +1,14 @@
 import React from 'react';
 import { AlertCircle, Check, ChevronDown, GitFork, ListChecks, Loader2, MinusCircle, Square } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { isSubagentActive } from '../../services/subagents';
 
 /** Only unfinished work belongs beside the composer. Plans remain stored in the transcript. */
 export const TaskDock: React.FC = () => {
-  const { livePlan, isRunning, activeSessionId, subagents, interruptSubagent } = useApp();
+  const { livePlan, isRunning, activeSessionId, subagents, interruptSubagent, viewSubagents } = useApp();
   const done = livePlan.filter((item) => item.status === 'completed').length;
-  const activeAgents = subagents.filter((agent) => ['pending', 'running', 'waiting'].includes(agent.status));
-  if (!activeSessionId || ((!isRunning || livePlan.length === 0 || done === livePlan.length) && subagents.length === 0)) return null;
+  const activeAgents = subagents.filter(isSubagentActive);
+  if (!activeSessionId || ((!isRunning || livePlan.length === 0 || done === livePlan.length) && activeAgents.length === 0)) return null;
   const current = livePlan.find((item) => item.status === 'in_progress')
     ?? livePlan.find((item) => item.status !== 'completed');
 
@@ -34,14 +35,14 @@ export const TaskDock: React.FC = () => {
         ))}</ol>}
         {subagents.length > 0 && <div className="border-t border-[var(--border)] pt-2 space-y-1">
           {subagents.map((agent) => {
-            const active = ['pending', 'running', 'waiting'].includes(agent.status);
+            const active = isSubagentActive(agent);
             return <div key={agent.id} className="flex items-center gap-2 py-1 text-xs">
               {active ? <Loader2 size={12} className="animate-spin shrink-0" />
                 : agent.status === 'completed' ? <Check size={12} className="text-[var(--success)] shrink-0" />
                   : <AlertCircle size={12} className="text-[var(--destructive)] shrink-0" />}
-              <span className="min-w-0 flex-1 truncate" title={`${agent.path} · ${agent.role}`}>{agent.taskName} <span className="text-[var(--muted-foreground)]">· {agent.role}</span></span>
+              <button type="button" onClick={() => viewSubagents(agent.id)} className="min-w-0 flex-1 truncate text-left hover:underline" title={`View ${agent.path} · ${agent.role}`}>{agent.taskName} <span className="text-[var(--muted-foreground)]">· {agent.role}</span></button>
               <span className="text-[10px] text-[var(--muted-foreground)]">{agent.status}</span>
-              {active && <button type="button" title={`Stop ${agent.taskName}`} onClick={() => void interruptSubagent(agent.id)} className="grid size-6 place-items-center rounded hover:bg-[var(--accent)]"><Square size={10} /></button>}
+              {active && <button type="button" disabled={agent.status === 'stopping'} title={`Stop ${agent.taskName}`} onClick={() => void interruptSubagent(agent.id)} className="grid size-6 place-items-center rounded hover:bg-[var(--accent)] disabled:opacity-50"><Square size={10} /></button>}
             </div>;
           })}
         </div>}

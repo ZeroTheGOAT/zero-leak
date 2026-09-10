@@ -1,6 +1,5 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { QuestionPrompt } from '../src/components/chat/QuestionPrompt';
 import { PermissionPrompt } from '../src/components/chat/PermissionPrompt';
@@ -17,8 +16,8 @@ beforeEach(() => {
 });
 it('keeps a failed answer and displays a visible retry message', async () => {
   render(<QuestionPrompt />);
-  await userEvent.type(screen.getByRole('textbox'), 'Revision B');
-  await userEvent.click(screen.getByRole('button', { name: 'Send your answer to the agent' }));
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Revision B' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send your answer to the agent' }));
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('not delivered'));
   expect(screen.getByRole('textbox')).toHaveProperty('value', 'Revision B');
   expect(screen.getByRole('button')).toHaveProperty('disabled', false);

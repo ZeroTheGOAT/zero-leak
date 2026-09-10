@@ -617,9 +617,9 @@ pub fn load_settings(conn: &Connection) -> CoreResult<AppSettings> {
         },
         None => defaults,
     };
-    // What the operator last chose is what stands. Public egress is audited
-    // and counted by §11 either way, so no deployment clamp is applied here.
-    Ok(serde_json::from_value(merged)?)
+    let mut settings = serde_json::from_value(merged)?;
+    crate::registry::constrain_subagents(&mut settings);
+    Ok(settings)
 }
 
 pub fn save_settings(conn: &Connection, s: &AppSettings) -> CoreResult<()> {
@@ -1155,7 +1155,9 @@ pub fn sessions(conn: &Connection) -> CoreResult<Vec<StoredSession>> {
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, title, mode, use_memories, contribute_memories,
                 pinned, archived, created_at, updated_at
-         FROM sessions ORDER BY updated_at DESC",
+         FROM sessions WHERE NOT EXISTS (
+             SELECT 1 FROM subagents WHERE subagents.session_id = sessions.id
+         ) ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -2957,6 +2959,21 @@ mod conversation {
     fn say(conn: &Connection, id: &str, sender: &str, content: &str, at: i64) {
         add_message(conn, id, sender, content, &MessageExtra::default(), at)
             .expect("a turn is recorded");
+    }
+
+    #[test]
+    fn child_transcripts_stay_out_of_the_root_chat_sidebar() {
+        let c = store();
+        touch_session(&c, "root", None, AgentMode::Agent, "Main task", 1).unwrap();
+        let control = crate::multi_agent::MultiAgentControl::default();
+        let child = control.reserve("root", "root", "p", None, "inspect", SubagentRole::Explorer, 1, 1).unwrap();
+        upsert_subagent(&c, &child).unwrap();
+        touch_session(&c, &child.session_id, None, AgentMode::Agent, "Delegated task", 2).unwrap();
+        say(&c, &child.session_id, "agent", "Evidence from the child", 3);
+        let roots = sessions(&c).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, "root");
+        assert_eq!(session_messages(&c, &child.session_id, 10).unwrap()[0].content, "Evidence from the child");
     }
 
     #[test]

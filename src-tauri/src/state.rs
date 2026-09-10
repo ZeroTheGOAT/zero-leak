@@ -118,6 +118,10 @@ impl RunHandle {
         self.models.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    pub fn release_models(&self) {
+        self.models.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     /// Replaces the run's published plan. Returns the stored copy so the
     /// emitter can send exactly what was validated, not a re-read.
     ///
@@ -304,6 +308,8 @@ pub struct AppState {
     /// the admission decision honest; requests against an already-resident
     /// model never take this lock at all.
     pub model_load_lock: tokio::sync::Mutex<()>,
+    /// One inference request at a time keeps parent/child KV work bounded.
+    pub inference_lock: tokio::sync::Mutex<()>,
 
     /// Permission requests awaiting an answer from the UI. §9 — a run that asks
     /// blocks here until the user decides; there is no default-allow path.
@@ -395,6 +401,7 @@ impl AppState {
             previews: crate::preview::Previews::new(),
             dev_servers: crate::devserver::DevServers::new(),
             model_load_lock: tokio::sync::Mutex::new(()),
+            inference_lock: tokio::sync::Mutex::new(()),
             permissions: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             pending_changes: Mutex::new(HashMap::new()),

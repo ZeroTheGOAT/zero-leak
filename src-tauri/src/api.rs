@@ -484,24 +484,7 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         }
         "subagent_interrupt" => {
             let root = arg::<String>(args, "rootSessionId")?;
-            let child = st.multi_agent.get(&arg::<String>(args, "target")?, &root)?;
-            if let Some(run_id) = child.run_id.as_deref() {
-                st.cancel_run(run_id);
-                for descendant in st.multi_agent.descendant_runs(run_id) {
-                    st.cancel_run(&descendant);
-                }
-                if let Some(interrupted) = st.multi_agent.complete_run(
-                    run_id,
-                    String::new(),
-                    Some("Interrupted by the operator.".into()),
-                    child.model_id.clone(),
-                ) {
-                    crate::multi_agent::persist(st, &interrupted);
-                    crate::multi_agent::emit(st, &interrupted);
-                    return ok(interrupted);
-                }
-            }
-            ok(child)
+            ok(crate::multi_agent::interrupt(st, &root, &arg::<String>(args, "target")?)?)
         }
 
         // §6. The conversation is stored by the core, so the transcript on
@@ -934,7 +917,8 @@ mod command_table {
 fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     let before = st.settings();
     let current = serde_json::to_value(&before)?;
-    let merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    let mut merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    registry::constrain_subagents(&mut merged);
     if before.mcp_servers != merged.mcp_servers {
         let mut ids = std::collections::HashSet::new();
         for server in &merged.mcp_servers {

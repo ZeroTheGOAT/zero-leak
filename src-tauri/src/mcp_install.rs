@@ -1,7 +1,7 @@
 //! Operator-triggered npm setup. Never invoked by an agent or at MCP launch.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -84,7 +84,7 @@ pub async fn install(st: &Arc<AppState>, spec: &str, node_path: Option<String>) 
     let id = format!("mcp-{}", uuid::Uuid::new_v4());
     let dir = crate::registry::config_dir().join("mcp").join(&id);
     std::fs::create_dir_all(&dir)?;
-    let started = Instant::now();
+    let started = crate::state::now_ms();
     let installed = install_into(&node, &cli, &dir, spec, name).await;
     st.audit(ToolName::RunCommand, format!("operator npm MCP installation: {spec}"),
         if installed.is_ok() { "ok" } else { "failed" }, started, "", None, None, None);

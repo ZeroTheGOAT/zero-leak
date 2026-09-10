@@ -2,15 +2,16 @@ import React, { useMemo } from 'react';
 import { FileImage, FileText, Share2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { collectConversationSources } from '../chat/conversationSources';
+import { SubagentSection } from '../chat/SubagentSection';
 
 export const ConversationSourcesView: React.FC = () => {
-  const { activeSessionId, messages, openDocumentAt, openTab } = useApp();
+  const { activeSessionId, messages, openDocumentAt, openTab, subagents } = useApp();
   const sources = useMemo(() => collectConversationSources(messages), [messages]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[var(--background)]">
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {!activeSessionId || sources.length === 0 ? (
+        {!activeSessionId || (sources.length === 0 && subagents.length === 0) ? (
           <div className="flex h-full flex-col items-center justify-center p-8 text-center">
             <Share2 size={24} className="mb-3 text-[var(--border)]" />
             <p className="text-[12px] text-[var(--muted-foreground)]">
@@ -18,7 +19,9 @@ export const ConversationSourcesView: React.FC = () => {
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-[var(--border)] px-4">
+          <div className="px-4 pb-4">
+            <SubagentSection />
+            {sources.length > 0 && <h2 className="pt-4 text-[13px] font-medium text-[var(--muted-foreground)]">Sources</h2>}
             {sources.map((source) => {
               const pages = source.pages.slice(0, 6);
               const pageLabel = pages.length > 0

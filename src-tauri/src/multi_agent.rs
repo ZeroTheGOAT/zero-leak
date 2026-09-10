@@ -32,8 +32,7 @@ struct Inner {
     mailboxes: HashMap<String, VecDeque<String>>,
 }
 
-/// Shared by every run in the process. Scope is still per root session because
-/// every query and capacity check requires the root id captured on the record.
+/// Queries stay root-scoped; capacity is shared by every chat on this device.
 pub struct MultiAgentControl {
     inner: Mutex<Inner>,
     changed: Notify,
@@ -101,6 +100,9 @@ impl MultiAgentControl {
             .get(current_session_id)
             .and_then(|id| inner.agents.get(id))
             .cloned();
+        if parent.as_ref().is_some_and(|agent| agent.root_session_id != root_session_id) {
+            return Err(CoreError::Denied("A child cannot delegate into another root chat.".into()));
+        }
         let depth = parent.as_ref().map_or(1, |agent| agent.depth.saturating_add(1));
         if depth > max_depth.max(1) {
             return Err(CoreError::Denied(format!(
@@ -111,11 +113,11 @@ impl MultiAgentControl {
         let active = inner
             .agents
             .values()
-            .filter(|agent| agent.root_session_id == root_session_id && !agent.status.is_final())
+            .filter(|agent| !agent.status.is_final())
             .count();
         if active >= max_agents.max(1) as usize {
             return Err(CoreError::Denied(format!(
-                "This chat already has {active} active subagents, the configured limit. Wait for or interrupt one before spawning another."
+                "This workstation already has {active} active subagent(s), the configured limit across all chats. Wait for one to finish before spawning another."
             )));
         }
         let parent_path = parent.as_ref().map_or("/root", |agent| agent.path.as_str());
@@ -160,6 +162,9 @@ impl MultiAgentControl {
         let agent = inner.agents.get_mut(agent_id).ok_or_else(|| {
             CoreError::ExecutionFailed(format!("Subagent '{agent_id}' was not found."))
         })?;
+        if agent.status != SubagentStatus::Pending {
+            return Err(CoreError::Denied("This subagent reservation is no longer pending.".into()));
+        }
         agent.run_id = Some(run_id.to_string());
         agent.status = SubagentStatus::Running;
         agent.updated_at = now_ms();
@@ -172,6 +177,7 @@ impl MultiAgentControl {
     pub fn fail_reserved(&self, agent_id: &str, error: String) -> Option<SubagentInfo> {
         let mut inner = self.inner.lock().ok()?;
         let agent = inner.agents.get_mut(agent_id)?;
+        if agent.status.is_final() { return Some(agent.clone()); }
         agent.status = SubagentStatus::Failed;
         agent.error = Some(error);
         agent.updated_at = now_ms();
@@ -180,12 +186,18 @@ impl MultiAgentControl {
         Some(out)
     }
 
-    pub fn restart(&self, reference: &str, root_session_id: &str) -> CoreResult<SubagentInfo> {
+    pub fn restart(&self, reference: &str, root_session_id: &str, parent_run_id: &str, max_agents: u32, max_depth: u32) -> CoreResult<SubagentInfo> {
         let mut inner = self.inner.lock().map_err(|_| {
             CoreError::ExecutionFailed("The agent registry lock was poisoned.".into())
         })?;
         let id = resolve(&inner, reference, root_session_id)?.id.clone();
+        if inner.agents.values().filter(|agent| !agent.status.is_final()).count() >= max_agents.max(1) as usize {
+            return Err(CoreError::Denied("The workstation's subagent slots are occupied. Wait for a child to finish before continuing another.".into()));
+        }
         let agent = inner.agents.get_mut(&id).expect("resolved agent");
+        if agent.depth > max_depth.max(1) {
+            return Err(CoreError::Denied("This subagent exceeds the current delegation depth limit.".into()));
+        }
         if !agent.status.is_final() {
             return Err(CoreError::Denied(format!(
                 "Agent '{}' is already active; use send_message to steer it.", agent.path
@@ -193,6 +205,7 @@ impl MultiAgentControl {
         }
         agent.status = SubagentStatus::Pending;
         agent.run_id = None;
+        agent.parent_run_id = parent_run_id.to_string();
         agent.result.clear();
         agent.error = None;
         agent.updated_at = now_ms();
@@ -211,7 +224,11 @@ impl MultiAgentControl {
         let mut inner = self.inner.lock().ok()?;
         let id = inner.run_to_agent.get(run_id)?.clone();
         let agent = inner.agents.get_mut(&id)?;
-        agent.status = if error.is_some() {
+        // A late completion from a prior turn must not finish a restarted child.
+        if agent.run_id.as_deref() != Some(run_id) || agent.status.is_final() { return None; }
+        agent.status = if agent.status == SubagentStatus::Stopping {
+            SubagentStatus::Interrupted
+        } else if error.is_some() {
             if error.as_deref().is_some_and(|e| e.contains("cancel")) {
                 SubagentStatus::Interrupted
             } else {
@@ -251,6 +268,20 @@ impl MultiAgentControl {
             CoreError::ExecutionFailed("The agent registry lock was poisoned.".into())
         })?;
         resolve(&inner, reference, root_session_id).cloned()
+    }
+
+    pub fn request_stop(&self, reference: &str, root_session_id: &str) -> CoreResult<SubagentInfo> {
+        let mut inner = self.inner.lock().map_err(|_| CoreError::ExecutionFailed("The agent registry lock was poisoned.".into()))?;
+        let id = resolve(&inner, reference, root_session_id)?.id.clone();
+        let agent = inner.agents.get_mut(&id).expect("resolved agent");
+        if !agent.status.is_final() {
+            // Keep the slot until the running turn acknowledges cancellation.
+            agent.status = if agent.run_id.is_some() { SubagentStatus::Stopping } else { SubagentStatus::Interrupted };
+            agent.updated_at = now_ms();
+        }
+        let out = agent.clone();
+        self.changed.notify_waiters();
+        Ok(out)
     }
 
     pub fn list(&self, root_session_id: &str, prefix: Option<&str>) -> Vec<SubagentInfo> {
@@ -310,7 +341,7 @@ impl MultiAgentControl {
             CoreError::ExecutionFailed("The agent registry lock was poisoned.".into())
         })?;
         let id = resolve(&inner, reference, root_session_id)?.id.clone();
-        if inner.agents.get(&id).is_some_and(|agent| agent.status.is_final()) {
+        if inner.agents.get(&id).is_some_and(|agent| agent.status.is_final() || agent.status == SubagentStatus::Stopping) {
             return Err(CoreError::Denied(
                 "That agent is no longer running; use followup_task to continue its thread.".into(),
             ));
@@ -344,6 +375,11 @@ impl MultiAgentControl {
     ) -> CoreResult<Vec<SubagentInfo>> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            // Register before inspecting the rows so completion cannot fall
+            // between the state read and the notification subscription.
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let rows = if references.is_empty() {
                 self.list(root_session_id, None)
             } else {
@@ -352,10 +388,10 @@ impl MultiAgentControl {
                     .map(|reference| self.get(reference, root_session_id))
                     .collect::<CoreResult<Vec<_>>>()?
             };
-            if rows.iter().any(|agent| agent.status.is_final()) {
+            if rows.is_empty() || rows.iter().any(|agent| agent.status.is_final()) {
                 return Ok(rows);
             }
-            if tokio::time::timeout_at(deadline, self.changed.notified()).await.is_err() {
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 return Ok(rows);
             }
         }
@@ -417,7 +453,7 @@ pub fn emit(st: &AppState, agent: &SubagentInfo) {
         },
     );
     let (status, error) = match agent.status {
-        SubagentStatus::Pending | SubagentStatus::Running | SubagentStatus::Waiting => {
+        SubagentStatus::Pending | SubagentStatus::Running | SubagentStatus::Waiting | SubagentStatus::Stopping => {
             (StepStatus::Running, None)
         }
         SubagentStatus::Completed => (StepStatus::Done, None),
@@ -457,6 +493,16 @@ pub fn persist(st: &AppState, agent: &SubagentInfo) {
     }
 }
 
+pub fn interrupt(st: &AppState, root: &str, target: &str) -> CoreResult<SubagentInfo> {
+    let child = st.multi_agent.request_stop(target, root)?;
+    if let Some(run_id) = &child.run_id {
+        if !child.status.is_final() { crate::agent::cancel(st, run_id)?; }
+    }
+    persist(st, &child);
+    emit(st, &child);
+    Ok(child)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +521,55 @@ mod tests {
             .reserve("root-a", "root-a", "run-a", None, "explore", SubagentRole::Explorer, 1, 2)
             .unwrap();
         assert!(control.reserve("root-a", "root-a", "run-a", None, "review", SubagentRole::Reviewer, 1, 2).is_err());
+        assert!(control.reserve("root-b", "root-b", "run-b", None, "review", SubagentRole::Reviewer, 1, 2).is_err());
         assert!(control.get(&first.id, "root-b").is_err());
+    }
+
+    #[test]
+    fn stop_keeps_the_slot_until_completion_and_cannot_restart_early() {
+        let control = MultiAgentControl::default();
+        let child = control.reserve("root", "root", "parent-1", None, "work", SubagentRole::Coder, 1, 1).unwrap();
+        control.attach_run(&child.id, "child-1").unwrap();
+        assert_eq!(control.request_stop(&child.id, "root").unwrap().status, SubagentStatus::Stopping);
+        assert!(control.restart(&child.id, "root", "parent-2", 1, 1).is_err());
+        assert!(control.reserve("other", "other", "p", None, "extra", SubagentRole::Default, 1, 1).is_err());
+        assert_eq!(control.complete_run("child-1", String::new(), Some("Interrupted by operator".into()), None).unwrap().status, SubagentStatus::Interrupted);
+        assert!(control.restart(&child.id, "root", "parent-2", 1, 1).is_ok());
+    }
+
+    #[test]
+    fn prior_completion_cannot_end_a_restarted_child_or_deliver_twice() {
+        let control = MultiAgentControl::default();
+        let child = control.reserve("root", "root", "parent-1", None, "work", SubagentRole::Coder, 1, 1).unwrap();
+        control.attach_run(&child.id, "child-1").unwrap();
+        control.complete_run("child-1", "First result".into(), None, None).unwrap();
+        assert!(control.complete_run("child-1", "Duplicate".into(), None, None).is_none());
+        assert_eq!(control.drain_messages("root").len(), 1);
+        control.restart(&child.id, "root", "parent-2", 1, 1).unwrap();
+        control.attach_run(&child.id, "child-2").unwrap();
+        assert!(control.complete_run("child-1", "Late".into(), None, None).is_none());
+        let current = control.get(&child.id, "root").unwrap();
+        assert_eq!(current.status, SubagentStatus::Running);
+        assert_eq!(current.parent_run_id, "parent-2");
+        assert_eq!(control.descendant_runs("parent-2"), vec!["child-2"]);
+    }
+
+    #[test]
+    fn a_cancelled_reservation_cannot_start_and_restarts_obey_global_capacity() {
+        let control = MultiAgentControl::default();
+        let first = control.reserve("root", "root", "p", None, "first", SubagentRole::Coder, 1, 1).unwrap();
+        assert_eq!(control.request_stop(&first.id, "root").unwrap().status, SubagentStatus::Interrupted);
+        assert!(control.attach_run(&first.id, "late-launch").is_err());
+        let second = control.reserve("other", "other", "p2", None, "second", SubagentRole::Coder, 1, 1).unwrap();
+        assert!(control.restart(&first.id, "root", "p3", 1, 1).is_err());
+        assert!(control.reserve("other", &second.session_id, "p2", None, "nested", SubagentRole::Coder, 2, 1).is_err());
+        assert!(control.reserve("root", &second.session_id, "p2", None, "foreign", SubagentRole::Coder, 2, 2).is_err());
+    }
+
+    #[tokio::test]
+    async fn waiting_with_no_children_returns_without_a_timeout() {
+        let control = MultiAgentControl::default();
+        let rows = tokio::time::timeout(Duration::from_millis(100), control.wait_for("root", &[], Duration::from_secs(60))).await.unwrap().unwrap();
+        assert!(rows.is_empty());
     }
 }

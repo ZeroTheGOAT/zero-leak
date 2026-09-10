@@ -5,6 +5,7 @@ import {
   FileText,
   Brain,
   FolderTree,
+  GitFork,
   Library,
   Maximize2,
   Minimize2,
@@ -30,6 +31,7 @@ import { AuditView } from './AuditView';
 import { FilePreview } from './FilePreview';
 import { WorkflowView } from './WorkflowView';
 import { ConversationSourcesView } from './ConversationSourcesView';
+import { SubagentsView } from './SubagentsView';
 
 const TAB_META: Record<
   PanelTabKind,
@@ -58,8 +60,9 @@ const TAB_META: Record<
     label: 'Sources',
     icon: Share2,
     tone: 'text-[var(--muted-foreground)]',
-    hint: 'Every file and citation attached to this conversation',
+    hint: 'Files, citations and sub-agents in this conversation',
   },
+  subagents: { label: 'Sub-agents', icon: GitFork, tone: 'text-[var(--muted-foreground)]', hint: 'Delegated tasks, live activity and saved chats' },
   file: {
     label: 'File',
     icon: File,
@@ -109,6 +112,8 @@ const ORDER: PanelTabKind[] = [
   'review',
   'terminal',
   'files',
+  'sources',
+  'subagents',
   'document',
   'artifacts',
   'audit',
@@ -401,6 +406,7 @@ export const RightPanel: React.FC = () => {
             {current.kind === 'terminal' && <SandboxConsole />}
             {current.kind === 'files' && <FileExplorerView />}
             {current.kind === 'sources' && <ConversationSourcesView />}
+            {current.kind === 'subagents' && <SubagentsView />}
             {current.kind === 'file' && <FilePreview path={current.filePath} />}
             {current.kind === 'document' && <DocumentViewer documentId={current.documentId} />}
             {current.kind === 'knowledge' && <KnowledgeView />}

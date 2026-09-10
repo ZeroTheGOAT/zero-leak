@@ -1326,11 +1326,40 @@ async fn wait_for_cancel(st: &AppState, run_id: &str) {
     }
 }
 
+async fn inference_slot(st: &AppState) -> CoreResult<tokio::sync::MutexGuard<'_, ()>> {
+    let Some((run_id, session_id)) = crate::state::current_run() else {
+        return Ok(st.inference_lock.lock().await);
+    };
+    if st.is_run_cancelled(&run_id) { return Err(CoreError::Denied("The run was cancelled.".into())); }
+    if let Ok(guard) = st.inference_lock.try_lock() { return Ok(guard); }
+    st.emit("agent://phase", RunPhase {
+        run_id: run_id.clone(), session_id: session_id.clone(), phase: RunPhaseKind::Waiting,
+        label: Some("Waiting for the local model to finish another request".into()),
+    });
+    let guard = tokio::select! {
+        guard = st.inference_lock.lock() => guard,
+        _ = wait_for_cancel(st, &run_id) => return Err(CoreError::Denied("The run was cancelled.".into())),
+    };
+    st.emit("agent://phase", RunPhase { run_id, session_id, phase: RunPhaseKind::Reasoning, label: None });
+    Ok(guard)
+}
+
+/// Stop also cancels the wait for response headers, before streaming begins.
+async fn send_for_run(st: &AppState, request: reqwest::RequestBuilder) -> CoreResult<reqwest::Response> {
+    if let Some((run_id, _)) = crate::state::current_run() {
+        tokio::select! {
+            response = request.send() => Ok(response?),
+            _ = wait_for_cancel(st, &run_id) => Err(CoreError::Denied("The run was cancelled.".into())),
+        }
+    } else { Ok(request.send().await?) }
+}
+
 pub async fn chat(
     st: &AppState,
     req: ChatRequest,
     on_delta: Option<DeltaSink<'_>>,
 ) -> CoreResult<ChatResult> {
+    let _inference = inference_slot(st).await?;
     ensure_loaded(st, &req.model_id).await?;
     let (base, key, dest) = endpoint(st, &req.model_id)?;
 
@@ -1379,7 +1408,7 @@ pub async fn chat(
     if let Some(k) = &key {
         rb = rb.bearer_auth(k);
     }
-    let resp = rb.send().await?;
+    let resp = send_for_run(st, rb).await?;
     let resp = check_status(resp).await?;
 
     // Captured before the wait: the task-local names the agent run whose
@@ -1598,6 +1627,7 @@ pub async fn embed(st: &AppState, texts: &[String]) -> CoreResult<Vec<Vec<f32>>>
             ))?
     };
 
+    let _inference = inference_slot(st).await?;
     ensure_loaded(st, &model_id).await?;
     let (base, key, dest) = endpoint(st, &model_id)?;
     let url = format!("{base}/v1/embeddings");
@@ -1607,7 +1637,7 @@ pub async fn embed(st: &AppState, texts: &[String]) -> CoreResult<Vec<Vec<f32>>>
     if let Some(k) = &key {
         rb = rb.bearer_auth(k);
     }
-    let resp = check_status(rb.send().await?).await?;
+    let resp = check_status(send_for_run(st, rb).await?).await?;
     let bytes = resp.bytes().await?;
     st.count_request(dest, bytes.len() as u64);
     let v: Value = serde_json::from_slice(&bytes)?;
@@ -1658,6 +1688,7 @@ pub async fn vision(
             "No image data was supplied, so nothing was transcribed.".into(),
         ));
     }
+    let _inference = inference_slot(st).await?;
     ensure_loaded(st, model_id).await?;
     let (base, key, dest) = endpoint(st, model_id)?;
 
@@ -1683,7 +1714,7 @@ pub async fn vision(
         rb = rb.bearer_auth(k);
     }
 
-    let resp = check_status(rb.send().await?).await?;
+    let resp = check_status(send_for_run(st, rb).await?).await?;
     let bytes = resp.bytes().await?;
     st.count_request(dest, bytes.len() as u64);
     let out = parse_completion(&serde_json::from_slice(&bytes)?, model_id)?;

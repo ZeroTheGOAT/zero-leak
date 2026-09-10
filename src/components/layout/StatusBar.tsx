@@ -2,6 +2,7 @@ import React from 'react';
 import { Cpu, HardDrive, Laptop, MemoryStick, Loader2, AlertTriangle, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatDuration } from '../../services/registry';
+import { isSubagentActive } from '../../services/subagents';
 
 const Meter: React.FC<{ used: number; total: number; warn?: boolean }> = ({ used, total, warn }) => {
   const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
@@ -29,6 +30,7 @@ export const StatusBar: React.FC = () => {
     anyRunning,
     runningSessionIds,
     liveSteps,
+    subagents,
     failures,
     dismissFailure,
     coreStatus,
@@ -45,6 +47,7 @@ export const StatusBar: React.FC = () => {
   // than naming a step that belongs to a conversation the operator left.
   const currentStep = liveSteps.filter((s) => s.status === 'running').slice(-1)[0];
   const latest = failures[0];
+  const activeChildren = subagents.filter(isSubagentActive).length;
 
   const gb = (mb: number) => (mb / 1024).toFixed(1);
 
@@ -65,6 +68,8 @@ export const StatusBar: React.FC = () => {
             <span className="truncate max-w-[380px]">
               {currentStep
                 ? currentStep.title
+                : activeChildren > 0
+                  ? `${activeChildren} sub-agent${activeChildren === 1 ? '' : 's'} working`
                 : runningSessionIds.length > 1
                   ? `Working in ${runningSessionIds.length} chats`
                   : 'Working in another chat'}

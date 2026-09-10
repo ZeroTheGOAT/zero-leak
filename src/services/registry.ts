@@ -335,9 +335,8 @@ export const toolByName = (name: string): ToolDescriptor | undefined =>
 
 export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = {
   workingDir: 'C:/zeroD/sandbox',
-  // Egress follows the operator's Settings choice — default on. Mirrors
-  // registry.rs; shown only until the core answers `sandbox_policy`.
-  networkEnabled: true,
+  // Mirrors the local-only native default until the core answers.
+  networkEnabled: false,
   timeoutSec: 1800,
   maxMemoryMb: 4096,
   maxProcesses: 8,
@@ -370,10 +369,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   allowPrivateServer: false,
   privateServerUrl: '',
   privateServerName: '',
-  blockPublicInternet: false,
+  blockPublicInternet: true,
   allowReplicatedStore: false,
 
-  webSearchMode: 'direct',
+  webSearchMode: 'disabled',
   webSearchProvider: 'brave',
   webSearchApiKeyEnv: 'BRAVE_SEARCH_API_KEY',
   mcpServers: [],
@@ -381,12 +380,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultMode: 'plan',
   approvalPolicy: 'ask_always',
   multiAgentEnabled: true,
-  maxSubagents: 4,
-  maxSubagentDepth: 2,
+  maxSubagents: 1,
+  maxSubagentDepth: 1,
   guardRules: [],
 
   sandboxRoot: DEFAULT_SANDBOX_POLICY.workingDir,
-  sandboxNetwork: true,
+  sandboxNetwork: false,
   sandboxTimeoutSec: 1800,
   sandboxMaxMemoryMb: 4096,
 

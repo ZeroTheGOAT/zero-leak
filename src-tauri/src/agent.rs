@@ -1213,6 +1213,20 @@ mod retrieval {
 mod tool_surface {
     use super::*;
 
+    #[test]
+    fn read_only_children_are_offered_only_tools_their_role_can_use() {
+        for role in [SubagentRole::Explorer, SubagentRole::Reviewer, SubagentRole::Document, SubagentRole::Verifier] {
+            let tools = tool_schemas(tool_mode_for_role(AgentMode::Agent, Some(role)), true, 1, "Read report.pdf and generate a workbook", false, &[]);
+            let names: Vec<&str> = tools.iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+            assert!(names.contains(&"read_file"));
+            for denied in ["execute_python", "run_command", "write_file", "edit_file", "generate_xlsx", "spawn_agent"] {
+                assert!(!names.contains(&denied), "{role:?} was offered {denied}");
+            }
+        }
+        assert_eq!(tool_mode_for_role(AgentMode::Agent, Some(SubagentRole::Coder)), AgentMode::Agent);
+        assert_eq!(tool_mode_for_role(AgentMode::Plan, Some(SubagentRole::Coder)), AgentMode::Plan);
+    }
+
     /// Every tool the model is offered must be routed by `dispatch` and named in
     /// the catalogue.
     ///
@@ -1958,6 +1972,7 @@ struct Ctx {
     root_session_id: String,
     agent_id: Option<String>,
     agent_role: Option<SubagentRole>,
+    use_memories: bool,
     thinking_effort: Option<ThinkingEffort>,
     /// This run's reading history. Behind a lock because `dispatch` takes `&Ctx`
     /// and a read has to be visible to a write later in the same round — which is
@@ -5195,12 +5210,16 @@ fn frame_operator_reply(answer: &str) -> (String, bool) {
 fn subagent_role_guidance(role: SubagentRole) -> &'static str {
     match role {
         SubagentRole::Default => "Complete the delegated task and return a concise evidence-backed result to your parent agent.",
-        SubagentRole::Explorer => "Explore read-only. Trace real files and symbols, gather evidence, and do not propose or perform edits.",
+        SubagentRole::Explorer => "Explore read-only. Trace real files and symbols, gather evidence, and return your findings as text. You can reason and answer directly, including simple arithmetic. Do not execute code, propose edits, or write files.",
         SubagentRole::Coder => "Implement the delegated change. Use the shared approval broker for every write, run relevant checks, and report exactly what changed.",
         SubagentRole::Reviewer => "Review read-only for correctness, security, regressions, and missing tests. Cite concrete files and behavior.",
         SubagentRole::Document => "Analyze the delegated local documents read-only. Preserve page/file provenance and never infer another project's context.",
-        SubagentRole::Verifier => "Verify the claimed result read-only. Re-run focused checks and report evidence, failures, and uncertainty without editing.",
+        SubagentRole::Verifier => "Verify the claimed result read-only. Inspect files and recorded check output, then report evidence, failures, and uncertainty as text. Ask the parent to execute any additional checks; do not execute code or edit files.",
     }
+}
+
+fn tool_mode_for_role(mode: AgentMode, role: Option<SubagentRole>) -> AgentMode {
+    if role.is_some_and(SubagentRole::is_read_only) { AgentMode::Plan } else { mode }
 }
 
 fn forked_parent_context(ctx: &Ctx, fork_turns: &str) -> CoreResult<String> {
@@ -5243,6 +5262,9 @@ async fn launch_subagent(
     model: Option<String>,
     effort: Option<ThinkingEffort>,
 ) -> CoreResult<SubagentInfo> {
+    // Share the already chosen coordinator on a small GPU. An explicit
+    // override is still honored, but automatic delegation never adds a model.
+    let model = model.or_else(|| (!ctx.model_id.is_empty()).then(|| ctx.model_id.clone()));
     let inherited = forked_parent_context(ctx, fork_turns)?;
     let mut prompt = format!(
         "[Delegated agent: {}]\nRole: {:?}\n{}\n\nTask:\n{}",
@@ -5262,7 +5284,7 @@ async fn launch_subagent(
             mode: AgentMode::Agent,
             prompt,
             attachments: ctx.attachments.clone(),
-            use_memories: true,
+            use_memories: ctx.use_memories,
             // Child agents never independently persist durable memory. The root
             // synthesizes once after collecting their results.
             contribute_memories: false,
@@ -5275,10 +5297,10 @@ async fn launch_subagent(
         .await;
     match started {
         Ok(run) => {
-            let running = ctx.st.multi_agent.attach_run(&agent.id, &run.run_id)?;
-            crate::multi_agent::persist(&ctx.st, &running);
-            crate::multi_agent::emit(&ctx.st, &running);
-            Ok(running)
+            // The child is registered before its task starts. It may already
+            // have completed by the time the launch reply reaches its parent.
+            let _ = run;
+            ctx.st.multi_agent.get(&agent.id, &ctx.root_session_id)
         }
         Err(error) => {
             if let Some(failed) = ctx.st.multi_agent.fail_reserved(&agent.id, error.message()) {
@@ -5422,7 +5444,8 @@ blocks you, briefly — the operator reads this mid-task.".into(),
 
         /* ---- Codex-derived child-agent control plane ---- */
         "spawn_agent" => {
-            let settings = ctx.st.settings();
+            let mut settings = ctx.st.settings();
+            crate::registry::constrain_subagents(&mut settings);
             if !settings.multi_agent_enabled {
                 return Err(CoreError::Denied(
                     "Multi-agent work is disabled in Settings.".into(),
@@ -5488,7 +5511,10 @@ blocks you, briefly — the operator reads this mid-task.".into(),
         "followup_task" => {
             let target = need("target")?;
             let message = need("message")?;
-            let agent = ctx.st.multi_agent.restart(&target, &ctx.root_session_id)?;
+            let mut settings = ctx.st.settings();
+            crate::registry::constrain_subagents(&mut settings);
+            if !settings.multi_agent_enabled { return Err(CoreError::Denied("Multi-agent work is disabled in Settings.".into())); }
+            let agent = ctx.st.multi_agent.restart(&target, &ctx.root_session_id, &ctx.run.run_id, settings.max_subagents, settings.max_subagent_depth)?;
             crate::multi_agent::persist(&ctx.st, &agent);
             crate::multi_agent::emit(&ctx.st, &agent);
             let running = launch_subagent(
@@ -5505,30 +5531,14 @@ blocks you, briefly — the operator reads this mid-task.".into(),
 
         "interrupt_agent" => {
             let target = need("target")?;
-            let agent = ctx.st.multi_agent.get(&target, &ctx.root_session_id)?;
-            let run_id = agent.run_id.clone().ok_or_else(|| {
-                CoreError::Denied(format!("Agent '{}' has no active run.", agent.path))
-            })?;
-            ctx.st.cancel_run(&run_id);
-            for descendant in ctx.st.multi_agent.descendant_runs(&run_id) {
-                ctx.st.cancel_run(&descendant);
-            }
-            let interrupted = ctx
-                .st
-                .multi_agent
-                .complete_run(
-                    &run_id,
-                    String::new(),
-                    Some("The parent agent cancelled this child run.".into()),
-                    agent.model_id.clone(),
-                )
-                .unwrap_or(agent);
-            crate::multi_agent::persist(&ctx.st, &interrupted);
-            crate::multi_agent::emit(&ctx.st, &interrupted);
-            Ok((format!("Interrupted {}.", interrupted.path), vec![]))
+            let child = crate::multi_agent::interrupt(&ctx.st, &ctx.root_session_id, &target)?;
+            Ok((format!("Stop requested for {}. Wait for its final status before reusing the slot.", child.path), vec![]))
         }
 
         "wait_agent" => {
+            // This run is not generating while it waits. Let the child use an
+            // OCR/embedding specialist; the next parent request re-pins its model.
+            ctx.run.release_models();
             let targets = a
                 .get("targets")
                 .and_then(Value::as_array)
@@ -5553,15 +5563,20 @@ blocks you, briefly — the operator reads this mid-task.".into(),
                 RunPhaseKind::Waiting,
                 Some("Waiting for delegated agents"),
             );
-            let rows = ctx
+            let wait = ctx
                 .st
                 .multi_agent
                 .wait_for(
                     &ctx.root_session_id,
                     &targets,
                     std::time::Duration::from_millis(timeout_ms),
-                )
-                .await?;
+                );
+            let rows = tokio::select! {
+                result = wait => result?,
+                _ = async { while !ctx.run.is_cancelled() { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
+                    return Err(CoreError::Denied("The run was cancelled.".into()));
+                }
+            };
             Ok((serde_json::to_string_pretty(&rows)?, vec![]))
         }
 
@@ -8278,8 +8293,11 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
     // the model choice below, which needs the finished prompt to size the turn.
     let integration_settings = st.settings();
     let artifact_intent = history_asked_for_artifact(&history);
+    // Match the offered tools to the backend role guard. Advertising execution
+    // to a read-only child invites a failed tool call it can never resolve.
+    let tool_mode = tool_mode_for_role(input.mode, ctx.agent_role);
     let tools = scope_workflow_tools(&input.prompt, tool_schemas_with_artifact(
-        input.mode,
+        tool_mode,
         ctx.workspace_id.is_some(),
         indexed_docs,
         &input.prompt,
@@ -8310,7 +8328,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         }
     } else if input.mode == AgentMode::Agent && integration_settings.multi_agent_enabled {
         sys.push_str(
-            "\n\nMULTI-AGENT WORK\nFor complex work, delegate concrete independent tasks with spawn_agent. Use explorer, document, reviewer, and verifier roles for read-only work and coder for implementation. Keep the root responsible for decisions and synthesis. After spawning, continue useful independent work, then use one bounded wait_agent call and incorporate the child results. Do not spawn for a task that is smaller than the coordination overhead.\n",
+            "\n\nMULTI-AGENT WORK\nDelegate only when a concrete task benefits from a separate context. Keep the root responsible for decisions and synthesis. The default is one active child across this workstation, with no nested delegation. Children reuse your local model unless explicitly overridden. On a small GPU, call wait_agent after spawning so the child can use memory without competing with your next generation. Reuse completed children through followup_task, and do simple work yourself.\n",
         );
     }
     if !requested_skills.is_empty() {
@@ -8418,7 +8436,11 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
     // before compaction has anything to drop. The tool list is in hand by now
     // (built above with the prompt that describes it), so nothing is guessed.
     let selection_estimate = request_estimate_tokens(&messages, &tools);
-    let decision = think_select_model(&st, &messages, selection_estimate).await?;
+    let decision = if let Some(requested) = input.preferred_model_id.as_deref() {
+        RouteDecision { kind: TaskKind::Reasoning, basis: RouteBasis::Rule, model_id: Some(requested.to_string()), reason: "Using the explicitly selected or inherited local model.".into() }
+    } else {
+        think_select_model(&st, &messages, selection_estimate).await?
+    };
     let kind = decision.kind;
     let model_id = if let Some(requested) = input.preferred_model_id.as_deref() {
         let reg = st.registry.read().unwrap_or_else(|e| e.into_inner());
@@ -9053,6 +9075,16 @@ pub async fn start(st: Arc<AppState>, mut input: StartRunInput) -> CoreResult<Ru
     }
 
     let run_id = new_id("run");
+    if let Some(agent_id) = &input.agent_id {
+        let root = input.root_session_id.as_deref().ok_or_else(|| CoreError::Denied("A child run must retain its root chat.".into()))?;
+        let child = st.multi_agent.get(agent_id, root)?;
+        if child.session_id != input.session_id || child.workspace_id != input.workspace_id || Some(child.role) != input.agent_role {
+            return Err(CoreError::Denied("The child run does not match its reserved chat, project and role.".into()));
+        }
+        let running = st.multi_agent.attach_run(agent_id, &run_id)?;
+        crate::multi_agent::persist(&st, &running);
+        crate::multi_agent::emit(&st, &running);
+    }
     crate::evidence::begin(&st, &run_id, &input)?;
     let handle = st.register_run(&run_id);
 
@@ -9080,6 +9112,7 @@ pub async fn start(st: Arc<AppState>, mut input: StartRunInput) -> CoreResult<Ru
             .unwrap_or_else(|| input.session_id.clone()),
         agent_id: input.agent_id.clone(),
         agent_role: input.agent_role,
+        use_memories: input.use_memories,
         thinking_effort: input.preferred_thinking_effort,
         mode: input.mode,
         // Replaced by `orchestrate` once routing has decided. Nothing reads it

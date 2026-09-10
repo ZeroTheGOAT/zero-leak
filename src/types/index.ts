@@ -393,6 +393,7 @@ export type SubagentStatus =
   | 'pending'
   | 'running'
   | 'waiting'
+  | 'stopping'
   | 'completed'
   | 'failed'
   | 'interrupted';
@@ -822,6 +823,7 @@ export interface Attachment {
 
 export interface ChatMessage {
   id: string;
+  runId?: string;
   sender: 'user' | 'agent' | 'system';
   content: string;
   createdAt: number;
@@ -916,6 +918,7 @@ export type PanelTabKind =
   | 'terminal'
   | 'files'
   | 'sources'
+  | 'subagents'
   | 'file'
   | 'document'
   | 'knowledge'

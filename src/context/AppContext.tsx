@@ -7,6 +7,8 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { isSubagentActive, mergeSubagents } from '../services/subagents';
+import { rehydrate } from '../services/chatHistory';
 import type {
   AgentMode,
   AgentStep,
@@ -46,7 +48,6 @@ import type {
   SettingsPage,
   SovereignStatus,
   SubagentInfo,
-  StoredMessage,
   ToolCallRecord,
   TaskKind,
   ViewName,
@@ -213,52 +214,6 @@ interface LiveRun {
 /** Classification only; this never opens or reads the draft attachment. */
 const draftAttachmentKind = (path: string) =>
   core.localTurnInput(path).type === 'localImage' ? ('image' as const) : ('text' as const);
-
-/**
- * Reads a stored transcript back into the shape the transcript view renders.
- *
- * Attachments arrive as the paths the turn was given. Size and kind are not
- * on the row — they were read off disk when the file was attached — and the
- * transcript shows neither, only the file name, so nothing here is invented
- * to fill a field.
- *
- * The stored plan rides on the message itself and is rendered by the docked
- * task panel, so a reopened chat replays its checklist and the plan-mode
- * handoff card — an unexecuted plan survives the restart that ended the run
- * which drew it.
- *
- * So does the run's activity timeline: when the turn ended, the client that
- * drew the run handed its blocks back to the core (`session_activity_store`),
- * and they are rehydrated onto the message so a reload replays the thinking,
- * steps and commentary instead of flattening the run to its answer. Only
- * agent rows ever carry one; earlier turns simply have none.
- */
-const rehydrate = (m: StoredMessage): ChatMessage => ({
-  id: m.id,
-  // The store's id IS the row id here — the transcript was read back from the
-  // same rows an edit truncates by. That is what makes a reopened chat's own
-  // messages editable again.
-  rowId: m.id,
-  sender: m.sender,
-  content: m.content,
-  createdAt: m.createdAt,
-  activity:
-    m.sender === 'agent' && m.activity && m.activity.length > 0 ? m.activity : undefined,
-  citations: m.citations,
-  modelId: m.modelId,
-  mode: m.mode,
-  elapsedMs: m.elapsedMs,
-  tokensPerSec: m.tokensPerSec,
-  failure: m.failure,
-  plan: m.plan?.length ? m.plan : undefined,
-  attachments: m.attachments?.map((path, i) => ({
-    id: `${m.id}-att-${i}`,
-    path,
-    fileName: path.split(/[\\/]/).pop() ?? path,
-    kind: draftAttachmentKind(path),
-    sizeBytes: 0,
-  })),
-});
 
 /** Zeroed telemetry. Shown only until the core reports real numbers. */
 const EMPTY_HARDWARE: HardwareStatus = {
@@ -500,6 +455,9 @@ interface AppContextValue {
   /** Durable child threads beneath the open root chat. */
   subagents: SubagentInfo[];
   interruptSubagent: (target: string) => Promise<void>;
+  viewSubagents: (target?: string) => void;
+  selectedSubagentId: string | null;
+  subagentChats: Record<string, { messages: ChatMessage[]; live?: LiveRun }>;
 
   /* Permissions (§9) */
   approvalPolicy: ApprovalPolicy;
@@ -827,6 +785,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const runsRef = useRef<Record<string, LiveRun>>({});
   const [runsBySession, setRunsBySession] = useState<Record<string, LiveRun>>({});
   const [subagentsBySession, setSubagentsBySession] = useState<Record<string, SubagentInfo[]>>({});
+  const subagentRegistry = useRef<Record<string, SubagentInfo[]>>({});
+  const [subagentSelection, setSubagentSelection] = useState<{ root: string; id: string } | null>(null);
   /** A repeated completion event must never append the same answer twice. */
   const completedRuns = useRef<Set<string>>(new Set());
   /** Handles the rare case where a very early failure completes before the
@@ -886,6 +846,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     [],
   );
+
+  const receiveSubagents = useCallback((root: string, incoming: SubagentInfo[]) => {
+    const rows = mergeSubagents(subagentRegistry.current[root] ?? [], incoming, root);
+    subagentRegistry.current = { ...subagentRegistry.current, [root]: rows };
+    setSubagentsBySession(subagentRegistry.current);
+    // Reservation arrives before the child starts emitting text and actions.
+    // Keep collecting even while the operator is viewing the parent or another chat.
+    for (const agent of rows) {
+      if (!isSubagentActive(agent) && (!agent.runId || completedRuns.current.has(agent.runId))) {
+        delete runsRef.current[agent.sessionId];
+      }
+      if (!isSubagentActive(agent) || (agent.runId && completedRuns.current.has(agent.runId))) continue;
+      const current = runsRef.current[agent.sessionId];
+      if (!current) {
+        runsRef.current[agent.sessionId] = {
+          runId: agent.runId ?? '', steps: [], activity: [], plan: [], phase: null,
+          lastEventAt: agent.updatedAt,
+        };
+      } else if (agent.runId && current.runId !== agent.runId) {
+        runsRef.current[agent.sessionId] = { ...current, runId: agent.runId };
+      }
+    }
+    setRunsBySession({ ...runsRef.current });
+  }, []);
 
   /* Panel */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
@@ -1288,12 +1272,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     void add(
       core.on('agent://subagent', (event) => {
-        setSubagentsBySession((previous) => {
-          const rows = previous[event.rootSessionId] ?? [];
-          const index = rows.findIndex((agent) => agent.id === event.agent.id);
-          const next = index === -1 ? [...rows, event.agent] : rows.map((agent, i) => i === index ? event.agent : agent);
-          return { ...previous, [event.rootSessionId]: next.sort((a, b) => a.path.localeCompare(b.path)) };
-        });
+        receiveSubagents(event.rootSessionId, [event.agent]);
       }),
     );
 
@@ -1322,7 +1301,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelled = true;
       unsubs.forEach((u) => u());
     };
-  }, [mutateLiveRun]);
+  }, [mutateLiveRun, receiveSubagents]);
 
   /* The done event is subscribed for the app's whole lifetime. It reads the
    * current refresh callback through a ref (like `sendRef`): depending on the
@@ -1377,6 +1356,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const messageId = `msg-${done.runId}`;
         const message: ChatMessage = {
           id: messageId,
+          runId: done.runId,
           sender: 'agent',
           content: answer,
           createdAt: Date.now(),
@@ -1503,7 +1483,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     () => activeSessionId ? subagentsBySession[activeSessionId] ?? [] : [],
     [activeSessionId, subagentsBySession],
   );
-  const runningSessionIds = useMemo(() => Object.keys(runsBySession), [runsBySession]);
+  const selectedSubagentId = subagentSelection?.root === activeSessionId ? subagentSelection.id : null;
+  const subagentChats = useMemo(() => Object.fromEntries(subagents.map((agent) => [agent.id, {
+    messages: messagesBySession[agent.sessionId] ?? [],
+    live: runsBySession[agent.sessionId],
+  }])), [subagents, messagesBySession, runsBySession]);
+  const runningSessionIds = useMemo(() => {
+    const roots = new Map(Object.values(subagentsBySession).flat().map((agent) => [agent.sessionId, agent.rootSessionId]));
+    return [...new Set(Object.keys(runsBySession).map((sid) => roots.get(sid) ?? sid))];
+  }, [runsBySession, subagentsBySession]);
   /** The open chat is generating. Another chat being busy does not lock this
    *  one's composer — that is the whole point of concurrent chats. */
   const isRunning = activeLiveRun !== undefined;
@@ -2191,21 +2179,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       core.agent.subagents.interrupt(activeSessionId, target),
     );
     if (!updated) return;
-    setSubagentsBySession((previous) => ({
-      ...previous,
-      [activeSessionId]: (previous[activeSessionId] ?? []).map((agent) =>
-        agent.id === updated.id ? updated : agent,
-      ),
-    }));
-  }, [activeSessionId, guard]);
+    receiveSubagents(activeSessionId, [updated]);
+  }, [activeSessionId, guard, receiveSubagents]);
 
   useEffect(() => {
     if (!activeSessionId || coreStatus.state === 'unavailable') return;
-    void core.agent.subagents
-      .list(activeSessionId)
-      .then((rows) => setSubagentsBySession((previous) => ({ ...previous, [activeSessionId]: rows })))
+    let cancelled = false;
+    const refresh = () => void core.agent.subagents.list(activeSessionId)
+      .then((rows) => { if (!cancelled) receiveSubagents(activeSessionId, rows); })
       .catch(() => {});
-  }, [activeSessionId, coreStatus.state]);
+    refresh();
+    window.addEventListener('sovereign:resync', refresh);
+    return () => { cancelled = true; window.removeEventListener('sovereign:resync', refresh); };
+  }, [activeSessionId, coreStatus.state, receiveSubagents]);
 
   /**
    * §6 Editing a sent user message.
@@ -2393,6 +2379,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     [openSettings, tabs],
   );
+
+  const viewSubagents = useCallback((target?: string) => {
+    if (!activeSessionId || (target && !subagents.some((agent) => agent.id === target))) return;
+    setSubagentSelection(target ? { root: activeSessionId, id: target } : null);
+    openTab('subagents', 'Sub-agents');
+  }, [activeSessionId, subagents, openTab]);
 
   /**
    * Corrects a tab's label once the thing it points at is known.
@@ -2913,6 +2905,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelRun,
       subagents,
       interruptSubagent,
+      viewSubagents,
+      selectedSubagentId,
+      subagentChats,
 
       approvalPolicy,
       setApprovalPolicy,
@@ -3062,6 +3057,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelRun,
       subagents,
       interruptSubagent,
+      viewSubagents,
+      selectedSubagentId,
+      subagentChats,
       approvalPolicy,
       pendingPermissions,
       respondToPermission,

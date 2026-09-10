@@ -72,6 +72,17 @@ pub fn vram_budget_mb() -> u32 {
     sharing_budget(vram_total_mb())
 }
 
+/// A 7 GiB working budget cannot sustain independent child model loads.
+/// Enforce this in the native core even when older saved settings request more.
+pub fn subagent_limits(requested: u32, depth: u32, total_mb: u32) -> (u32, u32) {
+    if total_mb <= 8192 { (1, 1) } else { (requested.clamp(1, 8), depth.clamp(1, 4)) }
+}
+
+pub fn constrain_subagents(settings: &mut AppSettings) {
+    (settings.max_subagents, settings.max_subagent_depth) =
+        subagent_limits(settings.max_subagents, settings.max_subagent_depth, vram_total_mb());
+}
+
 /// Split out from `vram_budget_mb` so the arithmetic is testable without a card.
 fn sharing_budget(total_mb: u32) -> u32 {
     total_mb.saturating_sub(SHARING_RESERVE_MB).max(1)
@@ -384,9 +395,9 @@ pub fn config_dir() -> PathBuf {
 pub fn default_sandbox_policy() -> SandboxPolicy {
     SandboxPolicy {
         working_dir: sovereign_root().join("sandbox").to_string_lossy().replace('\\', "/"),
-        // Egress follows the operator's Settings choice, and the default is on.
-        // Either way §11 counts and audits every public byte.
-        network_enabled: true,
+        // Local-only by default. Child-process containment still needs an OS
+        // network boundary; this flag is not a packet filter.
+        network_enabled: false,
         // A read or a version check is done in seconds; a real build is not.
         // `cargo build`, an `npm run build` over a cold cache, a test suite —
         // these run minutes, and a timeout that kills them mid-build costs the
@@ -534,12 +545,12 @@ pub fn default_settings() -> AppSettings {
         allow_private_server: false,
         private_server_url: String::new(),
         private_server_name: String::new(),
-        block_public_internet: false,
+        block_public_internet: true,
         // The store starts locked. It only unlocks on an explicit, audited
         // operator choice in Settings > Sovereignty.
         allow_replicated_store: false,
 
-        web_search_mode: WebSearchMode::Direct,
+        web_search_mode: WebSearchMode::Disabled,
         web_search_provider: WebSearchProvider::Brave,
         web_search_api_key_env: "BRAVE_SEARCH_API_KEY".into(),
         mcp_servers: Vec::new(),
@@ -547,18 +558,16 @@ pub fn default_settings() -> AppSettings {
         default_mode: AgentMode::Plan,
         approval_policy: ApprovalPolicy::AskAlways,
         multi_agent_enabled: true,
-        // A local workstation has a real VRAM/CPU ceiling. Four open child
-        // threads is enough to split exploration, implementation, and review
-        // while the runtime scheduler remains free to serialize generations.
-        max_subagents: 4,
-        max_subagent_depth: 2,
+        // One active child across the workstation; no nested model workloads.
+        max_subagents: 1,
+        max_subagent_depth: 1,
         // No operator rules by default. The workstation's built-in guards
         // (workspace containment, the sandbox allow list) are unconditional;
         // what goes here is whatever the operator adds in Settings.
         guard_rules: Vec::new(),
 
         sandbox_root: sovereign_root().join("sandbox").to_string_lossy().replace('\\', "/"),
-        sandbox_network: true,
+        sandbox_network: false,
         // 600 s, not 120: a real build or test suite (cargo test, npm test) runs
         // minutes, and a sandbox that kills it at two produces a partial output
         // the model will misread as a failure. Long enough to complete, still
@@ -962,7 +971,6 @@ impl Registry {
         if model.location == ModelLocation::ThisDevice {
             if let Some(trained) = gguf::trained_context(Path::new(&model.source)) { model.trained_context = trained; model.context_size = model.context_size.min(trained); }
         }
-        validate_model_fields(&model)?;
         let id = model.id.clone();
         if id.is_empty() || model.display_name.trim().is_empty() {
             return Err(CoreError::InvalidDocument(
@@ -982,6 +990,9 @@ impl Registry {
                     .into(),
             ));
         }
+        // The arm's own refusal (a URL, a wrong location) is the clearer message,
+        // so the shared field validation runs after it.
+        validate_model_fields(&model)?;
         if model.context_size == 0 || model.trained_context == 0 {
             return Err(CoreError::InvalidDocument(
                 "Context sizes must be greater than zero.".into(),
@@ -1022,7 +1033,6 @@ impl Registry {
         models_root: &str,
     ) -> CoreResult<Vec<ModelEntry>> {
         model.id = model.id.trim().to_string();
-        validate_model_fields(&model)?;
         let id = model.id.clone();
         if id.is_empty() || model.display_name.trim().is_empty() {
             return Err(CoreError::InvalidDocument(
@@ -1041,6 +1051,9 @@ impl Registry {
                 "The server model catalogue only accepts private_endpoint models served off this device.".into(),
             ));
         }
+        // The arm's own refusal (an entry that is not a private_endpoint model)
+        // is the clearer message, so the shared field validation runs after it.
+        validate_model_fields(&model)?;
         if let Some(url) = model.server_url.as_deref() {
             let parsed = reqwest::Url::parse(url.trim()).map_err(|_| {
                 CoreError::InvalidDocument(format!(
@@ -1469,6 +1482,26 @@ model's context size."
 #[cfg(test)]
 mod local_model_catalogue_tests {
     use super::*;
+
+    #[test]
+    fn fresh_installation_defaults_to_local_only_network_policy() {
+        let settings = default_settings();
+        assert!(settings.block_public_internet);
+        assert!(!settings.sandbox_network);
+        assert!(matches!(settings.web_search_mode, WebSearchMode::Disabled));
+        assert!(!default_sandbox_policy().network_enabled);
+        assert_eq!((settings.max_subagents, settings.max_subagent_depth), (1, 1));
+    }
+
+    #[test]
+    fn low_vram_bounds_old_settings_and_unknown_hardware() {
+        for total in [0, 6144, 7168, 8188, 8192] {
+            assert_eq!(subagent_limits(8, 4, total), (1, 1));
+        }
+        assert_eq!(subagent_limits(2, 2, 16384), (2, 2));
+        assert_eq!(subagent_limits(100, 100, 16384), (8, 4));
+        assert_eq!(subagent_limits(0, 0, 16384), (1, 1));
+    }
 
     fn local_model(source: &str) -> ModelEntry {
         ModelEntry {

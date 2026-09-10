@@ -213,7 +213,7 @@ const Markdown: React.FC<{ text: string; muted?: boolean }> = memo(({ text, mute
  * block is what made a run show "Thinking" over and over down the page instead
  * of a settled "Thought for 4.2 s" per round.
  */
-const ActivityFlow: React.FC<{
+export const ActivityFlow: React.FC<{
   blocks: ChatActivityBlock[];
   live?: boolean;
   thinkingLive?: boolean;
@@ -444,7 +444,7 @@ const AttachmentGrid: React.FC<{ attachments: Attachment[]; onRemove?: (path: st
   );
 };
 
-const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => void }> = ({
+export const Message: React.FC<{ msg: ChatMessage; editable?: boolean; onEdit?: () => void }> = ({
   msg,
   editable = false,
   onEdit,
