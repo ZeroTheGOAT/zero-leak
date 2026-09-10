@@ -69,6 +69,57 @@ pub fn kv_geometry(path: &Path) -> Option<KvGeometry> {
     geometry_from(&mut r)
 }
 
+/// Read the model's real training ceiling for the context picker. Values from
+/// an unrelated architecture (e.g. a vision encoder) are never used.
+pub fn trained_context(path: &Path) -> Option<u32> {
+    let mut reader = BufReader::new(File::open(path).ok()?);
+    trained_context_from(&mut reader)
+}
+
+fn trained_context_from<R: Read>(reader: &mut R) -> Option<u32> {
+    let mut magic = [0; 4];
+    reader.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" || ![2, 3].contains(&read_u32(reader)?) { return None; }
+    read_u64(reader)?;
+    let count = read_u64(reader)?;
+    if count > 100_000 { return None; }
+    let mut architecture: Option<String> = None;
+    let mut contexts = std::collections::HashMap::new();
+    for _ in 0..count {
+        let key = read_string(reader)?;
+        let ty = read_u32(reader)?;
+        if key == "general.architecture" && ty == 8 {
+            architecture = Some(read_string(reader)?);
+        } else if key.ends_with(".context_length") && matches!(ty, 0..=5 | 10 | 11) {
+            if let Some(value) = read_int(reader, ty)? { contexts.insert(key, value); }
+        } else { skip_value(reader, ty)?; }
+        if let Some(arch) = &architecture {
+            if let Some(&value) = contexts.get(&format!("{arch}.context_length")) {
+                return (value > 0).then_some(value);
+            }
+        }
+    }
+    None
+}
+
+fn skip_value<R: Read>(reader: &mut R, ty: u32) -> Option<()> {
+    match ty {
+        0 | 1 | 7 => skip(reader, 1),
+        2 | 3 => skip(reader, 2),
+        4 | 5 | 6 => skip(reader, 4),
+        10 | 11 | 12 => skip(reader, 8),
+        8 => { let len = read_u64(reader)?; if len > 16 * 1024 * 1024 { return None; } skip(reader, len) }
+        9 => {
+            let element = read_u32(reader)?;
+            let count = read_u64(reader)?;
+            if element == 9 || count > 1_000_000 { return None; }
+            for _ in 0..count { skip_value(reader, element)?; }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
 /// Reads geometry from any byte source. Split out so a test can hand this a
 /// hand-built header without touching the filesystem.
 fn geometry_from<R: Read>(r: &mut R) -> Option<KvGeometry> {
@@ -82,6 +133,7 @@ fn geometry_from<R: Read>(r: &mut R) -> Option<KvGeometry> {
     read_u32(r)?;
     let _tensor_count = read_u64(r)?;
     let n_kv = read_u64(r)?;
+    if n_kv > 100_000 { return None; }
 
     let mut layers = None;
     let mut heads = None;
@@ -119,9 +171,11 @@ fn geometry_from<R: Read>(r: &mut R) -> Option<KvGeometry> {
                 // of the payload matters for skipping.
                 let elem_ty = read_u32(r)?;
                 let count = read_u64(r)?;
+                if count > 1_000_000 { return None; }
                 let elem_bytes = match elem_ty {
                     0 | 1 => 1u64,
-                    2 | 3 | 4 | 5 => 4,
+                    2 | 3 => 2,
+                    4 | 5 => 4,
                     6 => 4,
                     7 => 1,
                     10 | 11 => 8,
@@ -173,6 +227,7 @@ fn geometry_from<R: Read>(r: &mut R) -> Option<KvGeometry> {
 /// Reads a length-prefixed UTF-8 key/string body.
 fn read_string<R: Read>(r: &mut R) -> Option<String> {
     let len = read_u64(r)?;
+    if len > 16 * 1024 * 1024 { return None; }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf).ok()?;
     String::from_utf8(buf).ok()
@@ -277,6 +332,16 @@ mod tests {
     fn parse(bytes: &[u8]) -> Option<KvGeometry> {
         let mut cursor = std::io::Cursor::new(bytes.to_vec());
         geometry_from(&mut cursor)
+    }
+
+    #[test]
+    fn training_limit_comes_from_the_declared_architecture() {
+        let mut b = Buf(Vec::new());
+        b.0.extend_from_slice(b"GGUF"); b.u32(3); b.u64(0); b.u64(3);
+        b.u32_val("clip.context_length", 512);
+        b.str("general.architecture"); b.u32(8); b.str("qwen3");
+        b.u32_val("qwen3.context_length", 262144);
+        assert_eq!(trained_context_from(&mut std::io::Cursor::new(&b.0)), Some(262144));
     }
 
     #[test]

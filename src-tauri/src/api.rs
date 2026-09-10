@@ -46,8 +46,8 @@ pub static QUITTING: AtomicBool = AtomicBool::new(false);
 pub const COMMANDS: &[&str] = &[
     "core_status", "sovereign_status", "sync_exposure", "hardware_status", "web_info",
     "readiness_check", "receipt_list", "receipt_export", "network_events", "network_guard_check",
-    "model_list", "model_catalogue_list", "model_catalogue_add", "model_routing_list", "model_routing_set", "model_load", "model_evict", "router_start", "router_stop",
-    "mcp_probe", "web_search_test",
+    "model_list", "model_context_set", "model_catalogue_list", "model_catalogue_add", "model_routing_list", "model_routing_set", "model_load", "model_evict", "router_start", "router_stop",
+    "mcp_probe", "mcp_install_npm", "settings_pick_path", "router_restart", "web_search_test",
     "transcription_status", "transcription_run",
     "workspace_list", "workspace_add", "workspace_source_pick", "workspace_create", "workspace_update", "workspace_approve", "workspace_remove",
     "fs_list", "fs_read", "fs_preview", "fs_write", "fs_reveal",
@@ -138,21 +138,44 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
             ok(models)
         }
         "model_catalogue_add" => {
-            let model = arg::<ModelEntry>(args, "model")?;
+            let mut model = arg::<ModelEntry>(args, "model")?;
+            model.id = model.id.trim().to_string();
+            let replace = opt::<bool>(args, "replace")?.unwrap_or(false);
+            if model.location == ModelLocation::ThisDevice {
+                if model.backend != ModelBackend::LlamaCpp {
+                    return Err(CoreError::InvalidDocument("Local inference requires GGUF/llama.cpp. Expose other runtimes as a private OpenAI-compatible server.".into()));
+                }
+                router::check_weights(&model)?;
+                if model.file_size_bytes == 0 {
+                    model.file_size_bytes = std::fs::metadata(&model.source)?.len();
+                    if let Some(projector) = &model.projector { model.file_size_bytes += std::fs::metadata(projector)?.len(); }
+                }
+            }
             let models_root = st.settings().models_directory;
             // The location decides the arm: a local entry goes through the
             // filesystem-path rules, a server entry through the URL and
             // env-var rules. Each refuses what it cannot validate.
-            let models = match model.location {
-                ModelLocation::ThisDevice => st
-                    .registry
-                    .write().unwrap_or_else(|e| e.into_inner())
-                    .upsert_local_model(model, &models_root)?,
-                ModelLocation::PrivateServer => st
-                    .registry
-                    .write().unwrap_or_else(|e| e.into_inner())
-                    .upsert_server_model(model, &models_root)?,
+            let models = {
+                let mut reg = st.registry.write().unwrap_or_else(|e| e.into_inner());
+                if reg.get(&model.id).is_some() && !replace {
+                    return Err(CoreError::InvalidDocument("That catalogue id already exists. Use Edit on its model card or choose a different id.".into()));
+                }
+                match model.location {
+                    ModelLocation::ThisDevice => reg.upsert_local_model(model, &models_root)?,
+                    ModelLocation::PrivateServer => reg.upsert_server_model(model, &models_root)?,
+                }
             };
+            // Restart model runtime renders the saved catalogue and applies it.
+            ok(models)
+        }
+        "model_context_set" => {
+            if !st.runs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                return Err(CoreError::Denied("Finish or stop active tasks before changing model context.".into()));
+            }
+            let id = arg::<String>(args, "modelId")?;
+            let context = opt::<u32>(args, "contextSize")?;
+            let root = st.settings().models_directory;
+            let models = st.registry.write().unwrap_or_else(|e| e.into_inner()).set_context(&id, context, &root)?;
             ok(models)
         }
         "model_routing_list" => {
@@ -176,6 +199,16 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
         "model_evict" => ok(router::evict_model(st, &arg::<String>(args, "id")?).await?),
         "router_start" => ok(router::start(st).await?),
         "router_stop" => ok(router::stop(st).await?),
+        "settings_pick_path" => ok(fsops::pick_settings_path(st.clone(), &arg::<String>(args, "kind")?).await?),
+        "mcp_install_npm" => ok(crate::mcp_install::install(st, &arg::<String>(args, "packageSpec")?, opt::<String>(args, "nodePath")?).await?),
+        "router_restart" => {
+            let _load = st.model_load_lock.lock().await;
+            if !st.runs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                return Err(CoreError::Denied("Finish or stop active tasks before restarting the model runtime.".into()));
+            }
+            router::stop(st).await?;
+            ok(router::start(st).await?)
+        }
         "mcp_probe" => ok(crate::mcp::list_tools(
             &st.settings(),
             &arg::<String>(args, "serverId")?,
@@ -609,7 +642,11 @@ pub async fn dispatch(st: &Arc<AppState>, command: &str, args: &Value) -> CoreRe
 
         /* ---- settings ---- */
         "settings_get" => ok(st.settings()),
-        "settings_set" => ok(settings_set(st, arg::<Value>(args, "patch")?)?),
+        "settings_set" => {
+            let saved = settings_set(st, arg::<Value>(args, "patch")?)?;
+            crate::mcp::reconcile(&st.settings()).await;
+            ok(saved)
+        },
 
         /* ---- shell ---- */
         "window_minimize" => {
@@ -898,6 +935,16 @@ fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     let before = st.settings();
     let current = serde_json::to_value(&before)?;
     let merged: AppSettings = serde_json::from_value(db::merge(current, patch))?;
+    if before.mcp_servers != merged.mcp_servers {
+        let mut ids = std::collections::HashSet::new();
+        for server in &merged.mcp_servers {
+            if !ids.insert(&server.id) { return Err(CoreError::InvalidDocument("MCP server ids must be unique.".into())); }
+            if server.enabled { crate::mcp::validate_config(server)?; }
+        }
+    }
+    let next_registry = if before.models_directory != merged.models_directory {
+        Some(registry::Registry::load_or_seed(&registry::config_dir(), &merged.models_directory)?)
+    } else { None };
     // Egress follows the operator's settings. Nothing clamps it back here —
     // §11 keeps counting and auditing public traffic regardless, so a network
     // that was switched on remains visible in the status bar and the audit log.
@@ -908,16 +955,14 @@ fn settings_set(st: &Arc<AppState>, patch: Value) -> CoreResult<AppSettings> {
     // The catalogue resolves `${MODELS_ROOT}` against the settings, so a change
     // to the models directory has to be reloaded rather than waiting for a
     // restart.
-    if let Ok(reg) = registry::Registry::load_or_seed(&registry::config_dir(), &merged.models_directory) {
-        *st.registry.write().unwrap_or_else(|e| e.into_inner()) = reg;
-        // Moving the folder has to re-render `models.ini` too: it records
-        // absolute weight paths, and the offline/air-gapped setup reads it back
-        // to rehydrate the catalogue. Reloading the catalogue repoints the
-        // in-memory entries but leaves the file pointing at the old folder until
-        // the next router start.
-        if before.models_directory != merged.models_directory {
-            router::write_preset_ini(st)?;
+    if let Some(reg) = next_registry {
+        // Preserve the windows of processes that still have the old paths;
+        // restarting applies the new directory and refreshes these values.
+        let mut reg = reg;
+        for runtime in st.model_runtimes() {
+            if let Some(context) = runtime.context_tokens { reg.record_loaded_context(&runtime.id, context); }
         }
+        *st.registry.write().unwrap_or_else(|e| e.into_inner()) = reg;
     }
 
     // §11 — a folder setting is the one change that can move confidential work

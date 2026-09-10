@@ -84,6 +84,9 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 
 The [polish validation notes](docs/POLISH-VALIDATION.md) describe this pass and the remaining laptop checks.
 
+For custom GGUF models, Auto/custom context beside Thinking Effort, and local or
+npm MCP servers, see the [model and MCP setup guide](docs/SETTINGS-MODELS-MCP.md).
+
 ---
 
 ## Customization & Extensibility

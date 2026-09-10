@@ -88,6 +88,14 @@ pub enum ModelPriority {
     Disabled,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEntry {
@@ -101,6 +109,10 @@ pub struct ModelEntry {
     pub architecture: String,
     pub quantization: String,
     pub context_size: u32,
+    #[serde(default)]
+    pub context_mode: ContextMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u32>,
     pub trained_context: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_cache_type: Option<String>,
@@ -1096,7 +1108,7 @@ pub enum WebSearchProvider {
     Tavily,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     pub id: String,
@@ -1105,6 +1117,10 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /* ------------------------------------------------------------------ */
@@ -1157,6 +1173,8 @@ pub struct GuardRuleEntry {
 pub struct McpToolSummary {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub input_schema: serde_json::Value,
 }
 
 /* ------------------------------------------------------------------ */

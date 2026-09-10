@@ -11,16 +11,19 @@ import {
   Info,
   Loader2,
   Power,
+  Pencil,
+  RotateCw,
   Route,
   Trash2,
 } from 'lucide-react';
+import { ModelEditor } from '../settings/ModelEditor';
+import * as core from '../../services/core';
 import { useApp } from '../../context/AppContext';
 import {
   CAPABILITY_LABELS,
   formatBytes,
   formatContext,
   formatDuration,
-  modelById,
 } from '../../services/registry';
 import type { ModelCapability, ModelEntry, ModelPriority, TaskKind } from '../../types';
 
@@ -32,7 +35,8 @@ const PRIORITY_TONE: Record<ModelPriority, string> = {
 };
 
 const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
-  const { modelRuntime, loadModel, evictModel, hardware, loadedModelIds } = useApp();
+  const { modelRuntime, loadModel, evictModel, hardware, loadedModelIds, catalogueModels, addCatalogueModel } = useApp();
+  const [editing, setEditing] = useState(false);
   const [open, setOpen] = useState(false);
 
   const rt = modelRuntime[model.id] ?? { id: model.id, state: 'unloaded' as const };
@@ -53,6 +57,7 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
         isLoaded ? 'border-[var(--success-ring)] bg-[var(--success-soft)]' : 'border-[var(--border)] bg-[var(--sidebar)]'
       }`}
     >
+      {editing && <ModelEditor initial={model} onClose={() => setEditing(false)} onAdd={addCatalogueModel} />}
       <div className="p-3">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
@@ -92,12 +97,11 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
                     isLoaded && rt.contextTokens
                       ? rt.contextTokens === model.contextSize
                         ? 'The window this model is running with now'
-                        : `Launched with ${rt.contextTokens.toLocaleString()} tokens — free VRAM raised the ${model.contextSize.toLocaleString()} catalogue allocation at launch`
-                      : 'Catalogue allocation — the running window is raised at launch when free VRAM allows'
+                        : `Launched with ${rt.contextTokens.toLocaleString()} tokens — runtime fitted the ${model.contextSize.toLocaleString()} fallback allocation to available memory`
+                      : 'Auto: the runtime fits context to device memory when loading. This number is the fallback allocation.'
                   }
                 >
-                  {formatContext(isLoaded && rt.contextTokens ? rt.contextTokens : model.contextSize)} ctx
-                  {isLoaded ? ' window' : ''}
+                  {isLoaded && rt.contextTokens ? `${formatContext(rt.contextTokens)} ctx window` : model.location === 'this_device' && model.contextMode !== 'manual' ? 'Auto context' : `${formatContext(model.contextLimit ?? model.contextSize)} ctx`}
                 </span>
                 {model.kvCacheType && model.kvCacheType !== 'f16' && ` · KV ${model.kvCacheType}`}
               </span>
@@ -123,7 +127,8 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
           </div>
 
           <div className="flex items-center space-x-1 flex-shrink-0 ml-2">
-            {isLoaded ? (
+            <button aria-label={`Edit ${model.displayName}`} title="Edit model" className="p-1.5 rounded hover:bg-[var(--card)]" disabled={busy} onClick={() => setEditing(true)}><Pencil size={12} /></button>
+            {model.location === 'private_server' ? <span className="text-[10px] text-[var(--muted-foreground)]">Private server</span> : isLoaded ? (
               <button
                 onClick={() => void evictModel(model.id)}
                 disabled={busy}
@@ -142,7 +147,7 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
                   disabled
                     ? 'Disabled in the registry — see the note below'
                     : Array.isArray(wouldEvict) && wouldEvict.length > 0
-                      ? `Loading this will evict ${wouldEvict.map((id) => modelById(id)?.displayName ?? id).join(', ')}`
+                      ? `Loading this will evict ${wouldEvict.map((id) => catalogueModels.find((entry) => entry.id === id)?.displayName ?? id).join(', ')}`
                       : 'Load into VRAM'
                 }
               >
@@ -164,7 +169,7 @@ const ModelCard: React.FC<{ model: ModelEntry }> = ({ model }) => {
         <div className="mt-2.5">
           <div className="flex items-center justify-between text-[10px] text-[var(--muted-foreground)] mb-1 tabular-nums">
             <span>
-              {model.estimatedVramMb.toLocaleString()} MiB measured peak
+              {model.estimatedVramMb.toLocaleString()} MiB estimated peak
               {isLoaded && rt.residentVramMb !== undefined && (
                 <span className="text-[var(--success)]"> · {rt.residentVramMb.toLocaleString()} resident</span>
               )}
@@ -385,7 +390,15 @@ const RoutingTable: React.FC = () => {
 /* ------------------------------------------------------------------ */
 
 export const ModelManagerView: React.FC = () => {
-  const { hardware, loadedModelIds, coreStatus, refreshCore, settings, catalogueModels } = useApp();
+  const { hardware, loadedModelIds, coreStatus, refreshCore, settings, catalogueModels, anyRunning } = useApp();
+  const [restarting, setRestarting] = useState(false);
+  const [runtimeError, setRuntimeError] = useState('');
+  const restart = async () => {
+    setRestarting(true); setRuntimeError('');
+    try { await core.models.routerRestart(); await refreshCore(); }
+    catch (reason) { setRuntimeError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setRestarting(false); }
+  };
   const [tab, setTab] = useState<'models' | 'routing'>('models');
 
   const active = catalogueModels.filter((m) => m.priority !== 'disabled');
@@ -436,6 +449,12 @@ export const ModelManagerView: React.FC = () => {
         )}
       </div>
 
+      <div className="px-3 py-2 border-b nerve-border text-xs">
+        <p className="text-[var(--muted-foreground)]">Context defaults to Auto. Set a custom limit beside Thinking Effort in the composer. Restart after adding models or changing runtime settings; resident models will unload.</p>
+        <button className="mt-2 inline-flex items-center gap-1.5 rounded border nerve-border px-2 py-1 disabled:opacity-40" disabled={restarting || anyRunning || coreStatus.state === 'unavailable' || coreStatus.state === 'checking'} onClick={() => void restart()}><RotateCw size={12} />{restarting ? 'Restarting…' : 'Restart model runtime'}</button>
+        {anyRunning && <p className="mt-1 text-[var(--muted-foreground)]">Available after active tasks finish.</p>}
+        {runtimeError && <p role="alert" className="mt-1 break-words text-[var(--destructive)]">{runtimeError}</p>}
+      </div>
       {/* Tabs */}
       <div className="flex items-center px-3 pt-2 space-x-1 flex-shrink-0">
         {(

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, RotateCcw } from 'lucide-react';
+import { ContextControl } from './ContextControl';
 import { useApp } from '../../context/AppContext';
 
 const LEVELS = ['off', 'low', 'medium', 'high', 'max'] as const;
 const label = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 
-export function EffortPicker({ modelName }: { modelName: string }) {
+export function EffortPicker({ modelName, modelId }: { modelName: string; modelId?: string }) {
   const { settings, updateSettings, isRunning } = useApp();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -37,7 +38,7 @@ export function EffortPicker({ modelName }: { modelName: string }) {
     setSaving(true);
     setError('');
     try {
-      await updateSettings({ extendedThinking: value !== 'off', thinkingEffort: value === 'off' ? 'medium' : value });
+      if (!await updateSettings({ extendedThinking: value !== 'off', thinkingEffort: value === 'off' ? 'medium' : value })) throw new Error('Save failed');
     } catch {
       setError('Could not save effort. Try again.');
     } finally { setSaving(false); }
@@ -51,7 +52,7 @@ export function EffortPicker({ modelName }: { modelName: string }) {
       <span className="text-[var(--primary)]">{label(effort)}</span><ChevronDown size={12} />
     </button>
     {open && <div role="dialog" aria-label="Thinking effort"
-      className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-2xl border nerve-border bg-[var(--popover)] p-4 text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover">
+      className="absolute bottom-full right-0 z-50 mb-2 w-80 max-h-[75vh] overflow-y-auto max-w-[calc(100vw-2rem)] rounded-2xl border nerve-border bg-[var(--popover)] p-4 text-[var(--popover-foreground)] shadow-[shadow:var(--shadow-lg)] animate-popover">
       <div className="flex items-start justify-between gap-3">
         <span className="w-6 shrink-0" aria-hidden="true" />
         <div className="min-w-0 text-center"><div className="text-sm font-semibold text-[var(--primary)]">{label(effort)}</div>
@@ -70,6 +71,7 @@ export function EffortPicker({ modelName }: { modelName: string }) {
           className="rounded px-1 py-1 hover:bg-[var(--accent)] disabled:opacity-40">{label(value)}</button>)}
       </div>
       <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">{isRunning ? 'Change effort after this run finishes.' : 'Higher effort gives compatible local models more thinking time.'}</p>
+      {modelId && <ContextControl key={modelId} modelId={modelId} />}
       {error && <p role="alert" className="mt-2 text-xs text-[var(--destructive)]">{error}</p>}
     </div>}
   </div>;

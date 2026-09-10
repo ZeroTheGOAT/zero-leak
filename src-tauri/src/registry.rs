@@ -104,15 +104,7 @@ const MODELS_ROOT_TOKEN: &str = "${MODELS_ROOT}";
 /* Automatic context sizing                                            */
 /* ------------------------------------------------------------------ */
 
-/// The largest window auto-sizing will ever ask llama-server for. Gemma 4 E4B
-/// is trained to 131 072 tokens, and a venue GPU with 24+ GiB could in
-/// principle hold that — but a full training-length KV cache still consumes
-/// many GiB, and
-/// "a bigger context" does not mean "reserve the whole card". 65 536 is the
-/// practical target; a card that cannot fit it runs the model as big as it
-/// can, and one that could runs no larger than this.
-const AUTO_CTX_CAP: u32 = 65_536;
-
+/// Runtime fitting is capped by the GGUF training context, not a fixed 64K limit.
 /// How far below the solo budget a raised window may sit. `estimated_vram_mb`
 /// is an occupancy *measured* at the configured context, so the extra KV a raise
 /// adds is exact — geometry × cache type — but real residency runs a little
@@ -122,21 +114,15 @@ const AUTO_CTX_CAP: u32 = 65_536;
 /// desktop gets.
 const AUTO_CTX_RESERVE_MB: u32 = 512;
 
-/// Whether a model is a candidate for automatic context sizing: an agentic
-/// llama.cpp model on this device whose configured window sits well below what
-/// it was trained at. Those are the models whose context is *VRAM-pinned* —
-/// worth raising for free when the card has room. Specialists, embedders,
-/// huge-window models and everything served from elsewhere keep their catalogue
-/// numbers.
+/// Generation models use native automatic context fitting, including OCR and vision.
+/// Embedding models retain their fixed sequence length.
 pub fn context_auto_eligible(e: &ModelEntry) -> bool {
-    e.priority != ModelPriority::Disabled
+    e.context_mode == ContextMode::Auto
+        && e.priority != ModelPriority::Disabled
         && e.location == ModelLocation::ThisDevice
         && e.backend == ModelBackend::LlamaCpp
-        && e.capabilities.contains(&ModelCapability::Tools)
+        && !e.capabilities.contains(&ModelCapability::Embeddings)
         && e.context_size > 0
-        && e.trained_context > e.context_size
-        && e.context_size < AUTO_CTX_CAP
-        && e.kv_cache_type.is_some()
 }
 
 /// The window a model should actually be launched with, given how much of the
@@ -147,7 +133,7 @@ pub fn context_auto_eligible(e: &ModelEntry) -> bool {
 /// catalogue's own window). Each extra token of context costs exactly
 /// KV-bytes-per-token for the model's GGUF geometry and cache type, so the
 /// raise is: the solo budget, minus that anchor, minus a reserve, divided by
-/// the per-token KV cost — clamped by the training ceiling and `AUTO_CTX_CAP`.
+/// the per-token KV cost — clamped by the training ceiling. This is only a pre-load estimate; /props supplies the actual window.
 ///
 /// Returns the configured window unchanged when the geometry is unknown, the
 /// cache type unmapped, or the card has no room for a meaningful raise. It is
@@ -176,7 +162,7 @@ pub fn autosized_context(e: &ModelEntry, geometry: Option<gguf::KvGeometry>, sol
         return e.context_size;
     }
     let extra_tokens = (room as f64 / kv_per_token_mb) as i64;
-    let ceiling = i64::from(e.trained_context.min(AUTO_CTX_CAP));
+    let ceiling = i64::from(e.trained_context);
     let raised = (i64::from(e.context_size) + extra_tokens).min(ceiling);
     // A raise of under half a kilotoken is not worth a launched window that
     // differs from the catalogue for no observable gain.
@@ -643,6 +629,8 @@ fn entry(
         architecture: architecture.into(),
         quantization: quantization.into(),
         context_size,
+        context_mode: ContextMode::Auto,
+        context_limit: None,
         trained_context,
         kv_cache_type: kv_cache_type.map(str::to_string),
         capabilities: capabilities.to_vec(),
@@ -768,6 +756,52 @@ pub struct Registry {
     ctx_override: HashMap<String, u32>,
 }
 
+fn portable_path(path: &str, root: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let root = root.replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    let matches = if root.as_bytes().get(1) == Some(&b':') {
+        normalized.get(..root.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
+    } else { normalized.starts_with(root) };
+    if !root.is_empty() && matches && normalized.as_bytes().get(root.len()) == Some(&b'/') {
+        format!("{MODELS_ROOT_TOKEN}{}", &normalized[root.len()..])
+    } else { path.to_string() }
+}
+
+fn validate_model_fields(model: &ModelEntry) -> CoreResult<()> {
+    if model.id.is_empty() || !model.id.bytes().enumerate().all(|(i, c)|
+        c.is_ascii_alphanumeric() || (i > 0 && b"._-".contains(&c))) {
+        return Err(CoreError::InvalidDocument("Catalogue ids use letters, numbers, dots, underscores and hyphens.".into()));
+    }
+    if model.context_limit.is_some_and(|limit| limit == 0 || limit > model.trained_context) {
+        return Err(CoreError::InvalidDocument("Custom context must be positive and within the model's training limit.".into()));
+    }
+    if model.context_size == 0 || model.context_size > model.trained_context || model.capabilities.is_empty() {
+        return Err(CoreError::InvalidDocument("Choose at least one capability and a positive fallback context within the trained limit.".into()));
+    }
+    if [&model.source, model.projector.as_ref().unwrap_or(&model.source)].iter().any(|p| p.contains(['\n', '\r', '\0'])) {
+        return Err(CoreError::InvalidDocument("Model paths must not contain control characters.".into()));
+    }
+    if model.location == ModelLocation::ThisDevice {
+        let absolute = |p: &str| Path::new(p).is_absolute() || (p.as_bytes().get(1) == Some(&b':') && p.as_bytes().get(2).is_some_and(|c| *c == b'/' || *c == b'\\'));
+        if !absolute(&model.source) || model.projector.as_deref().is_some_and(|p| !absolute(p) || p.contains("://")) {
+            return Err(CoreError::InvalidDocument("Weights and projector paths must be absolute local paths.".into()));
+        }
+        if model.capabilities.iter().any(|c| matches!(c, ModelCapability::Vision | ModelCapability::Ocr | ModelCapability::Handwriting | ModelCapability::Drawings)) && model.projector.as_deref().is_none_or(|p| p.trim().is_empty()) {
+            return Err(CoreError::InvalidDocument("Vision, OCR, drawing and handwriting models need their matching projector.".into()));
+        }
+    }
+    if model.kv_cache_type.as_deref().is_some_and(|v| !["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"].contains(&v)) {
+        return Err(CoreError::InvalidDocument("Unsupported KV cache type.".into()));
+    }
+    if let Some(options) = &model.preset_options {
+        if options.iter().any(|(k,v)| k.is_empty() || k.contains(['\n', '\r', '=', '[', ']', '\0']) || v.contains(['\n', '\r', '\0'])) {
+            return Err(CoreError::InvalidDocument("Preset options must be single-line keys and values.".into()));
+        }
+    }
+    Ok(())
+}
+
 impl Registry {
     /// Reads `<config>/models.json`, writing the seed first if it is absent.
     /// A malformed file is an error, not a silent fallback to the seed: if the
@@ -801,6 +835,9 @@ impl Registry {
             .map(|mut m| {
                 m.source = m.source.replace(MODELS_ROOT_TOKEN, &root);
                 m.projector = m.projector.map(|p| p.replace(MODELS_ROOT_TOKEN, &root));
+                if m.location == ModelLocation::ThisDevice {
+                    if let Some(trained) = gguf::trained_context(Path::new(&m.source)) { m.trained_context = trained; }
+                }
                 m
             })
             .collect();
@@ -857,7 +894,8 @@ impl Registry {
             }
         }
 
-        let rule = self
+        let mut next = self.clone();
+        let rule = next
             .rules
             .iter_mut()
             .find(|rule| rule.kind == kind)
@@ -869,7 +907,8 @@ impl Registry {
         }
         rule.model_id = Some(model_id);
         rule.fallback_model_id = fallback_model_id;
-        self.persist(models_root)?;
+        next.persist(models_root)?;
+        *self = next;
         Ok(self.rules.clone())
     }
 
@@ -880,11 +919,9 @@ impl Registry {
             .iter()
             .cloned()
             .map(|mut entry| {
-                if !root.is_empty() {
-                    entry.source = entry.source.replace(root, MODELS_ROOT_TOKEN);
-                    entry.projector = entry
-                        .projector
-                        .map(|path| path.replace(root, MODELS_ROOT_TOKEN));
+                if entry.location == ModelLocation::ThisDevice {
+                    entry.source = portable_path(&entry.source, root);
+                    entry.projector = entry.projector.map(|path| portable_path(&path, root));
                 }
                 entry
             })
@@ -897,8 +934,18 @@ impl Registry {
         .map_err(|e| {
             CoreError::ExecutionFailed(format!("Could not serialise the model catalogue: {e}"))
         })?;
-        std::fs::write(&self.path, json)?;
-        Ok(())
+        let temp = self.path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> CoreResult<()> {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = std::fs::remove_file(&temp); }
+        result
     }
 
     /// Adds or replaces one local model and persists the catalogue the UI is
@@ -907,11 +954,16 @@ impl Registry {
     /// the only non-local provider path.
     pub fn upsert_local_model(
         &mut self,
-        model: ModelEntry,
+        mut model: ModelEntry,
         models_root: &str,
     ) -> CoreResult<Vec<ModelEntry>> {
         // Owned so it can be used after `model` is moved into the list below.
-        let id = model.id.trim().to_string();
+        model.id = model.id.trim().to_string();
+        if model.location == ModelLocation::ThisDevice {
+            if let Some(trained) = gguf::trained_context(Path::new(&model.source)) { model.trained_context = trained; model.context_size = model.context_size.min(trained); }
+        }
+        validate_model_fields(&model)?;
+        let id = model.id.clone();
         if id.is_empty() || model.display_name.trim().is_empty() {
             return Err(CoreError::InvalidDocument(
                 "A model needs both an id and a display name before it can be added.".into(),
@@ -936,17 +988,15 @@ impl Registry {
             ));
         }
 
-        if let Some(index) = self.models.iter().position(|entry| entry.id == id) {
-            self.models[index] = model;
+        let mut next = self.clone();
+        if let Some(index) = next.models.iter().position(|entry| entry.id == id) {
+            next.models[index] = model;
         } else {
-            self.models.push(model);
+            next.models.push(model);
         }
-        // The operator has just changed this model's definition. Any launch-time
-        // context override is now stale (it was sized for the old numbers), so
-        // drop it; the next preset write recomputes from the edited entry.
-        self.ctx_override.remove(&id);
-
-        self.persist(models_root)?;
+        // Keep a loaded model's actual context until its runtime is restarted.
+        next.persist(models_root)?;
+        *self = next;
         Ok(self.models.clone())
     }
 
@@ -968,10 +1018,12 @@ impl Registry {
     ///   whose job is to be readable.
     pub fn upsert_server_model(
         &mut self,
-        model: ModelEntry,
+        mut model: ModelEntry,
         models_root: &str,
     ) -> CoreResult<Vec<ModelEntry>> {
-        let id = model.id.trim().to_string();
+        model.id = model.id.trim().to_string();
+        validate_model_fields(&model)?;
+        let id = model.id.clone();
         if id.is_empty() || model.display_name.trim().is_empty() {
             return Err(CoreError::InvalidDocument(
                 "A model needs both an id and a display name before it can be added.".into(),
@@ -1025,15 +1077,32 @@ impl Registry {
             ));
         }
 
-        if let Some(index) = self.models.iter().position(|entry| entry.id == id) {
-            self.models[index] = model;
+        let mut next = self.clone();
+        if let Some(index) = next.models.iter().position(|entry| entry.id == id) {
+            next.models[index] = model;
         } else {
-            self.models.push(model);
+            next.models.push(model);
         }
-        self.ctx_override.remove(&id);
-
-        self.persist(models_root)?;
+        // Keep a loaded model's actual context until its runtime is restarted.
+        next.persist(models_root)?;
+        *self = next;
         Ok(self.models.clone())
+    }
+
+
+    pub fn set_context(&mut self, id: &str, context: Option<u32>, models_root: &str) -> CoreResult<Vec<ModelEntry>> {
+        let mut model = self.require(id)?.clone();
+        if let Some(size) = context {
+            if size == 0 || size > model.trained_context {
+                return Err(CoreError::InvalidDocument(format!("Choose a context from 1 to {} tokens for {}.", model.trained_context, model.display_name)));
+            }
+            model.context_mode = ContextMode::Manual;
+            model.context_limit = Some(size);
+        } else { model.context_mode = ContextMode::Auto; model.context_limit = None; }
+        match model.location {
+            ModelLocation::ThisDevice => self.upsert_local_model(model, models_root),
+            ModelLocation::PrivateServer => self.upsert_server_model(model, models_root),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&ModelEntry> {
@@ -1058,7 +1127,11 @@ impl Registry {
         if let Some(&ctx) = self.ctx_override.get(id) {
             return ctx;
         }
-        self.get(id).map(|m| m.context_size).unwrap_or(0)
+        self.get(id).map(|m| if m.context_mode == ContextMode::Manual { m.context_limit.unwrap_or(m.context_size) } else { m.context_size }).unwrap_or(0)
+    }
+
+    pub fn record_loaded_context(&mut self, id: &str, context: u32) {
+        if context > 0 { self.ctx_override.insert(id.to_string(), context); }
     }
 
     /// Records which windows the preset file was rendered with, replacing any
@@ -1408,6 +1481,8 @@ mod local_model_catalogue_tests {
             architecture: "llama".into(),
             quantization: "Q4_K_M".into(),
             context_size: 32_768,
+            context_mode: ContextMode::Auto,
+            context_limit: None,
             trained_context: 32_768,
             kv_cache_type: None,
             capabilities: vec![ModelCapability::General, ModelCapability::Tools],
@@ -1421,6 +1496,45 @@ mod local_model_catalogue_tests {
             server_url: None,
             server_api_key_env: None,
         }
+    }
+
+    #[test]
+    fn portable_paths_do_not_rewrite_similarly_named_sibling_folders() {
+        assert_eq!(portable_path("C:/models-other/model.gguf", "C:/models"), "C:/models-other/model.gguf");
+        assert_eq!(portable_path("c:\\Models\\model.gguf", "C:/models"), "${MODELS_ROOT}/model.gguf");
+    }
+
+    #[test]
+    fn failed_catalogue_write_keeps_the_in_memory_definition() {
+        let dir = std::env::temp_dir().join(format!("zeroleak-failed-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = local_model("C:/models/model.gguf");
+        let mut reg = Registry { models: vec![original.clone()], rules: Vec::new(), path: dir.clone(), ctx_override: HashMap::new() };
+        let mut edited = original.clone();
+        edited.display_name = "Unsaved edit".into();
+        assert!(reg.upsert_local_model(edited, "C:/models").is_err());
+        assert_eq!(reg.get(&original.id).unwrap().display_name, original.display_name);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_context_survives_reload_without_changing_the_measured_baseline() {
+        let dir = std::env::temp_dir().join(format!("zeroleak-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut model = local_model("C:/models/model.gguf");
+        model.trained_context = 262_144;
+        let mut reg = Registry { models: vec![model.clone()], rules: Vec::new(), path: dir.join("models.json"), ctx_override: HashMap::new() };
+        reg.set_context(&model.id, Some(262_144), "C:/models").unwrap();
+        assert_eq!(reg.get(&model.id).unwrap().context_size, 32_768);
+        assert_eq!(reg.effective_context(&model.id), 262_144);
+        let loaded = Registry::load_or_seed(&dir, "C:/models").unwrap();
+        assert_eq!(loaded.get(&model.id).unwrap().context_mode, ContextMode::Manual);
+        assert_eq!(loaded.get(&model.id).unwrap().context_limit, Some(262_144));
+        assert!(reg.set_context(&model.id, Some(262_145), "C:/models").is_err());
+        reg.set_context(&model.id, None, "C:/models").unwrap();
+        assert_eq!(reg.get(&model.id).unwrap().context_size, 32_768);
+        assert_eq!(reg.get(&model.id).unwrap().context_limit, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1869,6 +1983,8 @@ mod server_model_catalogue_tests {
             architecture: "remote".into(),
             quantization: "server-side".into(),
             context_size: 32_768,
+            context_mode: ContextMode::Auto,
+            context_limit: None,
             trained_context: 32_768,
             kv_cache_type: None,
             capabilities: vec![ModelCapability::General, ModelCapability::Tools],
@@ -2144,30 +2260,28 @@ mod auto_ctx_tests {
             (24_000..=65_536).contains(&eff),
             "8 GB card should raise Gemma above 16k without exceeding the cap; got {eff}"
         );
-        assert!(eff <= e.trained_context.min(AUTO_CTX_CAP));
+        assert!(eff <= e.trained_context);
     }
 
     #[test]
-    fn huge_card_hits_the_auto_cap_not_the_trained_ceiling() {
+    fn huge_card_can_use_the_trained_ceiling() {
         let e = gemma();
         // A 24 GiB venue card. Room dwarfs Gemma's trained 131 072, but
-        // AUTO_CTX_CAP (65 536) is the intended practical target: a bigger GPU
-        // runs the same build at 64k without a catalogue edit, not by reserving
-        // 17 GiB of KV at the training ceiling.
+        // A bigger GPU may use the trained ceiling without a catalogue edit.
         let solo_24gb = 24_576 - 512;
-        assert_eq!(autosized_context(&e, Some(GEMMA_GEO), solo_24gb), 65_536);
+        assert_eq!(autosized_context(&e, Some(GEMMA_GEO), solo_24gb), e.trained_context);
     }
 
     #[test]
-    fn no_room_specialists_and_unknown_geometry_stay_at_the_catalogue_window() {
-        // A specialist (no Tools) is not sized up even when the geometry reads.
+    fn specialists_are_eligible_and_unknown_geometry_keeps_the_fallback() {
+        // Specialists participate in the same automatic context policy.
         let mut ocr = gemma();
         ocr.id = "olmocr-2".into();
         ocr.capabilities = vec![ModelCapability::Ocr, ModelCapability::Documents];
-        assert!(!context_auto_eligible(&ocr));
+        assert!(context_auto_eligible(&ocr));
         assert_eq!(
             autosized_context(&ocr, Some(GEMMA_GEO), vram_solo_mb()),
-            16_384
+            autosized_context(&gemma(), Some(GEMMA_GEO), vram_solo_mb())
         );
 
         let e = gemma();

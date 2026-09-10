@@ -69,6 +69,8 @@ export interface ModelEntry {
   quantization: string;
   /** Context we actually allocate, from the curated preset. */
   contextSize: number;
+  contextMode?: 'auto' | 'manual';
+  contextLimit?: number;
   /** Context the weights were trained for. */
   trainedContext: number;
   /** KV cache quantization in use, e.g. 'q8_0'. */
@@ -97,6 +99,7 @@ export interface ModelEntry {
    * the variable in the launch environment.
    */
   serverApiKeyEnv?: string;
+  presetOptions?: Record<string, string>;
 }
 
 /** Live per-model runtime state, kept separate from static registry metadata. */
@@ -436,6 +439,8 @@ export interface McpServerConfig {
   name: string;
   command: string;
   args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
   enabled: boolean;
 }
 

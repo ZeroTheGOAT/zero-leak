@@ -374,7 +374,7 @@ interface AppContextValue {
   catalogueModels: ModelEntry[];
   modelRuntime: Record<string, ModelRuntime>;
   loadedModelIds: string[];
-  addCatalogueModel: (model: ModelEntry) => Promise<void>;
+  addCatalogueModel: (model: ModelEntry, replace?: boolean) => Promise<void>;
   routeRules: RouteRule[];
   updateModelRoute: (
     kind: TaskKind,
@@ -592,7 +592,7 @@ interface AppContextValue {
 
   /* Settings */
   settings: AppSettings;
-  updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  updateSettings: (patch: Partial<AppSettings>) => Promise<boolean>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -1529,18 +1529,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   /* ---------------------------------------------------------------- */
 
   const addCatalogueModel = useCallback(
-    async (model: ModelEntry) => {
-      if (coreStatus.state === 'unavailable') {
-        pushFailure('model_load_failed', 'The local core must be attached before a model can be added.');
-        return;
+    async (model: ModelEntry, replace = false) => {
+      if (coreStatus.state === 'unavailable' || coreStatus.state === 'checking') {
+        throw new Error('Connect the native app before saving a model.');
       }
-      const models = await guard('model_load_failed', () => core.models.add(model));
-      if (!models) return;
+      // Propagate errors to the editor so its draft stays open for correction.
+      const models = await core.models.add(model, replace);
       setCatalogueModels(models);
       const runtime = await core.models.list().catch(() => null);
       if (runtime) setModelRuntime(Object.fromEntries(runtime.map((entry) => [entry.id, entry])));
     },
-    [coreStatus.state, guard, pushFailure],
+    [coreStatus.state],
   );
 
   const updateModelRoute = useCallback(
@@ -2793,23 +2792,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   /* Settings                                                         */
   /* ---------------------------------------------------------------- */
 
+  // Send partial updates in order. Full settings replies from simultaneous
+  // writes otherwise overwrite newer controls, and rollback loses other edits.
+  const settingsSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
   const updateSettings = useCallback(
-    async (patch: Partial<AppSettings>) => {
-      // Optimistic: the controls stay responsive even with no core attached.
-      // Snapshot for rollback so a failed save does not leave unsaved UI state.
-      let prevSnapshot: AppSettings | null = null;
-      setSettings((prev) => {
-        prevSnapshot = prev;
-        return { ...prev, ...patch };
+    (patch: Partial<AppSettings>): Promise<boolean> => {
+      if (coreStatus.state === 'unavailable' || coreStatus.state === 'checking') {
+        pushFailure('execution_failed', 'Connect the native app before saving settings.');
+        return Promise.resolve(false);
+      }
+      const save = settingsSaveQueue.current.then(async () => {
+        const saved = await guard('execution_failed', () => core.settings.set(patch));
+        if (!saved) return false;
+        setSettings(saved);
+        if (patch.defaultMode) setMode(saved.defaultMode);
+        if (patch.approvalPolicy) setApprovalPolicy(saved.approvalPolicy);
+        if (patch.modelsDirectory !== undefined) {
+          const catalogue = await core.models.catalogue().catch(() => null);
+          if (catalogue) setCatalogueModels(catalogue);
+        }
+        return true;
       });
-      if (patch.defaultMode) setMode(patch.defaultMode);
-      if (patch.approvalPolicy) setApprovalPolicy(patch.approvalPolicy);
-      if (coreStatus.state === 'unavailable') return;
-      const saved = await guard('execution_failed', () => core.settings.set(patch));
-      if (saved) setSettings(saved);
-      else if (prevSnapshot) setSettings(prevSnapshot);
+      settingsSaveQueue.current = save.catch(() => undefined);
+      return save;
     },
-    [coreStatus.state, guard, setMode],
+    [coreStatus.state, guard, pushFailure, setMode],
   );
 
   /* ---------------------------------------------------------------- */

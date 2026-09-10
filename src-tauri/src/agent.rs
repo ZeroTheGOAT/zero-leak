@@ -1461,6 +1461,8 @@ mod tool_surface {
             name: "Local docs".into(),
             command: "C:/tools/mcp.exe".into(),
             args: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             enabled: true,
         };
         let agent = tool_schemas(
@@ -8442,6 +8444,17 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
 
     let mut ctx = Ctx { model_id: model_id.clone(), ..ctx };
 
+    /* --- load it, visibly --- */
+    let load = Step::start(&st, StepKind::LoadingModel, format!("Loading {model_id}"))
+        .model(Some(model_id.clone()));
+    match router::ensure_loaded(&st, &model_id).await {
+        Ok(()) => load.detail("Resident and ready.").ok(&st),
+        Err(e) => {
+            load.fail(&st, &e.message());
+            return Err(e);
+        }
+    }
+
     // The chosen model's real window, told to the model. Appended rather than
     // built in: the choice above is made from the size of this very prompt.
     {
@@ -8466,16 +8479,7 @@ async fn orchestrate(ctx: Ctx, input: StartRunInput) -> CoreResult<()> {
         }
     }
 
-    /* --- load it, visibly --- */
-    let load = Step::start(&st, StepKind::LoadingModel, format!("Loading {model_id}"))
-        .model(Some(model_id.clone()));
-    match router::ensure_loaded(&st, &model_id).await {
-        Ok(()) => load.detail("Resident and ready.").ok(&st),
-        Err(e) => {
-            load.fail(&st, &e.message());
-            return Err(e);
-        }
-    }
+
 
     /* --- tool phase --- */
     // `tools` was built above, before the system prompt, because the prompt

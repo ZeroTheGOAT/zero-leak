@@ -474,6 +474,26 @@ pub async fn pick_source_folder(st: Arc<AppState>) -> CoreResult<Option<String>>
         .transpose()
 }
 
+/// Settings picks local paths without ingesting documents or copying weights.
+pub async fn pick_settings_path(st: Arc<AppState>, kind: &str) -> CoreResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let app = st.app.clone();
+    let kind = kind.to_string();
+    if !["model", "projector", "executable", "directory"].contains(&kind.as_str()) {
+        return Err(CoreError::InvalidDocument("Unknown settings path kind.".into()));
+    }
+    let chosen = await_picker("The settings path picker", move |tx| {
+        let mut picker = app.dialog().file().set_title(format!("Choose {kind}"));
+        if kind == "model" || kind == "projector" { picker = picker.add_filter("GGUF model", &["gguf"]); }
+        if kind == "directory" {
+            picker.pick_folder(move |folder| { let _ = tx.send(folder); });
+        } else {
+            picker.pick_file(move |file| { let _ = tx.send(file); });
+        }
+    }).await?;
+    chosen.map(|picked| to_path(picked, "The settings path picker").map(|p| tidy(&p))).transpose()
+}
+
 /// Creates a project and copies any selected sources into it.
 ///
 /// With no `location`, the project is an isolated, app-owned folder under the

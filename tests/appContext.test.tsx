@@ -179,3 +179,50 @@ it('resumes a queued instruction after reconnecting to a completed run', async (
   await waitFor(() => expect(result.current.queuedMessages).toHaveLength(0));
   expect(result.current.isRunning).toBe(true);
 });
+
+
+describe('durable settings and model saves', () => {
+  it('propagates model registration errors so the editor can preserve its draft', async () => {
+    const { result } = await app();
+    bridge.call.mockImplementation(async (command) => {
+      if (command === 'model_catalogue_add') throw new Error('Duplicate catalogue id');
+      return baseCall(command);
+    });
+    await act(async () => {
+      await expect(result.current.addCatalogueModel({ id: 'custom' } as any)).rejects.toThrow('Duplicate catalogue id');
+    });
+  });
+  it('does not pretend disconnected settings were saved', async () => {
+    const { result } = await app();
+    const original = result.current.settings;
+    emit('core://status', { ...connected, state: 'unavailable' });
+    await act(async () => { expect(await result.current.updateSettings({ privateServerName: 'New name' })).toBe(false); });
+    expect(result.current.settings).toEqual(original);
+    expect(bridge.call.mock.calls.some(([command]) => command === 'settings_set')).toBe(false);
+  });
+  it('serializes independent saves and does not roll a later setting back', async () => {
+    const { result } = await app();
+    const original = result.current.settings;
+    const first = deferred<any>();
+    let calls = 0;
+    bridge.call.mockImplementation(async (command) => {
+      if (command !== 'settings_set') return baseCall(command);
+      calls++;
+      if (calls === 1) return first.promise;
+      return { ...original, privateServerName: 'Saved name', extendedThinking: true };
+    });
+    let p1!: Promise<boolean>, p2!: Promise<boolean>;
+    act(() => {
+      p1 = result.current.updateSettings({ privateServerName: 'Saved name' });
+      p2 = result.current.updateSettings({ extendedThinking: true });
+    });
+    await waitFor(() => expect(calls).toBe(1));
+    await act(async () => {
+      first.resolve({ ...original, privateServerName: 'Saved name' });
+      expect(await p1).toBe(true); expect(await p2).toBe(true);
+    });
+    expect(calls).toBe(2);
+    expect(result.current.settings.privateServerName).toBe('Saved name');
+    expect(result.current.settings.extendedThinking).toBe(true);
+  });
+});

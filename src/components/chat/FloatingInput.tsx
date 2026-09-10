@@ -22,7 +22,7 @@ import { useApp } from '../../context/AppContext';
 import { ApprovalPopover } from './ApprovalPopover';
 import { EffortPicker } from './EffortPicker';
 import { ProjectPicker } from './ProjectPicker';
-import { formatBytes, modelById } from '../../services/registry';
+import { formatBytes } from '../../services/registry';
 import { ImageThumb, isImagePath, stagePastedImages } from './attachments';
 import { basename } from '../../services/paths';
 import {
@@ -421,20 +421,10 @@ export const FloatingInput: React.FC<{
   const disabled = coreStatus.state === 'unavailable';
   const activeMode = MODES.find((item) => item.value === mode) ?? MODES[0];
   const ActiveModeIcon = activeMode.icon;
-  const loaded = loadedModelIds
-    .map((id) => catalogueModels.find((model) => model.id === id)?.displayName)
-    .filter(Boolean);
-  // The model actually in play: a resident one when something is loaded,
-  // else the route the next turn would take — vision when an image is
-  // attached, the plain reasoning route for a normal chat. Every step falls
-  // back to something name-like (even the raw route id), so the button only
-  // reads "No model" when there genuinely is none.
   const routedModelId = routeRules.find((rule) => rule.kind === (attached.some(isImagePath) ? 'photograph' : 'reasoning'))?.modelId;
-  const activeModelName =
-    loaded[0] ??
-    (routedModelId ? modelById(routedModelId)?.displayName ?? routedModelId : undefined) ??
-    catalogueModels[0]?.displayName ??
-    'No model';
+  const activeModelId = loadedModelIds.find((id) => catalogueModels.some((m) => m.id === id && !m.capabilities.includes('embeddings')))
+    ?? routedModelId ?? catalogueModels[0]?.id;
+  const activeModelName = catalogueModels.find((model) => model.id === activeModelId)?.displayName ?? activeModelId ?? 'No model';
   // Command hints appear while the first word is being typed — after the
   // first space the message is clearly prose that happens to start with '/'.
   const slashHint =
@@ -544,7 +534,7 @@ export const FloatingInput: React.FC<{
                 pill like the rest, so it covers the edge behind itself.
                 Sizes itself to short names, truncates long ones, full name
                 on hover. Opens Models. */}
-            <EffortPicker modelName={activeModelName} />
+            <EffortPicker modelName={activeModelName} modelId={activeModelId} />
           </div>
 
           <textarea

@@ -23,8 +23,6 @@ import {
   Moon,
   Palette,
   Plus,
-  PlugZap,
-  Save,
   Server,
   Shield,
   ShieldAlert,
@@ -44,6 +42,8 @@ import { languageCode, transcription, TRANSCRIPTION_LANGUAGES, type Transcriptio
 import { AuditView } from '../panels/AuditView';
 import { KnowledgeView } from '../panels/KnowledgeView';
 import { MemoryView } from '../panels/MemoryView';
+import { ModelEditor } from './ModelEditor';
+import { McpSettings } from './McpSettings';
 import { ModelManagerView } from '../panels/ModelManagerView';
 import { useColumnResize } from '../layout/useColumnResize';
 import { SIDEBAR_WIDTH_DEFAULT, readStoredWidth, storeWidth } from '../layout/sidebarWidth';
@@ -53,9 +53,6 @@ import type {
   ApprovalPolicy,
   GuardRule,
   GuardRuleEntry,
-  ModelCapability,
-  ModelEntry,
-  McpServerConfig,
   SettingsPage,
   StoreGateDecision,
   SyncExposure,
@@ -545,162 +542,6 @@ function useWorkbenchPreferences() {
   return [value, setValue] as const;
 }
 
-const AddModelDialog: React.FC<{ onClose: () => void; onAdd: (model: ModelEntry) => Promise<void> }> = ({ onClose, onAdd }) => {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  /** Which catalogue arm the entry goes through: local files or a private server. */
-  const [where, setWhere] = useState<'local' | 'server'>('local');
-  const [form, setForm] = useState({
-    id: '',
-    displayName: '',
-    source: '',
-    architecture: 'llama',
-    quantization: 'Q4_K_M',
-    contextSize: '32768',
-    trainedContext: '32768',
-    estimatedVramMb: '4096',
-    fileSizeBytes: '0',
-    backend: 'llama.cpp' as 'llama.cpp' | 'python',
-    priority: 'primary' as ModelEntry['priority'],
-    // Server-model fields. `serverUrl` empty means the global setting applies.
-    serverUrl: '',
-    serverApiKeyEnv: '',
-  });
-
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setError('');
-    if (where === 'local') {
-      if (!form.id.trim() || !form.displayName.trim() || !form.source.trim()) {
-        setError('Model id, display name, and local weights path are required.');
-        return;
-      }
-      setBusy(true);
-      try {
-        await onAdd({
-          id: form.id.trim(),
-          displayName: form.displayName.trim(),
-          backend: form.backend,
-          location: 'this_device',
-          source: form.source.trim(),
-          architecture: form.architecture.trim(),
-          quantization: form.quantization.trim(),
-          contextSize: Number(form.contextSize),
-          trainedContext: Number(form.trainedContext),
-          capabilities: ['general', 'reasoning', 'tools'] satisfies ModelCapability[],
-          estimatedVramMb: Number(form.estimatedVramMb),
-          fileSizeBytes: Number(form.fileSizeBytes),
-          priority: form.priority,
-          note: 'Added from ZeroLeak AI Settings.',
-        });
-        onClose();
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    // Server model: the id the remote server serves it under, the server to
-    // send requests to, and the NAME of the env var holding the credential —
-    // the token itself is the operator's to set in the launch environment.
-    if (!form.id.trim() || !form.displayName.trim() || !form.source.trim()) {
-      setError('Model id, display name, and the server-side model id are required.');
-      return;
-    }
-    setBusy(true);
-    try {
-      await onAdd({
-        id: form.id.trim(),
-        displayName: form.displayName.trim(),
-        backend: 'private_endpoint',
-        location: 'private_server',
-        source: form.source.trim(),
-        architecture: form.architecture.trim() || 'remote',
-        quantization: form.quantization.trim() || 'server-side',
-        contextSize: Number(form.contextSize),
-        trainedContext: Number(form.trainedContext),
-        capabilities: ['general', 'reasoning', 'tools'] satisfies ModelCapability[],
-        estimatedVramMb: Number(form.estimatedVramMb),
-        fileSizeBytes: Number(form.fileSizeBytes),
-        priority: form.priority,
-        note: 'Served by an approved on-prem server.',
-        serverUrl: form.serverUrl.trim() || undefined,
-        serverApiKeyEnv: form.serverApiKeyEnv.trim() || undefined,
-      });
-      onClose();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <form onSubmit={submit} className="w-full max-w-xl rounded-xl border nerve-border bg-[var(--popover)] p-5 text-[var(--popover-foreground)] shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">Add model</h2>
-            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-              {where === 'local'
-                ? 'Register a GGUF/llama.cpp model or a local Python sidecar. URLs are refused by the core.'
-                : 'Register a model served by an approved on-prem server. Requests stay behind the network guard.'}
-            </p>
-          </div>
-          <button type="button" onClick={onClose} className="grid size-8 place-items-center rounded-md hover:bg-[var(--accent)]"><X size={15} /></button>
-        </div>
-        <div className="mt-3 flex gap-1 rounded-md bg-[var(--sidebar)] p-1 text-xs">
-          {(['local', 'server'] as const).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => setWhere(tab)}
-              className={`flex-1 rounded px-2 py-1 ${where === tab ? 'bg-[var(--card)] text-[var(--foreground)]' : 'text-[var(--muted-foreground)]'}`}
-            >
-              {tab === 'local' ? 'This device' : 'On-prem server'}
-            </button>
-          ))}
-        </div>
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-xs">Model id<Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="my-local-model" /></label>
-          <label className="grid gap-1 text-xs">Display name<Input value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} placeholder="My Local Model" /></label>
-          {where === 'local' ? (
-            <label className="col-span-2 grid gap-1 text-xs">Weights path<Input className="font-mono" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} placeholder="C:/models/model.gguf" /></label>
-          ) : (
-            <>
-              <label className="col-span-2 grid gap-1 text-xs">Server-side model id<Input className="font-mono" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} placeholder="gemma-4-e4b" /></label>
-              <label className="col-span-2 grid gap-1 text-xs">
-                Server URL
-                <Input className="font-mono" value={form.serverUrl} onChange={(e) => setForm({ ...form, serverUrl: e.target.value })} placeholder="http://10.0.0.10:8080 — empty uses the approved server in Settings" />
-              </label>
-              <label className="col-span-2 grid gap-1 text-xs">
-                Credential env var
-                <Input className="font-mono" value={form.serverApiKeyEnv} onChange={(e) => setForm({ ...form, serverApiKeyEnv: e.target.value })} placeholder="SOVEREIGN_MODEL_TOKEN — the NAME, never the token" />
-              </label>
-            </>
-          )}
-          {where === 'local' && (
-            <label className="grid gap-1 text-xs">Runtime<Select value={form.backend} onChange={(e) => setForm({ ...form, backend: e.target.value as typeof form.backend })}><option value="llama.cpp">llama.cpp</option><option value="python">Python sidecar</option></Select></label>
-          )}
-          <label className="grid gap-1 text-xs">Priority<Select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value as ModelEntry['priority'] })}><option value="primary">Primary</option><option value="fallback">Fallback</option><option value="specialist">Specialist</option><option value="disabled">Disabled</option></Select></label>
-          <label className="grid gap-1 text-xs">Architecture<Input value={form.architecture} onChange={(e) => setForm({ ...form, architecture: e.target.value })} /></label>
-          <label className="grid gap-1 text-xs">Quantization<Input value={form.quantization} onChange={(e) => setForm({ ...form, quantization: e.target.value })} /></label>
-          <label className="grid gap-1 text-xs">Allocated context<Input type="number" min="1" value={form.contextSize} onChange={(e) => setForm({ ...form, contextSize: e.target.value })} /></label>
-          <label className="grid gap-1 text-xs">Trained context<Input type="number" min="1" value={form.trainedContext} onChange={(e) => setForm({ ...form, trainedContext: e.target.value })} /></label>
-          <label className="grid gap-1 text-xs">Peak VRAM (MiB)<Input type="number" min="0" value={form.estimatedVramMb} onChange={(e) => setForm({ ...form, estimatedVramMb: e.target.value })} /></label>
-          <label className="grid gap-1 text-xs">File bytes<Input type="number" min="0" value={form.fileSizeBytes} onChange={(e) => setForm({ ...form, fileSizeBytes: e.target.value })} /></label>
-        </div>
-        {error && <p className="mt-3 rounded-md bg-[var(--destructive-soft)] px-3 py-2 text-xs text-[var(--destructive)]">{error}</p>}
-        <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="h-8 rounded-md border nerve-border px-3 text-sm hover:bg-[var(--accent)]">Cancel</button>
-          <button disabled={busy} className="zeroleak-primary h-8 rounded-md px-3 text-sm font-medium disabled:opacity-50"><span className="inline-flex items-center gap-1.5"><Save size={13} />{busy ? 'Adding…' : 'Add model'}</span></button>
-        </div>
-      </form>
-    </div>
-  );
-};
-
 /**
  * §16 — passphrase prompt for enabling or disabling the at-rest vault.
  *
@@ -835,7 +676,6 @@ export const SettingsView: React.FC = () => {
   }, []);
   const [prefs, setPrefs] = useWorkbenchPreferences();
   const [addModelOpen, setAddModelOpen] = useState(false);
-  const [mcpDraft, setMcpDraft] = useState({ name: '', command: '', args: '' });
   const [guardDraft, setGuardDraft] = useState<{
     kind: 'protect_path' | 'forbid_command';
     name: string;
@@ -922,19 +762,6 @@ export const SettingsView: React.FC = () => {
     saveAppearance(next);
   };
   const setTool = (id: string, enabled: boolean) => setPrefs({ ...prefs, toolEnabled: { ...prefs.toolEnabled, [id]: enabled } });
-  const saveMcpServer = () => {
-    if (!mcpDraft.name.trim() || !mcpDraft.command.trim()) return;
-    const idBase = mcpDraft.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mcp';
-    const server: McpServerConfig = {
-      id: `${idBase}-${crypto.randomUUID().slice(0, 8)}`,
-      name: mcpDraft.name.trim(),
-      command: mcpDraft.command.trim(),
-      args: mcpDraft.args.split(/\r?\n/).map((arg) => arg.trim()).filter(Boolean),
-      enabled: true,
-    };
-    setApp('mcpServers', [...settings.mcpServers, server]);
-    setMcpDraft({ name: '', command: '', args: '' });
-  };
   const saveGuardRule = () => {
     const pattern = guardDraft.pattern.trim();
     if (!guardDraft.name.trim() || !pattern) return;
@@ -954,18 +781,6 @@ export const SettingsView: React.FC = () => {
     };
     setApp('guardRules', [...settings.guardRules, entry]);
     setGuardDraft({ kind: guardDraft.kind, name: '', pattern: '', note: '' });
-  };
-  const probeMcp = async (server: McpServerConfig) => {
-    setIntegrationStatus((current) => ({ ...current, [server.id]: 'Checking…' }));
-    try {
-      const tools = await core.integrations.probeMcp(server.id);
-      setIntegrationStatus((current) => ({ ...current, [server.id]: `${tools.length} tools available` }));
-    } catch (error) {
-      setIntegrationStatus((current) => ({
-        ...current,
-        [server.id]: error instanceof Error ? error.message : String(error),
-      }));
-    }
   };
   const testWebSearch = async () => {
     setIntegrationStatus((current) => ({ ...current, web: 'Checking…' }));
@@ -1066,8 +881,8 @@ export const SettingsView: React.FC = () => {
           </Section>
           <Section id="private-endpoint" title="Private endpoint" description="Optional on-prem inference only; public endpoints remain blocked.">
             <Row label="Allow approved private server"><Toggle checked={settings.allowPrivateServer} onChange={(value) => setApp('allowPrivateServer', value)} /></Row>
-            <Row label="Display name"><Input disabled={!settings.allowPrivateServer} value={settings.privateServerName} onChange={(e) => setApp('privateServerName', e.target.value)} placeholder="Inference cluster" /></Row>
-            <Row label="Endpoint URL" description="Use an approved private IP address. The exact scheme, port and path boundary are enforced."><Input disabled={!settings.allowPrivateServer} className="w-80 font-mono" value={settings.privateServerUrl} onChange={(e) => setApp('privateServerUrl', e.target.value)} placeholder="http://10.0.0.10:8080" /></Row>
+            <Row label="Display name"><CommitInput disabled={!settings.allowPrivateServer} value={settings.privateServerName} onCommit={(value) => setApp('privateServerName', value)} placeholder="Inference cluster" /></Row>
+            <Row label="Endpoint URL" description="Use an approved private IP address. The exact scheme, port and path boundary are enforced."><CommitInput disabled={!settings.allowPrivateServer} className="w-80 font-mono" value={settings.privateServerUrl} onCommit={(value) => setApp('privateServerUrl', value)} placeholder="http://10.0.0.10:8080" /></Row>
           </Section>
         </>;
 
@@ -1179,7 +994,7 @@ export const SettingsView: React.FC = () => {
             {workspaces.length ? workspaces.map((workspace) => <Row key={workspace.id} label={workspace.name} description={workspace.path}><span className={`text-xs ${workspace.approved ? 'text-[var(--success)]' : 'text-[var(--warning)]'}`}>{workspace.approved ? 'Approved' : 'Blocked'}</span></Row>) : <Row label="No project exceptions" description="Open and approve a project folder from the title bar." />}
           </Section>
           <Section id="network-boundary" title="Network boundary">
-            <Row label="Block public internet" description="Public HTTP destinations are refused by the application guard. Verify OS-level containment separately."><span className="text-xs text-[var(--success)]">Always blocked</span></Row>
+            <Row label="Block public internet" description="Controlled by System → Block public egress. Verify OS-level containment separately."><span className="text-xs text-[var(--muted-foreground)]">{settings.blockPublicInternet ? 'Blocked' : 'Public egress enabled'}</span></Row>
             <Row label="Observed public traffic"><span className={sovereign.publicInternetBytes === 0 ? 'text-xs text-[var(--success)]' : 'text-xs text-[var(--destructive)]'}>{sovereign.publicInternetBytes.toLocaleString()} bytes</span></Row>
           </Section>
         </>;
@@ -1192,45 +1007,8 @@ export const SettingsView: React.FC = () => {
           <Section id="workflow" title="Workflow tools" description="Additional local tools selected for ZeroLeak AI.">
             {TOOL_GROUPS.slice(7).map(([id, label, description, tools]) => <Row key={id} label={label} description={`${description} ${tools}.`}><Toggle checked={prefs.toolEnabled[id] ?? true} onChange={(value) => setTool(id, value)} /></Row>)}
           </Section>
-          <Section id="mcp" title="MCP servers" description="Local stdio servers only. Each launch and tool call requires approval in Agent mode.">
-            {settings.mcpServers.map((server) => (
-              <Row key={server.id} label={server.name} description={`${server.command}${server.args.length ? ` · ${server.args.join(' ')}` : ''}`} stacked>
-                <div className="flex items-center gap-2">
-                  <Toggle
-                    checked={server.enabled}
-                    onChange={(enabled) => setApp('mcpServers', settings.mcpServers.map((item) => item.id === server.id ? { ...item, enabled } : item))}
-                  />
-                  <button onClick={() => void probeMcp(server)} className="h-8 rounded-md border nerve-border px-3 text-xs hover:bg-[var(--accent)]">Check tools</button>
-                  <button
-                    onClick={() => setApp('mcpServers', settings.mcpServers.filter((item) => item.id !== server.id))}
-                    className="grid size-8 place-items-center rounded-md border nerve-border text-[var(--muted-foreground)] hover:bg-[var(--destructive-soft)] hover:text-[var(--destructive)]"
-                    title="Remove MCP server configuration"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                  {integrationStatus[server.id] && <span className="min-w-0 truncate text-xs text-[var(--muted-foreground)]">{integrationStatus[server.id]}</span>}
-                </div>
-              </Row>
-            ))}
-            <Row label="Add local MCP server" description="Use an absolute executable path. Put one argument on each line." stacked>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Input value={mcpDraft.name} onChange={(event) => setMcpDraft({ ...mcpDraft, name: event.target.value })} placeholder="Display name" />
-                <Input className="font-mono" value={mcpDraft.command} onChange={(event) => setMcpDraft({ ...mcpDraft, command: event.target.value })} placeholder="C:/tools/mcp-server.exe" />
-                <textarea
-                  value={mcpDraft.args}
-                  onChange={(event) => setMcpDraft({ ...mcpDraft, args: event.target.value })}
-                  placeholder={'Arguments (one per line)'}
-                  className="sm:col-span-2 min-h-20 rounded-md border border-[var(--input)] bg-[var(--background)] p-2.5 font-mono text-xs text-[var(--foreground)] outline-none"
-                />
-                <button
-                  onClick={saveMcpServer}
-                  disabled={!mcpDraft.name.trim() || !mcpDraft.command.trim()}
-                  className="zeroleak-primary sm:col-span-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-40"
-                >
-                  <PlugZap size={13} /> Add MCP server
-                </button>
-              </div>
-            </Row>
+          <Section id="mcp" title="MCP servers" description="Install or connect a local stdio server, then check its tools.">
+            <McpSettings />
           </Section>
           <Section id="web-search" title="Web search" description="The two public tools — search, and fetching one named page — sit behind this switch. Every public byte still counts in the status bar and the audit log.">
             <Row label="Search method" description="Direct combines independent keyless sources. Provider routes through one search API using the environment variable named below.">
@@ -1249,7 +1027,7 @@ export const SettingsView: React.FC = () => {
                   </Select>
                 </Row>
                 <Row label="API key environment variable" description="Only the variable name is stored. The key itself never enters settings, memory, or a model prompt.">
-                  <Input className="w-64 font-mono" value={settings.webSearchApiKeyEnv} onChange={(event) => setApp('webSearchApiKeyEnv', event.target.value)} placeholder="BRAVE_SEARCH_API_KEY" />
+                  <CommitInput className="w-64 font-mono" value={settings.webSearchApiKeyEnv} onCommit={(value) => setApp('webSearchApiKeyEnv', value)} placeholder="BRAVE_SEARCH_API_KEY" />
                 </Row>
               </>
             )}
@@ -1602,7 +1380,7 @@ export const SettingsView: React.FC = () => {
           {renderPage()}
         </div>
       </main>
-      {addModelOpen && <AddModelDialog onClose={() => setAddModelOpen(false)} onAdd={addCatalogueModel} />}
+      {addModelOpen && <ModelEditor onClose={() => setAddModelOpen(false)} onAdd={addCatalogueModel} />}
       {vaultDialog && <VaultDialog mode={vaultDialog} onClose={() => setVaultDialog(null)} onDone={() => void loadVault()} />}
     </div>
   );

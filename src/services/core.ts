@@ -115,7 +115,8 @@ export const models = {
   /** Live state for every registry entry, straight from the router. */
   list: () => call<ModelRuntime[]>('model_list'),
   catalogue: () => call<ModelEntry[]>('model_catalogue_list'),
-  add: (model: ModelEntry) => call<ModelEntry[]>('model_catalogue_add', { model }),
+  setContext: (modelId: string, contextSize: number | null) => call<ModelEntry[]>('model_context_set', { modelId, contextSize }),
+  add: (model: ModelEntry, replace = false) => call<ModelEntry[]>('model_catalogue_add', { model, replace }),
   routes: () => call<RouteRule[]>('model_routing_list'),
   setRoute: (kind: TaskKind, modelId: string, fallbackModelId?: string) =>
     call<RouteRule[]>('model_routing_set', {
@@ -132,9 +133,15 @@ export const models = {
   evict: (id: string) => call<ModelRuntime>('model_evict', { id }),
   routerStart: () => call<CoreStatus>('router_start'),
   routerStop: () => call<CoreStatus>('router_stop'),
+  routerRestart: () => call<CoreStatus>('router_restart'),
 };
 
+export const pickSettingsPath = (kind: 'model' | 'projector' | 'executable' | 'directory') =>
+  call<string | null>('settings_pick_path', { kind });
+
 export const integrations = {
+  installMcp: (packageSpec: string, nodePath?: string) =>
+    call<import('../types').McpServerConfig>('mcp_install_npm', { packageSpec, nodePath }),
   probeMcp: (serverId: string) => call<McpToolSummary[]>('mcp_probe', { serverId }),
   testWebSearch: (query: string) => call<string>('web_search_test', { query }),
 };

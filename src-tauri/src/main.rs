@@ -67,6 +67,7 @@ mod hardware;
 mod knowledge;
 mod log;
 mod mcp;
+mod mcp_install;
 mod multi_agent;
 mod preview;
 mod registry;

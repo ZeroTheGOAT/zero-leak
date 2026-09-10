@@ -32,7 +32,8 @@
 //! and KV cache than on hand-tuned buffers.
 //!
 //! What that leaves as the real levers, in order of effect:
-//!   1. `n-gpu-layers = 999` — full offload. Everything else is noise beside it.
+//!   1. Full GPU offload when memory permits. The native fitter now selects
+//!      GPU layers automatically so smaller cards can use system RAM too.
 //!   2. KV cache quantisation from the catalogue — what makes a 16384-token
 //!      context fit in 6947 MiB instead of spilling.
 //!   3. `--models-max` plus the VRAM admission check in `make_room` — keeping as
@@ -353,7 +354,8 @@ pub async fn start(st: &Arc<AppState>) -> CoreResult<CoreStatus> {
                     // Bounded: the last 64 KiB is enough to explain a failure
                     // and cannot grow without limit over a long session.
                     if g.len() > 64 * 1024 {
-                        let cut = g.len() - 32 * 1024;
+                        let mut cut = g.len() - 32 * 1024;
+                        while !g.is_char_boundary(cut) { cut += 1; }
                         *g = g.split_off(cut);
                     }
                     g.push_str(&line);
@@ -639,7 +641,7 @@ pub(crate) fn write_preset_ini(st: &AppState) -> CoreResult<(PathBuf, Vec<(Strin
     let (out, skipped) = render_preset_ini(&launched);
     std::fs::write(&path, out)?;
 
-    if !raised.is_empty() {
+    if st.router.lock().map_err(|_| lock_err("router"))?.is_none() {
         let mut reg = st.registry.write().map_err(|_| lock_err("registry"))?;
         reg.set_ctx_overrides(&raised);
     }
@@ -667,7 +669,7 @@ fn render_preset_ini(entries: &[ModelEntry]) -> (String, Vec<(String, String)>) 
             continue;
         }
         // A model served by an approved private server has no local child.
-        if e.location != ModelLocation::ThisDevice {
+        if e.location != ModelLocation::ThisDevice || e.backend != ModelBackend::LlamaCpp {
             continue;
         }
         if !Path::new(&e.source).is_file() {
@@ -700,10 +702,25 @@ fn render_preset_ini(entries: &[ModelEntry]) -> (String, Vec<(String, String)>) 
         if let Some(p) = &e.projector {
             keys.insert("mmproj", p.clone());
         }
-        keys.insert("ctx-size", e.context_size.to_string());
-        // The single flag that matters on this hardware. 999 is "every layer";
-        // the server clamps to the model's actual depth.
-        keys.insert("n-gpu-layers", "999".to_string());
+        // Zero is llama.cpp's auto context mode: its native memory fitter uses
+        // the actual model architecture, trained limit and currently free memory.
+        // One sequence avoids splitting the fitted window across parallel slots.
+        let generation_model = !e.capabilities.contains(&ModelCapability::Embeddings);
+        let auto_context = generation_model && e.context_mode == ContextMode::Auto;
+        keys.insert("ctx-size", if auto_context { "0".into() } else { e.context_limit.unwrap_or(e.context_size).to_string() });
+        if generation_model {
+            keys.insert("fit", "on".into());
+            keys.insert("fit-ctx", "512".into());
+            keys.insert("parallel", "1".into());
+            // The multimodal encoder is separate from the decoder's fitter.
+            // Reserve its on-disk size plus workspace before allocating KV.
+            let projector_mb = e.projector.as_deref().and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len().div_ceil(1024 * 1024)).unwrap_or(0);
+            keys.insert("fit-target", (1024 + projector_mb).to_string());
+        }
+        // Prefer full GPU offload, but permit CPU layers if even the minimum
+        // automatic window cannot fit. Manual context remains fixed during fit.
+        keys.insert("n-gpu-layers", if generation_model { "auto".into() } else { "999".into() });
         if let Some(kv) = &e.kv_cache_type {
             keys.insert("cache-type-k", kv.clone());
             keys.insert("cache-type-v", kv.clone());
@@ -715,6 +732,7 @@ fn render_preset_ini(entries: &[ModelEntry]) -> (String, Vec<(String, String)>) 
         let mut extra = String::new();
         if let Some(opts) = &e.preset_options {
             for (k, v) in opts {
+                if generation_model && ["ctx-size", "c", "LLAMA_ARG_CTX_SIZE", "fit", "fit-ctx", "fit-target", "parallel", "np", "n-parallel", "n-gpu-layers", "ngl", "gpu-layers", "LLAMA_ARG_N_GPU_LAYERS", "LLAMA_ARG_FIT", "LLAMA_ARG_FIT_CTX", "LLAMA_ARG_FIT_TARGET", "LLAMA_ARG_N_PARALLEL"].contains(&k.as_str()) { continue; }
                 extra.push_str(&format!("{k} = {v}\n"));
             }
         }
@@ -799,6 +817,16 @@ pub async fn refresh_models(st: &AppState) -> CoreResult<()> {
         if current == Some(next) {
             continue;
         }
+        if next == ModelState::Loaded {
+            let mut url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/props"))
+                .map_err(|e| CoreError::ExecutionFailed(e.to_string()))?;
+            url.query_pairs_mut().append_pair("model", id);
+            let props = get_json(st, url.as_str(), Some(&key)).await?;
+            let context = context_from_props(&props).ok_or_else(|| CoreError::ModelLoadFailed(format!(
+                "The runtime loaded '{id}' but did not report its context window. Update llama.cpp and restart the model runtime."
+            )))?;
+            st.registry.write().map_err(|_| lock_err("registry"))?.record_loaded_context(id, context);
+        }
         st.set_model_state(id, |m| {
             m.state = next;
             if next == ModelState::Loaded {
@@ -810,6 +838,11 @@ pub async fn refresh_models(st: &AppState) -> CoreResult<()> {
         });
     }
     Ok(())
+}
+
+fn context_from_props(props: &Value) -> Option<u32> {
+    props.pointer("/default_generation_settings/n_ctx").and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
 }
 
 pub async fn load_model(st: &AppState, id: &str) -> CoreResult<ModelRuntime> {
@@ -845,7 +878,7 @@ fn current_runtime(st: &AppState, id: &str) -> CoreResult<ModelRuntime> {
 /// full parse would duplicate llama.cpp's job and would still not prove the
 /// tensors are intact; these two catch every failure that has actually happened
 /// here — a missing file, an LFS pointer, an interrupted copy.
-fn check_weights(entry: &ModelEntry) -> CoreResult<()> {
+pub(crate) fn check_weights(entry: &ModelEntry) -> CoreResult<()> {
     for (path, what) in [(Some(&entry.source), "weights"), (entry.projector.as_ref(), "projector")]
     {
         let Some(path) = path else { continue };
@@ -1082,7 +1115,8 @@ async fn unload(st: &AppState, model_id: &str) -> CoreResult<()> {
 async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
     // The sharing budget is not the ceiling for a model that will be alone on
     // the card. Only a model that cannot fit even by itself is impossible.
-    if want.estimated_vram_mb > registry::vram_solo_mb() {
+    let managed_context = !want.capabilities.contains(&ModelCapability::Embeddings);
+    if !managed_context && want.estimated_vram_mb > registry::vram_solo_mb() {
         return Err(CoreError::InsufficientVram(format!(
             "{} needs about {} MiB and the most a single model may hold on this device is {} MiB of {} MiB total. Nothing was evicted and nothing was loaded.",
             want.display_name,
@@ -1141,7 +1175,7 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
             let reg = st.registry.read().map_err(|_| lock_err("registry"))?;
             in_use
                 .iter()
-                .filter_map(|id| reg.get(id).map(|e| e.estimated_vram_mb))
+                .filter_map(|id| reg.get(id).map(|e| if !e.capabilities.contains(&ModelCapability::Embeddings) { registry::vram_solo_mb() } else { e.estimated_vram_mb }))
                 .sum()
         };
         let resident: Vec<(String, u32, Option<i64>)> = {
@@ -1156,7 +1190,7 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
                 })
                 .filter_map(|r| {
                     reg.get(&r.id)
-                        .map(|e| (r.id.clone(), e.estimated_vram_mb, r.last_used_at))
+                        .map(|e| (r.id.clone(), r.resident_vram_mb.unwrap_or_else(|| if !e.capabilities.contains(&ModelCapability::Embeddings) { registry::vram_solo_mb() } else { e.estimated_vram_mb }), r.last_used_at))
                 })
                 .collect()
         };
@@ -1165,7 +1199,11 @@ async fn make_room(st: &AppState, want: &ModelEntry) -> CoreResult<()> {
         // How many the router is already holding, counting the ones this pass
         // may not touch.
         let live = in_use.len() + resident.len();
-        let fits_bytes = if live == 0 {
+        let fits_bytes = if managed_context {
+            // Maximise context with the device to itself. Wait rather than
+            // evict a model that another live task is using.
+            live == 0
+        } else if live == 0 {
             // Alone on the card: the sharing headroom is not needed.
             want.estimated_vram_mb <= registry::vram_solo_mb()
         } else {
@@ -1988,6 +2026,8 @@ mod preset_ini {
                 architecture: "llama".into(),
                 quantization: "Q4_K_M".into(),
                 context_size: 32_768,
+                context_mode: ContextMode::Auto,
+                context_limit: None,
                 trained_context: 32_768,
                 kv_cache_type: None,
                 capabilities: vec![ModelCapability::General],
@@ -2091,5 +2131,38 @@ mod preset_ini {
         assert!(skipped[0].1.contains("were not found"), "reason: {}", skipped[0].1);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+
+#[cfg(test)]
+mod context_props_tests {
+    use super::*;
+    #[test]
+    fn uses_the_runtime_reported_per_sequence_context() {
+        assert_eq!(context_from_props(&json!({"default_generation_settings":{"n_ctx": 65536}})), Some(65536));
+        assert_eq!(context_from_props(&json!({"default_generation_settings":{"n_ctx": 0}})), None);
+        assert_eq!(context_from_props(&json!({"default_generation_settings":{"n_ctx": 1.5}})), None);
+        assert_eq!(context_from_props(&json!({"n_ctx": 65536})), None);
+    }
+    #[test]
+    fn auto_and_custom_presets_choose_different_memory_policies() {
+        let dir = std::env::temp_dir().join(format!("zeroleak-fit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let weights = dir.join("model.gguf");
+        std::fs::write(&weights, b"test weights").unwrap();
+        let mut model = registry::Registry::load_or_seed(&dir, dir.to_str().unwrap()).unwrap().all()[0].clone();
+        model.source = weights.to_string_lossy().into_owned();
+        model.projector = None;
+        model.capabilities = vec![ModelCapability::General];
+        model.context_mode = ContextMode::Auto;
+        model.context_size = 8192;
+        let (auto, _) = render_preset_ini(&[model.clone()]);
+        assert!(auto.contains("ctx-size = 0\n") && auto.contains("fit = on\n") && auto.contains("parallel = 1\n") && auto.contains("n-gpu-layers = auto\n"));
+        model.context_mode = ContextMode::Manual;
+        model.context_limit = Some(131072);
+        let (manual, _) = render_preset_ini(&[model]);
+        assert!(manual.contains("ctx-size = 131072\n") && manual.contains("n-gpu-layers = auto\n"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
